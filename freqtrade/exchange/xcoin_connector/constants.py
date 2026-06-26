@@ -2,6 +2,13 @@
 
 XCOIN_DEFAULT_BASE_URL = "https://api.xcoin.com/api"
 
+# XCoin "businessType" values used across public/private endpoints.
+XCOIN_BUSINESS_SPOT = "spot"
+XCOIN_BUSINESS_LINEAR_PERPETUAL = "linear_perpetual"
+
+# Suffix XCoin uses for U-margined perpetual symbols, e.g. ``BTC-USDT-PERP``.
+XCOIN_PERP_SUFFIX = "PERP"
+
 XCOIN_TIMEFRAMES = {
     "1m": "1m",
     "3m": "3m",

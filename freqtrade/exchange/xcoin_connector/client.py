@@ -15,7 +15,10 @@ from urllib.parse import urlencode
 import ccxt
 import requests
 
-from freqtrade.exchange.xcoin_connector.constants import XCOIN_DEFAULT_BASE_URL
+from freqtrade.exchange.xcoin_connector.constants import (
+    XCOIN_BUSINESS_SPOT,
+    XCOIN_DEFAULT_BASE_URL,
+)
 
 
 class XCoinClient:
@@ -47,6 +50,7 @@ class XCoinClient:
         data: dict[str, Any] | None = None,
         private: bool = False,
     ) -> dict[str, Any]:
+        method = method.upper()
         query = self._query(params)
         body = self._body(data)
         headers = {"Content-Type": "application/json"}
@@ -65,7 +69,7 @@ class XCoinClient:
         url = f"{self.base_url}{path}{query}"
         try:
             response = self._http.request(
-                method.upper(),
+                method,
                 url,
                 data=body or None,
                 headers=headers,
@@ -74,6 +78,8 @@ class XCoinClient:
         except requests.RequestException as e:
             raise ccxt.NetworkError(str(e)) from e
 
+        if response.status_code == 429:
+            raise ccxt.DDoSProtection(f"XCoin HTTP {response.status_code}: {response.text}")
         if response.status_code >= 500:
             raise ccxt.ExchangeNotAvailable(f"XCoin HTTP {response.status_code}")
         if response.status_code != 200:
@@ -84,29 +90,49 @@ class XCoinClient:
             raise ccxt.ExchangeError("XCoin returned invalid JSON") from e
         return self._handle_response(payload)
 
-    def public_symbols(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def public_symbols(
+        self, params: dict[str, Any] | None = None, business_type: str = XCOIN_BUSINESS_SPOT
+    ) -> dict[str, Any]:
         return self.request(
             "GET",
             "/v2/public/symbols",
-            params={"businessType": "spot", **(params or {})},
+            params={"businessType": business_type, **(params or {})},
         )
 
     def ticker_mini(
-        self, symbol: str | None = None, params: dict[str, Any] | None = None
+        self,
+        symbol: str | None = None,
+        params: dict[str, Any] | None = None,
+        business_type: str = XCOIN_BUSINESS_SPOT,
     ) -> dict[str, Any]:
-        request_params = {"businessType": "spot", **(params or {})}
+        request_params = {"businessType": business_type, **(params or {})}
         if symbol:
             request_params["symbol"] = symbol
         return self.request("GET", "/v1/market/ticker/mini", params=request_params)
 
+    def ticker_24hr(
+        self,
+        symbol: str | None = None,
+        params: dict[str, Any] | None = None,
+        business_type: str = XCOIN_BUSINESS_SPOT,
+    ) -> dict[str, Any]:
+        request_params = {"businessType": business_type, **(params or {})}
+        if symbol:
+            request_params["symbol"] = symbol
+        return self.request("GET", "/v1/market/ticker/24hr", params=request_params)
+
     def depth(
-        self, symbol: str, limit: int | None = 100, params: dict[str, Any] | None = None
+        self,
+        symbol: str,
+        limit: int | None = 100,
+        params: dict[str, Any] | None = None,
+        business_type: str = XCOIN_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         return self.request(
             "GET",
             "/v1/market/depth",
             params={
-                "businessType": "spot",
+                "businessType": business_type,
                 "symbol": symbol,
                 "limit": limit or 100,
                 **(params or {}),
@@ -121,9 +147,10 @@ class XCoinClient:
         since: int | None = None,
         limit: int | None = None,
         params: dict[str, Any] | None = None,
+        business_type: str = XCOIN_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         request_params = {
-            "businessType": "spot",
+            "businessType": business_type,
             "symbol": symbol,
             "period": period,
             "limit": min(limit or 1000, 1000),
@@ -133,11 +160,104 @@ class XCoinClient:
             request_params["startTime"] = since
         return self.request("GET", "/v1/market/kline", params=request_params)
 
+    def mark_price_klines(
+        self,
+        symbol: str,
+        period: str,
+        *,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+        business_type: str = XCOIN_BUSINESS_SPOT,
+    ) -> dict[str, Any]:
+        request_params = {
+            "businessType": business_type,
+            "symbol": symbol,
+            "period": period,
+            "limit": min(limit or 1000, 1000),
+            **(params or {}),
+        }
+        if since:
+            request_params["startTime"] = since
+        return self.request("GET", "/v1/market/markPriceKline", params=request_params)
+
+    def index_price_klines(
+        self,
+        symbol_family: str,
+        period: str,
+        *,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_params = {
+            "symbolFamily": symbol_family,
+            "period": period,
+            "limit": min(limit or 1000, 1000),
+            **(params or {}),
+        }
+        if since:
+            request_params["startTime"] = since
+        return self.request("GET", "/v1/market/indexPriceKline", params=request_params)
+
+    def funding_rate(
+        self, symbol: str | None = None, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        request_params = dict(params or {})
+        if symbol:
+            request_params["symbol"] = symbol
+        return self.request("GET", "/v1/market/fundingRate", params=request_params)
+
+    def funding_rate_history(
+        self,
+        symbol: str,
+        *,
+        begin_time: int | None = None,
+        end_time: int | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_params = {"symbol": symbol, **(params or {})}
+        if begin_time:
+            request_params["beginTime"] = begin_time
+        if end_time:
+            request_params["endTime"] = end_time
+        if limit:
+            request_params["limit"] = min(limit, 5000)
+        return self.request("GET", "/v1/market/fundingRate/history", params=request_params)
+
     def balance(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.request(
             "GET",
             "/v1/account/balance",
             params=self.private_params(params),
+            private=True,
+        )
+
+    def positions(
+        self,
+        symbol: str | None = None,
+        params: dict[str, Any] | None = None,
+        business_type: str | None = None,
+    ) -> dict[str, Any]:
+        request_params: dict[str, Any] = {}
+        if symbol:
+            request_params["symbol"] = symbol
+        if business_type:
+            request_params["businessType"] = business_type
+        request_params.update(params or {})
+        return self.request(
+            "GET",
+            "/v2/trade/positions",
+            params=self.private_params(request_params),
+            private=True,
+        )
+
+    def set_leverage(self, data: dict[str, Any]) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/v1/trade/lever",
+            data=self.private_params(data),
             private=True,
         )
 
@@ -198,12 +318,30 @@ class XCoinClient:
         if code == "0":
             return payload
         msg = payload.get("msg") or payload.get("message") or "XCoin API error"
-        if code in {"11004", "14001"}:
+        if code in {"10005", "10006", "11004", "14001"}:
             raise ccxt.DDoSProtection(msg)
+        if code in {
+            "10101",
+            "10102",
+            "10103",
+            "10104",
+            "10105",
+            "10107",
+            "10109",
+            "10110",
+            "10111",
+            "10112",
+            "10114",
+            "10115",
+            "10116",
+            "10123",
+            "10124",
+        }:
+            raise ccxt.AuthenticationError(msg)
         if code in {"40013", "20010"}:
             raise ccxt.OrderNotFound(msg)
-        if code in {"60103", "60104", "60106"}:
+        if code in {"60100", "60101", "60102", "60103", "60104", "60106"}:
             raise ccxt.InsufficientFunds(msg)
-        if code.startswith("5") or code.startswith("4"):
+        if code.startswith("5") or code.startswith("4") or code.startswith("601"):
             raise ccxt.InvalidOrder(msg)
         raise ccxt.ExchangeError(f"{code}: {msg}")

@@ -1,11 +1,19 @@
+import hmac
 from copy import deepcopy
+from hashlib import sha256
 
+import ccxt
 import pytest
 
 from freqtrade.enums import CandleType, RunMode
+from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import Xcoin
 from freqtrade.exchange.check_exchange import check_exchange
-from freqtrade.exchange.xcoin_connector import XCoinClient
+from freqtrade.exchange.xcoin_connector import (
+    XCoinClient,
+    ccxt_symbol_to_xcoin,
+    xcoin_symbol_to_ccxt,
+)
 from freqtrade.resolvers.exchange_resolver import ExchangeResolver
 
 
@@ -36,24 +44,35 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
     if path == "/v2/public/symbols":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": [
                 {
                     "businessType": "spot",
                     "symbol": "BTC-USDT",
+                    "symbolFamily": "BTC-USDT",
                     "quoteCurrency": "USDT",
                     "baseCurrency": "BTC",
                     "settleCurrency": "USDT",
-                    "tickSize": "0.01",
+                    "ctVal": "0",
+                    "tickSize": "0.1",
                     "status": "trading",
-                    "pricePrecision": "2",
-                    "quantityPrecision": "6",
+                    "pricePrecision": "1",
+                    "quantityPrecision": "5",
                     "orderParameters": {
                         "minOrderQty": "0.00001",
                         "minOrderAmt": "5",
-                        "maxLmtOrderQty": "100",
-                        "maxLmtOrderAmt": "1000000",
+                        "maxOrderNum": "500",
+                        "maxLmtOrderQty": None,
+                        "maxMktOrderQty": None,
+                        "maxLmtOrderAmt": "2000000",
+                        "maxMktOrderAmt": "100000",
                     },
+                    "priceParameters": {
+                        "maxLmtPriceUp": "0.03",
+                        "minLmtPriceDown": "0.03",
+                    },
+                    "positionParameters": None,
+                    "group": ["0.1", "1", "10", "100"],
                 }
             ],
             "ts": "1732193257273",
@@ -61,9 +80,10 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
     if path == "/v1/market/ticker/mini":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": [
                 {
+                    "businessType": "spot",
                     "symbol": "BTC-USDT",
                     "priceChange": "10",
                     "priceChangePercent": "0.01",
@@ -78,7 +98,7 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
     if path == "/v1/market/depth":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": {
                 "bids": [["79999.99", "0.5"]],
                 "asks": [["80000.01", "0.4"]],
@@ -89,7 +109,7 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
     if path == "/v1/market/kline":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": [
                 [
                     "5m",
@@ -127,19 +147,23 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
     if path == "/v1/account/balance":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": {
                 "details": [
                     {
                         "currency": "USDT",
+                        "equity": "100",
                         "totalBalance": "100",
                         "cashBalance": "80",
+                        "savingBalance": "0",
                         "frozen": "20",
                     },
                     {
                         "currency": "BTC",
+                        "equity": "0.5",
                         "totalBalance": "0.5",
                         "cashBalance": "0.4",
+                        "savingBalance": "0",
                         "frozen": "0.1",
                     },
                 ]
@@ -161,7 +185,7 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
             raise AssertionError(f"Unexpected XCoin order type: {data['orderType']}")
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": {"orderId": "1322590062927904769", "clientOrderId": "Client1001"},
             "ts": "1732193257273",
         }
@@ -170,15 +194,16 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
         assert data["orderId"] == "1322590062927904769"
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": {"orderId": "1322590062927904769"},
             "ts": "1732193257273",
         }
     if path == "/v2/trade/order/info":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": {
+                "id": "1322590062927904769",
                 "businessType": "spot",
                 "symbol": "BTC-USDT",
                 "orderId": "1322590062927904769",
@@ -202,9 +227,10 @@ def _xcoin_response(method, path, params=None, data=None, private=False):
     if path == "/v2/trade/openOrders":
         return {
             "code": "0",
-            "msg": "success",
+            "msg": "Success",
             "data": [
                 {
+                    "id": "1322590062927904769",
                     "businessType": "spot",
                     "symbol": "BTC-USDT",
                     "orderId": "1322590062927904769",
@@ -236,6 +262,54 @@ def _patch_xcoin_request(mocker):
 
     mocker.patch.object(XCoinClient, "request", fake_request)
     return calls
+
+
+def test_xcoin_client_signing_uses_document_shape():
+    client = XCoinClient({"secret": "test-secret"})
+    timestamp = "1756377216596"
+    path = "/v2/trade/order"
+    query = client._query({"symbol": "BTC-USDT", "businessType": "spot"})
+    body = client._body(
+        {
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "orderType": "limit",
+            "qty": "0.02",
+            "price": "90000",
+            "marketUnit": "baseCoin",
+            "timeInForce": "gtc",
+            "ignored": None,
+        }
+    )
+
+    assert query == "?businessType=spot&symbol=BTC-USDT"
+    assert body == (
+        '{"symbol":"BTC-USDT","side":"buy","orderType":"limit","qty":"0.02",'
+        '"price":"90000","marketUnit":"baseCoin","timeInForce":"gtc"}'
+    )
+    expected = hmac.new(
+        b"test-secret",
+        f"{timestamp}POST{path}{query}{body}".encode(),
+        sha256,
+    ).hexdigest()
+
+    assert client._sign(timestamp, "post", path, query, body) == expected
+
+
+@pytest.mark.parametrize(
+    ("code", "exception"),
+    [
+        ("14001", ccxt.DDoSProtection),
+        ("10112", ccxt.AuthenticationError),
+        ("40013", ccxt.OrderNotFound),
+        ("50006", ccxt.InvalidOrder),
+        ("60101", ccxt.InsufficientFunds),
+        ("60117", ccxt.InvalidOrder),
+    ],
+)
+def test_xcoin_client_error_mapping(code, exception):
+    with pytest.raises(exception):
+        XCoinClient()._handle_response({"code": code, "msg": "boom"})
 
 
 def test_check_exchange_accepts_native_xcoin(default_conf):
@@ -376,4 +450,443 @@ def test_xcoin_live_requires_explicit_enable(default_conf, mocker, monkeypatch):
     conf["exchange"]["xcoin_live_trading_enabled"] = False
 
     with pytest.raises(Exception, match="XCoin live trading is disabled"):
+        ExchangeResolver.load_exchange(conf)
+
+
+# ---------------------------------------------------------------------------
+# Linear perpetual (U-margined futures) support
+# ---------------------------------------------------------------------------
+
+
+def _xcoin_futures_config(default_conf: dict, *, dry_run: bool = True) -> dict:
+    conf = deepcopy(default_conf)
+    conf.update(
+        {
+            "dry_run": dry_run,
+            "stake_currency": "USDT",
+            "stake_amount": 25,
+            "timeframe": "5m",
+            "trading_mode": "futures",
+            "margin_mode": "cross",
+        }
+    )
+    conf["exchange"].update(
+        {
+            "name": "xcoin",
+            "pair_whitelist": ["BTC/USDT:USDT"],
+            "pair_blacklist": [],
+            "xcoin_live_trading_enabled": not dry_run,
+        }
+    )
+    return conf
+
+
+def _xcoin_futures_response(method, path, params=None, data=None, private=False):
+    params = params or {}
+    if path == "/v2/public/symbols":
+        assert params.get("businessType") == "linear_perpetual"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                {
+                    "businessType": "linear_perpetual",
+                    "symbol": "BTC-USDT-PERP",
+                    "symbolFamily": "BTC-USDT",
+                    "quoteCurrency": "USDT",
+                    "baseCurrency": "BTC",
+                    "settleCurrency": "USDT",
+                    "ctVal": "0.0001",
+                    "tickSize": "0.1",
+                    "status": "trading",
+                    "pricePrecision": "1",
+                    "quantityPrecision": "4",
+                    "riskEngineRate": "0.02",
+                    "maxLeverage": "75",
+                    "orderParameters": {
+                        "minOrderQty": "0.0001",
+                        "minOrderAmt": None,
+                        "maxLmtOrderQty": "50",
+                        "maxMktOrderQty": "1",
+                        "maxLmtOrderAmt": None,
+                        "maxMktOrderAmt": None,
+                    },
+                }
+            ],
+            "ts": "1769133527828",
+        }
+    if path == "/v1/market/ticker/mini":
+        assert params.get("businessType") == "linear_perpetual"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                {
+                    "businessType": "linear_perpetual",
+                    "symbol": "BTC-USDT-PERP",
+                    "lastPrice": "90000",
+                    "priceChange": "10",
+                    "priceChangePercent": "0.01",
+                    "fillQty": "1.2",
+                    "fillAmount": "108000",
+                    "baseCurrency": "BTC",
+                }
+            ],
+            "ts": "1769133527828",
+        }
+    if path == "/v1/market/depth":
+        assert params.get("businessType") == "linear_perpetual"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": {
+                "bids": [["89999.9", "0.5"]],
+                "asks": [["90000.1", "0.4"]],
+                "lastUpdateId": "5001",
+            },
+            "ts": "1769133527828",
+        }
+    if path == "/v1/market/kline":
+        assert params.get("businessType") == "linear_perpetual"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                ["5m", "1769131800000", "1769132099999", "89600", "89700",
+                 "89800", "89500", "444.6", "39895537", "238", "100", "0.001"],
+            ],
+            "ts": "1769133527828",
+        }
+    if path == "/v1/market/markPriceKline":
+        assert params.get("businessType") == "linear_perpetual"
+        assert params.get("symbol") == "BTC-USDT-PERP"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                ["5m", "1769131800000", "1769132099999", "89610", "89720", "89810", "89510"],
+            ],
+            "ts": "1769133527828",
+        }
+    if path == "/v1/market/indexPriceKline":
+        assert params.get("symbolFamily") == "BTC-USDT"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                ["5m", "1769131800000", "1769132099999", "89620", "89730", "89820", "89520"],
+            ],
+            "ts": "1769133527828",
+        }
+    if path == "/v1/market/fundingRate/history":
+        assert params.get("symbol") == "BTC-USDT-PERP"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                {"symbol": "BTC-USDT-PERP", "fundingRate": "0.0001",
+                 "fundingTime": "1769040000000", "markPrice": "90000"},
+                {"symbol": "BTC-USDT-PERP", "fundingRate": "-0.0002",
+                 "fundingTime": "1769011200000", "markPrice": "89500"},
+            ],
+            "ts": "1769133527828",
+        }
+
+    assert private
+    if path == "/v1/account/balance":
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": {
+                "totalEquity": "1000",
+                "totalMarginBalance": "1000",
+                "totalAvailableBalance": "800",
+                "details": [
+                    {"currency": "USDT", "equity": "1000", "totalBalance": "0",
+                     "cashBalance": "0", "frozen": "0"},
+                ],
+            },
+            "ts": "1769133527828",
+        }
+    if path == "/v2/trade/order":
+        assert method == "POST"
+        assert data["symbol"] == "BTC-USDT-PERP"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": {"orderId": "1322590060595871744", "clientOrderId": "ftperp1"},
+            "ts": "1769133527828",
+        }
+    if path == "/v1/trade/lever":
+        assert method == "POST"
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": {"symbol": data.get("symbol"), "lever": data.get("lever")},
+            "ts": "1769133527828",
+        }
+    if path == "/v2/trade/positions":
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": [
+                {
+                    "positionId": "15762598695810131",
+                    "businessType": "linear_perpetual",
+                    "symbol": "BTC-USDT-PERP",
+                    "positionQty": "-2",
+                    "avgPrice": "93921.6",
+                    "upl": "0.662",
+                    "lever": 2,
+                    "liquidationPrice": "140063.17",
+                    "markPrice": "93888.5",
+                    "im": "1877.77",
+                    "mm": "0.02",
+                    "indexPrice": "93877.2",
+                }
+            ],
+            "ts": "1769133527828",
+        }
+    raise AssertionError(f"Unhandled XCoin futures mock path: {method} {path}")
+
+
+def _patch_xcoin_futures_request(mocker):
+    calls = []
+
+    def fake_request(self, method, path, *, params=None, data=None, private=False):
+        calls.append((method, path, params, data, private))
+        return _xcoin_futures_response(method, path, params=params, data=data, private=private)
+
+    mocker.patch.object(XCoinClient, "request", fake_request)
+    return calls
+
+
+def test_xcoin_symbol_conversion_handles_perp():
+    assert xcoin_symbol_to_ccxt("BTC-USDT-PERP") == "BTC/USDT:USDT"
+    assert ccxt_symbol_to_xcoin("BTC/USDT:USDT") == "BTC-USDT-PERP"
+    # Spot conversions stay intact.
+    assert xcoin_symbol_to_ccxt("BTC-USDT") == "BTC/USDT"
+    assert ccxt_symbol_to_xcoin("BTC/USDT") == "BTC-USDT"
+    # Idempotency / round-trip.
+    assert xcoin_symbol_to_ccxt(ccxt_symbol_to_xcoin("ETH/USDT:USDT")) == "ETH/USDT:USDT"
+
+
+def test_xcoin_parses_perpetual_market(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf))
+
+    market = exchange.markets["BTC/USDT:USDT"]
+    assert market["id"] == "BTC-USDT-PERP"
+    assert market["type"] == "swap"
+    assert market["swap"] is True
+    assert market["linear"] is True
+    assert market["spot"] is False
+    assert market["contract"] is True
+    assert market["contractSize"] == 0.0001
+    assert market["settle"] == "USDT"
+    # Core market_is_future must accept this market.
+    assert exchange.market_is_future(market) is True
+    # ctVal=0.0001 => contract amount precision is whole contracts, min 1 contract.
+    assert market["precision"]["amount"] == 0
+    assert market["limits"]["amount"]["min"] == 1.0
+    # get_contract_size reads contractSize.
+    assert exchange.get_contract_size("BTC/USDT:USDT") == 0.0001
+    # Perpetual trading fees configured as 0 (current account tier).
+    assert market["maker"] == 0.0
+    assert market["taker"] == 0.0
+
+
+def test_xcoin_fetch_ohlcv_routes_mark_and_index(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    calls = _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf))
+
+    mark = exchange._api.fetch_ohlcv("BTC/USDT:USDT", "5m", params={"price": "mark"})
+    assert mark[0][1] == 89610  # open from markPriceKline
+    assert mark[0][5] == 0.0  # mark candles carry no volume
+    assert any(call[1] == "/v1/market/markPriceKline" for call in calls)
+
+    index = exchange._api.fetch_ohlcv("BTC/USDT:USDT", "5m", params={"price": "index"})
+    assert index[0][1] == 89620
+    assert index[0][5] == 0.0
+    assert any(call[1] == "/v1/market/indexPriceKline" for call in calls)
+
+    regular = exchange._api.fetch_ohlcv("BTC/USDT:USDT", "5m")
+    assert regular[0][5] == 444.6  # regular klines keep traded volume
+
+
+def test_xcoin_futures_open_order_converts_contracts(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    calls = _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    order = exchange.create_order(
+        pair="BTC/USDT:USDT",
+        ordertype="limit",
+        side="buy",
+        amount=0.001,  # base BTC -> 10 contracts (ctVal 0.0001)
+        rate=90000,
+        leverage=3,
+    )
+    assert order["id"] == "1322590060595871744"
+
+    order_calls = [c for c in calls if c[1] == "/v2/trade/order"]
+    body = order_calls[-1][3]
+    # 10 contracts * ctVal(0.0001) == 0.001 coin
+    assert float(body["qty"]) == 0.001
+    assert body["marketUnit"] == "baseCoin"
+    assert "reduceOnly" not in body
+    # Opening a position sets leverage first (currency/symbol level).
+    lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
+    assert lever_calls and lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert float(lever_calls[-1][3]["lever"]) == 3
+
+
+def test_xcoin_futures_reduce_only_order(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    calls = _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    exchange.create_order(
+        pair="BTC/USDT:USDT",
+        ordertype="market",
+        side="sell",
+        amount=0.001,
+        rate=90000,
+        leverage=3,
+        reduceOnly=True,
+    )
+    order_calls = [c for c in calls if c[1] == "/v2/trade/order"]
+    body = order_calls[-1][3]
+    assert body["reduceOnly"] is True
+    assert body["orderType"] == "market"
+    # reduceOnly orders must not re-prepare leverage.
+    assert all(c[1] != "/v1/trade/lever" for c in calls)
+
+
+def test_xcoin_fetch_positions_mapping(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    positions = exchange.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    pos = positions[0]
+    assert pos["symbol"] == "BTC/USDT:USDT"
+    assert pos["side"] == "short"
+    # positionQty -2 coin / ctVal 0.0001 => 20000 contracts
+    assert pos["contracts"] == 20000.0
+    assert pos["leverage"] == 2
+    assert pos["entryPrice"] == 93921.6
+    assert pos["liquidationPrice"] == 140063.17
+    assert pos["marginMode"] == "cross"
+
+
+def test_xcoin_set_leverage_calls_lever_endpoint(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    calls = _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    exchange._set_leverage(5.0, "BTC/USDT:USDT")
+    lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
+    assert lever_calls
+    assert lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert float(lever_calls[-1][3]["lever"]) == 5.0
+
+
+def test_xcoin_futures_balance_exposes_cross_equity(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    balances = exchange.get_balances()
+    assert balances["USDT"]["total"] == 1000.0
+    assert balances["USDT"]["free"] == 800.0
+    assert balances["USDT"]["used"] == 200.0
+
+
+def test_xcoin_dry_run_liquidation_and_maintenance(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf))
+
+    mm_ratio, maint_amt = exchange.get_maintenance_ratio_and_amt("BTC/USDT:USDT", 900.0)
+    assert mm_ratio == 0.02
+    assert maint_amt is None
+
+    long_liq = exchange.dry_run_liquidation_price(
+        pair="BTC/USDT:USDT",
+        open_rate=90000.0,
+        is_short=False,
+        amount=0.01,
+        stake_amount=90.0,
+        leverage=10.0,
+        wallet_balance=90.0,
+        open_trades=[],
+    )
+    assert long_liq is not None and long_liq < 90000.0
+
+    short_liq = exchange.dry_run_liquidation_price(
+        pair="BTC/USDT:USDT",
+        open_rate=90000.0,
+        is_short=True,
+        amount=0.01,
+        stake_amount=90.0,
+        leverage=10.0,
+        wallet_balance=90.0,
+        open_trades=[],
+    )
+    assert short_liq is not None and short_liq > 90000.0
+
+    # No position size -> cannot compute -> None (core tolerates None).
+    assert (
+        exchange.dry_run_liquidation_price(
+            pair="BTC/USDT:USDT",
+            open_rate=90000.0,
+            is_short=False,
+            amount=0.0,
+            stake_amount=90.0,
+            leverage=10.0,
+            wallet_balance=90.0,
+            open_trades=[],
+        )
+        is None
+    )
+
+
+def test_xcoin_funding_rate_history_parsed(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf))
+
+    # Real funding-rate history is wired up (not modelled as zero).
+    assert exchange.exchange_has("fetchFundingRateHistory") is True
+
+    history = exchange._api.fetch_funding_rate_history("BTC/USDT:USDT")
+    assert len(history) == 2
+    # Returned ascending by timestamp.
+    assert history[0]["timestamp"] == 1769011200000
+    assert history[0]["fundingRate"] == -0.0002
+    assert history[1]["fundingRate"] == 0.0001
+    assert history[1]["symbol"] == "BTC/USDT:USDT"
+
+
+def test_xcoin_futures_rejects_isolated_margin(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    conf = _xcoin_futures_config(default_conf)
+    conf["margin_mode"] = "isolated"
+
+    with pytest.raises(OperationalException):
         ExchangeResolver.load_exchange(conf)
