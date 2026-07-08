@@ -740,9 +740,10 @@ def test_xcoin_futures_open_order_converts_contracts(default_conf, mocker, monke
     assert float(body["qty"]) == 0.001
     assert body["marketUnit"] == "baseCoin"
     assert "reduceOnly" not in body
-    # Opening a position sets leverage first (currency/symbol level).
+    # Opening a position sets XCoin's coin-level cross leverage first.
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
-    assert lever_calls and lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert lever_calls and lever_calls[-1][3]["currency"] == "BTC"
+    assert "symbol" not in lever_calls[-1][3]
     assert float(lever_calls[-1][3]["lever"]) == 3
 
 
@@ -797,8 +798,21 @@ def test_xcoin_set_leverage_calls_lever_endpoint(default_conf, mocker, monkeypat
     exchange._set_leverage(5.0, "BTC/USDT:USDT")
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
     assert lever_calls
-    assert lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
-    assert float(lever_calls[-1][3]["lever"]) == 5.0
+    assert lever_calls[-1][3]["currency"] == "BTC"
+    assert "symbol" not in lever_calls[-1][3]
+    assert lever_calls[-1][3]["lever"] == "5"
+
+
+def test_xcoin_set_leverage_formats_float_as_integer(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    calls = _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    exchange._set_leverage(1.0, "BTC/USDT:USDT")
+    lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
+    assert lever_calls[-1][3]["currency"] == "BTC"
+    assert lever_calls[-1][3]["lever"] == "1"
 
 
 def test_xcoin_futures_balance_exposes_cross_equity(default_conf, mocker, monkeypatch):

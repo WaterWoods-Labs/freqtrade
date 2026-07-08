@@ -86,6 +86,15 @@ def _str_num(value: float | int | str | None) -> str | None:
     return str(value)
 
 
+def _str_positive_int(value: float | int | str | None, name: str) -> str:
+    if value is None:
+        raise ccxt.BadRequest(f"{name} is required")
+    parsed = float(value)
+    if parsed <= 0 or not parsed.is_integer():
+        raise ccxt.BadRequest(f"{name} must be a positive integer")
+    return str(int(parsed))
+
+
 def _first_present(*values: Any) -> Any:
     for value in values:
         if value not in (None, ""):
@@ -176,6 +185,13 @@ class XCoinSync:
         return market_id[: -(len(XCOIN_PERP_SUFFIX) + 1)] if market_id.endswith(
             f"-{XCOIN_PERP_SUFFIX}"
         ) else market_id
+
+    def _base_currency(self, symbol: str) -> str:
+        market = self._market(symbol)
+        if base := market.get("base"):
+            return str(base)
+        market_id = self.market_id(symbol)
+        return market_id.split("-")[0]
 
     def _request(
         self,
@@ -720,9 +736,14 @@ class XCoinSync:
         symbol: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"lever": _str_num(leverage)}
+        body: dict[str, Any] = {"lever": _str_positive_int(leverage, "lever")}
         if symbol:
-            body["symbol"] = self.market_id(symbol)
+            if self._is_futures_symbol(symbol):
+                # XCoin futures leverage is coin-level cross margin. Use `currency`
+                # so Freqtrade's pair-level leverage hook maps to the exchange scope.
+                body["currency"] = self._base_currency(symbol)
+            else:
+                body["symbol"] = self.market_id(symbol)
         body.update(params or {})
         return self.client.set_leverage(body)
 
