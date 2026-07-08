@@ -1,12 +1,13 @@
 import hmac
 from copy import deepcopy
+from datetime import datetime, timezone
 from hashlib import sha256
 
 import ccxt
 import pytest
 
 from freqtrade.enums import CandleType, RunMode
-from freqtrade.exceptions import OperationalException
+from freqtrade.exceptions import ExchangeError, OperationalException
 from freqtrade.exchange import Xcoin
 from freqtrade.exchange.check_exchange import check_exchange
 from freqtrade.exchange.xcoin_connector import (
@@ -893,6 +894,24 @@ def test_xcoin_funding_rate_history_parsed(default_conf, mocker, monkeypatch):
     assert history[0]["fundingRate"] == -0.0002
     assert history[1]["fundingRate"] == 0.0001
     assert history[1]["symbol"] == "BTC/USDT:USDT"
+
+
+def test_xcoin_get_funding_fees_uses_rate_history(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+    helper = mocker.patch.object(exchange, "_fetch_and_calculate_funding_fees", return_value=1.23)
+
+    open_date = datetime(2026, 1, 22, tzinfo=timezone.utc)
+
+    assert exchange.get_funding_fees("BTC/USDT:USDT", 0.1, True, open_date) == 1.23
+    helper.assert_called_once_with("BTC/USDT:USDT", 0.1, True, open_date)
+
+    helper.reset_mock(side_effect=True)
+    helper.side_effect = ExchangeError("funding unavailable")
+
+    assert exchange.get_funding_fees("BTC/USDT:USDT", 0.1, True, open_date) == 0.0
 
 
 def test_xcoin_futures_rejects_isolated_margin(default_conf, mocker, monkeypatch):

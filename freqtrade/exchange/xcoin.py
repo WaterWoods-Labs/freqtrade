@@ -2,11 +2,12 @@
 
 import logging
 import os
+from datetime import datetime
 from typing import Any
 
 from freqtrade.constants import ExchangeConfig
 from freqtrade.enums import MarginMode, TradingMode
-from freqtrade.exceptions import OperationalException
+from freqtrade.exceptions import ExchangeError, OperationalException
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
 from freqtrade.exchange.xcoin_api import XCoinAsync, XCoinSync
@@ -190,6 +191,22 @@ class Xcoin(Exchange):
                 f"Maintenance margin rate for {pair} is unavailable for {self.name}"
             )
         return (float(risk_rate), None)
+
+    def get_funding_fees(
+        self, pair: str, amount: float, is_short: bool, open_date: datetime
+    ) -> float:
+        """Calculate futures funding fees from funding-rate history.
+
+        XCoin exposes funding-rate history, but no settled funding-fee ledger
+        compatible with ccxt's ``fetch_funding_history``. Use the same
+        calculation path as other futures exchanges without that ledger.
+        """
+        if self.trading_mode == TradingMode.FUTURES:
+            try:
+                return self._fetch_and_calculate_funding_fees(pair, amount, is_short, open_date)
+            except ExchangeError:
+                logger.warning(f"Could not update funding fees for {pair}.")
+        return 0.0
 
     def close(self) -> None:
         if api := getattr(self, "_api", None):
