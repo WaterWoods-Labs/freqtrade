@@ -746,12 +746,9 @@ class XCoinSync:
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"lever": _str_positive_int(leverage, "lever")}
         if symbol:
-            if self._is_futures_symbol(symbol):
-                # XCoin futures leverage is coin-level cross margin. Use `currency`
-                # so Freqtrade's pair-level leverage hook maps to the exchange scope.
-                body["currency"] = self._base_currency(symbol)
-            else:
-                body["symbol"] = self.market_id(symbol)
+            # XCoin also accepts currency-level leverage, but some perpetuals
+            # (for example NVDA/HYPE) only work through the symbol-level scope.
+            body["symbol"] = self.market_id(symbol)
         body.update(params or {})
         return self.client.set_leverage(body)
 

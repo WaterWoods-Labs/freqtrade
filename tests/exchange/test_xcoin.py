@@ -767,10 +767,10 @@ def test_xcoin_futures_open_order_converts_contracts(default_conf, mocker, monke
     assert body["marketUnit"] == "baseCoin"
     assert "reduceOnly" not in body
     assert order["amount"] == pytest.approx(0.001)
-    # Opening a position sets XCoin's coin-level cross leverage first.
+    # Opening a position sets symbol-level leverage first.
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
-    assert lever_calls and lever_calls[-1][3]["currency"] == "BTC"
-    assert "symbol" not in lever_calls[-1][3]
+    assert lever_calls and lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert "currency" not in lever_calls[-1][3]
     assert float(lever_calls[-1][3]["lever"]) == 3
 
 
@@ -840,8 +840,8 @@ def test_xcoin_set_leverage_calls_lever_endpoint(default_conf, mocker, monkeypat
     exchange._set_leverage(5.0, "BTC/USDT:USDT")
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
     assert lever_calls
-    assert lever_calls[-1][3]["currency"] == "BTC"
-    assert "symbol" not in lever_calls[-1][3]
+    assert lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert "currency" not in lever_calls[-1][3]
     assert lever_calls[-1][3]["lever"] == "5"
 
 
@@ -853,7 +853,7 @@ def test_xcoin_set_leverage_formats_float_as_integer(default_conf, mocker, monke
 
     exchange._set_leverage(1.0, "BTC/USDT:USDT")
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
-    assert lever_calls[-1][3]["currency"] == "BTC"
+    assert lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
     assert lever_calls[-1][3]["lever"] == "1"
 
 
