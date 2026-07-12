@@ -86,6 +86,15 @@ def _str_num(value: float | int | str | None) -> str | None:
     return str(value)
 
 
+def _str_positive_int(value: float | int | str | None, name: str) -> str:
+    if value is None:
+        raise ccxt.BadRequest(f"{name} is required")
+    parsed = float(value)
+    if parsed <= 0 or not parsed.is_integer():
+        raise ccxt.BadRequest(f"{name} must be a positive integer")
+    return str(int(parsed))
+
+
 def _first_present(*values: Any) -> Any:
     for value in values:
         if value not in (None, ""):
@@ -168,6 +177,13 @@ class XCoinSync:
         size = self._market(symbol).get("contractSize")
         return float(size) if size else 1.0
 
+    def _coin_amount_to_contracts(self, symbol: str, amount: float | None) -> float | None:
+        """Convert XCoin futures coin-denominated quantities to ccxt contracts."""
+        if amount is None or not self._is_futures_symbol(symbol):
+            return amount
+        contract_size = self._contract_size(symbol)
+        return amount / contract_size if contract_size else amount
+
     def _symbol_family(self, symbol: str) -> str:
         family = self._market(symbol).get("info", {}).get("symbolFamily")
         if family:
@@ -176,6 +192,13 @@ class XCoinSync:
         return market_id[: -(len(XCOIN_PERP_SUFFIX) + 1)] if market_id.endswith(
             f"-{XCOIN_PERP_SUFFIX}"
         ) else market_id
+
+    def _base_currency(self, symbol: str) -> str:
+        market = self._market(symbol)
+        if base := market.get("base"):
+            return str(base)
+        market_id = self.market_id(symbol)
+        return market_id.split("-")[0]
 
     def _request(
         self,
@@ -486,13 +509,16 @@ class XCoinSync:
     ) -> dict[str, Any]:
         symbol = xcoin_symbol_to_ccxt(raw.get("symbol") or symbol or "")
         timestamp = int(raw.get("createTime") or timestamp or raw.get("ts") or self.milliseconds())
-        amount = _clean_float(raw.get("qty")) if raw.get("qty") is not None else amount
+        raw_amount = _clean_float(raw.get("qty")) if raw.get("qty") is not None else None
         price = _clean_float(raw.get("price")) if raw.get("price") is not None else price
-        filled = _num(raw.get("totalFillQty"), 0.0)
+        raw_filled = _num(raw.get("totalFillQty"), 0.0)
         average = _clean_float(raw.get("avgPrice"))
         cost = _clean_float(raw.get("quoteQty"))
-        if cost is None and filled and average:
-            cost = filled * average
+        if cost is None and raw_filled and average:
+            cost = raw_filled * average
+        if raw_amount is not None:
+            amount = self._coin_amount_to_contracts(symbol, raw_amount)
+        filled = self._coin_amount_to_contracts(symbol, raw_filled) or 0.0
         fee = self._parse_order_fee(raw, symbol)
         raw_status = raw.get("status")
         parsed_status = XCOIN_STATUS_MAP.get(
@@ -595,9 +621,7 @@ class XCoinSync:
             "symbol": self.market_id(symbol),
             "side": side.lower(),
             "orderType": order_type,
-            # Report amounts back in contracts so Freqtrade._order_contracts_to_amount
-            # can convert them to base units with ctVal.
-            "qty": _str_num(amount),
+            "qty": _str_num(qty_value),
             "price": _str_num(price),
             "status": "new",
             "ts": payload.get("ts"),
@@ -720,8 +744,10 @@ class XCoinSync:
         symbol: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"lever": _str_num(leverage)}
+        body: dict[str, Any] = {"lever": _str_positive_int(leverage, "lever")}
         if symbol:
+            # XCoin also accepts currency-level leverage, but some perpetuals
+            # (for example NVDA/HYPE) only work through the symbol-level scope.
             body["symbol"] = self.market_id(symbol)
         body.update(params or {})
         return self.client.set_leverage(body)

@@ -1,12 +1,13 @@
 import hmac
 from copy import deepcopy
+from datetime import datetime, timezone
 from hashlib import sha256
 
 import ccxt
 import pytest
 
 from freqtrade.enums import CandleType, RunMode
-from freqtrade.exceptions import OperationalException
+from freqtrade.exceptions import ExchangeError, OperationalException
 from freqtrade.exchange import Xcoin
 from freqtrade.exchange.check_exchange import check_exchange
 from freqtrade.exchange.xcoin_connector import (
@@ -617,6 +618,31 @@ def _xcoin_futures_response(method, path, params=None, data=None, private=False)
             "data": {"orderId": "1322590060595871744", "clientOrderId": "ftperp1"},
             "ts": "1769133527828",
         }
+    if path == "/v2/trade/order/info":
+        return {
+            "code": "0",
+            "msg": "Success",
+            "data": {
+                "id": "1322590060595871744",
+                "businessType": "linear_perpetual",
+                "symbol": "BTC-USDT-PERP",
+                "orderId": "1322590060595871744",
+                "clientOrderId": "ftperp1",
+                "price": "90000",
+                "qty": "0.001",
+                "quoteQty": "90",
+                "orderType": "limit",
+                "side": "buy",
+                "totalFillQty": "0.001",
+                "avgPrice": "90000",
+                "status": "filled",
+                "baseFee": "0",
+                "quoteFee": "0",
+                "createTime": "1769133527000",
+                "updateTime": "1769133528000",
+            },
+            "ts": "1769133529000",
+        }
     if path == "/v1/trade/lever":
         assert method == "POST"
         return {
@@ -740,10 +766,27 @@ def test_xcoin_futures_open_order_converts_contracts(default_conf, mocker, monke
     assert float(body["qty"]) == 0.001
     assert body["marketUnit"] == "baseCoin"
     assert "reduceOnly" not in body
-    # Opening a position sets leverage first (currency/symbol level).
+    assert order["amount"] == pytest.approx(0.001)
+    # Opening a position sets symbol-level leverage first.
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
     assert lever_calls and lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert "currency" not in lever_calls[-1][3]
     assert float(lever_calls[-1][3]["lever"]) == 3
+
+
+def test_xcoin_futures_fetch_order_converts_coin_qty(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    order = exchange.fetch_order("1322590060595871744", "BTC/USDT:USDT")
+
+    assert order["status"] == "closed"
+    assert order["amount"] == pytest.approx(0.001)
+    assert order["filled"] == pytest.approx(0.001)
+    assert order["remaining"] == pytest.approx(0.0)
+    assert order["cost"] == pytest.approx(90.0)
 
 
 def test_xcoin_futures_reduce_only_order(default_conf, mocker, monkeypatch):
@@ -798,7 +841,20 @@ def test_xcoin_set_leverage_calls_lever_endpoint(default_conf, mocker, monkeypat
     lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
     assert lever_calls
     assert lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
-    assert float(lever_calls[-1][3]["lever"]) == 5.0
+    assert "currency" not in lever_calls[-1][3]
+    assert lever_calls[-1][3]["lever"] == "5"
+
+
+def test_xcoin_set_leverage_formats_float_as_integer(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    calls = _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    exchange._set_leverage(1.0, "BTC/USDT:USDT")
+    lever_calls = [c for c in calls if c[1] == "/v1/trade/lever"]
+    assert lever_calls[-1][3]["symbol"] == "BTC-USDT-PERP"
+    assert lever_calls[-1][3]["lever"] == "1"
 
 
 def test_xcoin_futures_balance_exposes_cross_equity(default_conf, mocker, monkeypatch):
@@ -879,6 +935,24 @@ def test_xcoin_funding_rate_history_parsed(default_conf, mocker, monkeypatch):
     assert history[0]["fundingRate"] == -0.0002
     assert history[1]["fundingRate"] == 0.0001
     assert history[1]["symbol"] == "BTC/USDT:USDT"
+
+
+def test_xcoin_get_funding_fees_uses_rate_history(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+    helper = mocker.patch.object(exchange, "_fetch_and_calculate_funding_fees", return_value=1.23)
+
+    open_date = datetime(2026, 1, 22, tzinfo=timezone.utc)
+
+    assert exchange.get_funding_fees("BTC/USDT:USDT", 0.1, True, open_date) == 1.23
+    helper.assert_called_once_with("BTC/USDT:USDT", 0.1, True, open_date)
+
+    helper.reset_mock(side_effect=True)
+    helper.side_effect = ExchangeError("funding unavailable")
+
+    assert exchange.get_funding_fees("BTC/USDT:USDT", 0.1, True, open_date) == 0.0
 
 
 def test_xcoin_futures_rejects_isolated_margin(default_conf, mocker, monkeypatch):
