@@ -2,6 +2,7 @@ import hmac
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
+from types import SimpleNamespace
 
 import ccxt
 import pytest
@@ -16,6 +17,7 @@ from freqtrade.exchange.xcoin_connector import (
     xcoin_symbol_to_ccxt,
 )
 from freqtrade.resolvers.exchange_resolver import ExchangeResolver
+from freqtrade.wallets import PositionWallet
 
 
 def _xcoin_config(default_conf: dict, *, dry_run: bool = True) -> dict:
@@ -964,3 +966,55 @@ def test_xcoin_futures_rejects_isolated_margin(default_conf, mocker, monkeypatch
 
     with pytest.raises(OperationalException):
         ExchangeResolver.load_exchange(conf)
+
+
+def test_xcoin_live_futures_validates_existing_positions(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    pair = "BTC/USDT:USDT"
+    matching_position = PositionWallet(
+        pair,
+        position=0.0010000000001,
+        leverage=2.0,
+        collateral=90.0,
+        side="long",
+    )
+    matching_trade = SimpleNamespace(pair=pair, amount=0.001, trade_direction="long")
+    exchange.validate_existing_positions({pair: matching_position}, [matching_trade])
+
+    conflicts = [
+        ({pair: matching_position}, [], "database has no open trade"),
+        (
+            {pair: matching_position},
+            [SimpleNamespace(pair=pair, amount=0.001, trade_direction="short")],
+            "exchange side is long, database side is short",
+        ),
+        (
+            {pair: matching_position._replace(position=0.0009)},
+            [matching_trade],
+            "exchange amount is 0.0009, database amount is 0.001",
+        ),
+        ({}, [matching_trade], "exchange has no matching position"),
+    ]
+    for positions, trades, message in conflicts:
+        with pytest.raises(OperationalException, match=message):
+            exchange.validate_existing_positions(positions, trades)
+
+
+def test_xcoin_dry_run_ignores_existing_positions(default_conf, mocker, monkeypatch):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf))
+
+    position = PositionWallet(
+        "BTC/USDT:USDT",
+        position=0.001,
+        leverage=2.0,
+        collateral=90.0,
+        side="long",
+    )
+    exchange.validate_existing_positions({position.symbol: position}, [])

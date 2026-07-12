@@ -3,6 +3,7 @@
 import logging
 import os
 from datetime import datetime
+from math import isclose
 from typing import Any
 
 from freqtrade.constants import ExchangeConfig
@@ -207,6 +208,66 @@ class Xcoin(Exchange):
             except ExchangeError:
                 logger.warning(f"Could not update funding fees for {pair}.")
         return 0.0
+
+    def validate_existing_positions(
+        self, positions: dict[str, Any], open_trades: list[Any]
+    ) -> None:
+        """Block live futures startup when exchange positions and the database disagree."""
+        if self._config.get("dry_run", True) or self.trading_mode != TradingMode.FUTURES:
+            return
+
+        trades_by_pair: dict[str, Any] = {}
+        conflicts: list[str] = []
+        for trade in open_trades:
+            if not trade.amount:
+                continue
+            if trade.pair in trades_by_pair:
+                conflicts.append(f"{trade.pair}: multiple open database trades")
+                continue
+            trades_by_pair[trade.pair] = trade
+
+        for pair, position in positions.items():
+            trade = trades_by_pair.pop(pair, None)
+            if trade is None:
+                conflicts.append(
+                    f"{pair}: exchange has {position.side} {position.position:g}, "
+                    "database has no open trade"
+                )
+                continue
+
+            if position.side != trade.trade_direction:
+                conflicts.append(
+                    f"{pair}: exchange side is {position.side}, "
+                    f"database side is {trade.trade_direction}"
+                )
+
+            contract_size = self.get_contract_size(pair)
+            amount_tolerance = max(contract_size * 1e-6, 1e-12)
+            if not isclose(
+                position.position,
+                trade.amount,
+                rel_tol=1e-9,
+                abs_tol=amount_tolerance,
+            ):
+                conflicts.append(
+                    f"{pair}: exchange amount is {position.position:g}, "
+                    f"database amount is {trade.amount:g}"
+                )
+
+        for pair, trade in trades_by_pair.items():
+            conflicts.append(
+                f"{pair}: database has {trade.trade_direction} {trade.amount:g}, "
+                "exchange has no matching position"
+            )
+
+        if conflicts:
+            details = "; ".join(conflicts)
+            raise OperationalException(
+                "XCoin startup blocked because live futures positions conflict with the "
+                f"trade database: {details}. Reconcile or close the conflicting positions "
+                "before starting the bot. Use a dedicated exchange account to prevent "
+                "untracked positions from being netted into new trades."
+            )
 
     def close(self) -> None:
         if api := getattr(self, "_api", None):
