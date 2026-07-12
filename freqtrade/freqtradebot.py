@@ -251,6 +251,9 @@ class FreqtradeBot(LoggingMixin):
         # Only update open orders on startup
         # This will update the database after the initial migration
         self.startup_update_open_orders()
+        self.exchange.validate_existing_positions(
+            self.wallets.get_all_positions(), Trade.get_open_trades()
+        )
         self.update_all_liquidation_prices()
         self.update_funding_fees()
 

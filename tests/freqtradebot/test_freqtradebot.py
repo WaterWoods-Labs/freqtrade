@@ -4433,6 +4433,25 @@ def test_startup_trade_reinit(default_conf_usdt, mocker):
     assert reinit_mock.call_count == 1
 
 
+def test_startup_validates_existing_positions(default_conf_usdt, mocker):
+    mocker.patch(f"{EXMS}.exchange_has", MagicMock(return_value=True))
+    ftbot = get_patched_freqtradebot(mocker, default_conf_usdt)
+    calls = []
+    mocker.patch.object(
+        ftbot, "startup_update_open_orders", side_effect=lambda: calls.append("orders")
+    )
+    validator = mocker.patch.object(
+        ftbot.exchange,
+        "validate_existing_positions",
+        side_effect=lambda *_: calls.append("validation"),
+    )
+
+    ftbot.startup()
+
+    validator.assert_called_once_with(ftbot.wallets.get_all_positions(), [])
+    assert calls == ["orders", "validation"]
+
+
 @pytest.mark.usefixtures("init_persistence")
 def test_sync_wallet_dry_run(
     mocker, default_conf_usdt, ticker_usdt, fee, limit_buy_order_usdt_open, caplog
