@@ -2370,9 +2370,16 @@ class FreqtradeBot(LoggingMixin):
 
         self.order_close_notify(trade, order_obj, stoploss_order, send_msg)
         if not trade.is_open and order_obj.ft_order_side == trade.exit_side:
-            self.exchange.validate_existing_positions(
-                self.wallets.get_all_positions(), Trade.get_open_trades()
+            open_trades = Trade.get_open_trades()
+            has_pending_exit = any(
+                order.ft_order_side == open_trade.exit_side
+                for open_trade in open_trades
+                for order in open_trade.open_orders
             )
+            if not has_pending_exit:
+                self.exchange.validate_existing_positions(
+                    self.wallets.get_all_positions(), open_trades
+                )
 
         return False
 
