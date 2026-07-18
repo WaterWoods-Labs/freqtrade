@@ -264,6 +264,8 @@ def drop_orders_table(engine, table_back_name: str):
 
 def migrate_orders_table(engine, table_back_name: str, cols_order: list):
     ft_fee_base = get_column_def(cols_order, "ft_fee_base", "null")
+    ft_fee_cost = get_column_def(cols_order, "ft_fee_cost", "null")
+    ft_fee_currency = get_column_def(cols_order, "ft_fee_currency", "null")
     average = get_column_def(cols_order, "average", "null")
     stop_price = get_column_def(cols_order, "stop_price", "null")
     funding_fee = get_column_def(cols_order, "funding_fee", "0.0")
@@ -280,12 +282,13 @@ def migrate_orders_table(engine, table_back_name: str, cols_order: list):
             insert into orders (id, ft_trade_id, ft_order_side, ft_pair, ft_is_open, order_id,
             status, symbol, order_type, side, price, amount, filled, average, remaining, cost,
             stop_price, order_date, order_filled_date, order_update_date, ft_fee_base, funding_fee,
-            ft_amount, ft_price, ft_cancel_reason, ft_order_tag
+            ft_fee_cost, ft_fee_currency, ft_amount, ft_price, ft_cancel_reason, ft_order_tag
             )
             select id, ft_trade_id, ft_order_side, ft_pair, ft_is_open, order_id,
             status, symbol, order_type, side, price, amount, filled, {average} average, remaining,
             cost, {stop_price} stop_price, order_date, order_filled_date,
             order_update_date, {ft_fee_base} ft_fee_base, {funding_fee} funding_fee,
+            {ft_fee_cost} ft_fee_cost, {ft_fee_currency} ft_fee_currency,
             {ft_amount} ft_amount, {ft_price} ft_price, {ft_cancel_reason} ft_cancel_reason,
             {ft_order_tag} ft_order_tag
             from {table_back_name}
@@ -433,7 +436,11 @@ def check_migrate(engine: Engine, decl_base, previous_tables: list[str]) -> None
     # if ('orders' not in previous_tables
     # or not has_column(cols_orders, 'funding_fee')):
     migrating = False
-    if not has_column(cols_trades, "record_version"):
+    if (
+        not has_column(cols_trades, "record_version")
+        or not has_column(cols_orders, "ft_fee_cost")
+        or not has_column(cols_orders, "ft_fee_currency")
+    ):
         # if not has_column(cols_orders, "ft_order_tag"):
         migrating = True
         logger.info(

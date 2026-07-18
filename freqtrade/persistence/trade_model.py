@@ -115,6 +115,9 @@ class Order(ModelBase):
 
     # Fee if paid in base currency
     ft_fee_base: Mapped[float | None] = mapped_column(Float(), nullable=True)
+    # Signed fee cost reported by CCXT. Positive values are costs, negative values rebates.
+    ft_fee_cost: Mapped[float | None] = mapped_column(Float(), nullable=True)
+    ft_fee_currency: Mapped[str | None] = mapped_column(String(25), nullable=True)
     ft_order_tag: Mapped[str | None] = mapped_column(String(CUSTOM_TAG_MAX_LENGTH), nullable=True)
 
     @property
@@ -159,6 +162,10 @@ class Order(ModelBase):
     @property
     def safe_fee_base(self) -> float:
         return self.ft_fee_base or 0.0
+
+    @property
+    def has_fee_cost(self) -> bool:
+        return self.ft_fee_cost is not None and self.ft_fee_currency is not None
 
     @property
     def safe_amount_after_fee(self) -> float:
@@ -213,6 +220,10 @@ class Order(ModelBase):
         self.remaining = safe_value_fallback(order, "remaining", default_value=self.remaining)
         self.cost = safe_value_fallback(order, "cost", default_value=self.cost)
         self.stop_price = safe_value_fallback(order, "stopPrice", default_value=self.stop_price)
+        fee = order.get("fee")
+        if isinstance(fee, dict) and fee.get("cost") is not None and fee.get("currency"):
+            self.ft_fee_cost = float(fee["cost"])
+            self.ft_fee_currency = fee["currency"]
         order_date = safe_value_fallback(order, "timestamp")
         if order_date:
             self.order_date = dt_from_ts(order_date)
@@ -296,6 +307,8 @@ class Order(ModelBase):
                     "price": self.price,
                     "remaining": self.remaining,
                     "ft_fee_base": self.ft_fee_base,
+                    "ft_fee_cost": self.ft_fee_cost,
+                    "ft_fee_currency": self.ft_fee_currency,
                     "funding_fee": self.funding_fee,
                 }
             )
@@ -1238,6 +1251,15 @@ class LocalTrade:
         return (adj * open_value - beta) / alpha
 
     def recalc_trade_from_orders(self, *, is_closing: bool = False):
+        filled_orders = [o for o in self.orders if not o.ft_is_open and o.filled]
+        if filled_orders and all(
+            o.has_fee_cost and o.ft_fee_currency == self.stake_currency for o in filled_orders
+        ):
+            self._recalc_trade_from_orders_with_order_fees(is_closing=is_closing)
+        else:
+            self._recalc_trade_from_orders_legacy(is_closing=is_closing)
+
+    def _recalc_trade_from_orders_legacy(self, *, is_closing: bool = False):
         ZERO = FtPrecise(0.0)
         current_amount = FtPrecise(0.0)
         current_stake = FtPrecise(0.0)
@@ -1315,6 +1337,126 @@ class LocalTrade:
         elif is_closing and total_stake > 0:
             # Close profit abs / maximum owned
             # Fees are considered as they are part of close_profit_abs
+            self.close_profit = (close_profit_abs / total_stake) * self.leverage
+            self.close_profit_abs = close_profit_abs
+
+    def _set_order_fee_summary(
+        self,
+        current_stake: FtPrecise,
+        current_entry_fee: FtPrecise,
+        total_entry_fee: FtPrecise,
+        total_entry_notional: FtPrecise,
+        total_exit_fee: FtPrecise,
+        total_exit_notional: FtPrecise,
+    ) -> None:
+        zero = FtPrecise(0.0)
+        self.fee_open_cost = float(total_entry_fee)
+        self.fee_open_currency = self.stake_currency
+        if current_stake != zero:
+            self.fee_open = float(current_entry_fee / current_stake)
+        elif total_entry_notional > zero:
+            self.fee_open = float(total_entry_fee / total_entry_notional)
+        if total_exit_notional > zero:
+            self.fee_close_cost = float(total_exit_fee)
+            self.fee_close_currency = self.stake_currency
+            self.fee_close = float(total_exit_fee / total_exit_notional)
+
+    def _recalc_trade_from_orders_with_order_fees(self, *, is_closing: bool = False):
+        zero = FtPrecise(0.0)
+        current_amount = FtPrecise(0.0)
+        current_stake = FtPrecise(0.0)
+        current_entry_fee = FtPrecise(0.0)
+        total_entry_fee = FtPrecise(0.0)
+        total_entry_notional = FtPrecise(0.0)
+        total_exit_fee = FtPrecise(0.0)
+        total_exit_notional = FtPrecise(0.0)
+        max_stake_amount = FtPrecise(0.0)
+        avg_price = FtPrecise(0.0)
+        total_stake = 0.0
+        close_profit = 0.0
+        close_profit_abs = 0.0
+        last_profit_abs = 0.0
+        has_exit = False
+        total_funding_fees = 0.0
+        current_funding_fee = 0.0
+
+        for order in self.orders:
+            if order.ft_is_open or not order.filled:
+                continue
+            current_funding_fee += order.funding_fee or 0.0
+            total_funding_fees += order.funding_fee or 0.0
+            amount = FtPrecise(order.safe_amount_after_fee)
+            price = FtPrecise(order.safe_price)
+            is_exit = order.ft_order_side != self.entry_side
+            amount_before_order = current_amount
+            side = FtPrecise(-1 if is_exit else 1)
+            current_amount += amount * side
+            current_stake += (avg_price if is_exit else price) * amount * side
+
+            if not is_exit:
+                avg_price = current_stake / current_amount
+                entry_fee = FtPrecise(order.ft_fee_cost or 0.0)
+                current_entry_fee += entry_fee
+                total_entry_fee += entry_fee
+                entry_notional = amount * price
+                total_entry_notional += entry_notional
+                total_stake += float(
+                    entry_notional - entry_fee if self.is_short else entry_notional + entry_fee
+                )
+                max_stake_amount += amount * price
+                continue
+
+            entry_fee = (
+                current_entry_fee * amount / amount_before_order
+                if amount_before_order > zero
+                else zero
+            )
+            has_exit = True
+            current_entry_fee -= entry_fee
+            exit_fee = FtPrecise(order.ft_fee_cost or 0.0)
+            total_exit_fee += exit_fee
+            total_exit_notional += amount * price
+            gross_profit = (
+                (avg_price - price) * amount if self.is_short else (price - avg_price) * amount
+            )
+            last_profit_abs = float(
+                gross_profit - entry_fee - exit_fee + FtPrecise(current_funding_fee)
+            )
+            close_profit_abs += last_profit_abs
+            if total_stake > 0:
+                close_profit = (close_profit_abs / total_stake) * self.leverage
+            current_funding_fee = 0.0
+
+        self.funding_fees = total_funding_fees
+        self.max_stake_amount = float(max_stake_amount) / (self.leverage or 1.0)
+        if has_exit:
+            self.close_profit = close_profit
+            self.realized_profit = close_profit_abs
+            self.close_profit_abs = last_profit_abs
+        self._set_order_fee_summary(
+            current_stake,
+            current_entry_fee,
+            total_entry_fee,
+            total_entry_notional,
+            total_exit_fee,
+            total_exit_notional,
+        )
+
+        current_amount_tr = amount_to_contract_precision(
+            float(current_amount), self.amount_precision, self.precision_mode, self.contract_size
+        )
+        if current_amount_tr > 0.0:
+            self.open_rate = price_to_precision(
+                float(current_stake / current_amount),
+                self.price_precision,
+                self.precision_mode_price,
+            )
+            self.amount = current_amount_tr
+            self.stake_amount = float(current_stake) / (self.leverage or 1.0)
+            self.recalc_open_trade_value()
+            if self.stop_loss_pct is not None and self.open_rate is not None:
+                self.adjust_stop_loss(self.open_rate, self.stop_loss_pct)
+        elif is_closing and total_stake > 0:
             self.close_profit = (close_profit_abs / total_stake) * self.leverage
             self.close_profit_abs = close_profit_abs
 
@@ -1668,6 +1810,8 @@ class LocalTrade:
                 funding_fee=order.get("funding_fee", None),
                 ft_order_tag=order.get("ft_order_tag", None),
                 ft_fee_base=order.get("ft_fee_base", None),
+                ft_fee_cost=order.get("ft_fee_cost", None),
+                ft_fee_currency=order.get("ft_fee_currency", None),
             )
             trade.orders.append(order_obj)
 

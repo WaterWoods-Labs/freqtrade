@@ -394,6 +394,10 @@ def test_xcoin_private_account_and_order_methods(default_conf, mocker, monkeypat
     assert fetched["status"] == "open"
     assert fetched["filled"] == 0.005
     assert fetched["remaining"] == 0.005
+    assert fetched["fee"] == {"currency": "USDT", "cost": 0.4, "rate": None}
+
+    rebate = exchange._api._parse_order_fee({"quoteFee": "0.4"}, "BTC/USDT")
+    assert rebate == {"currency": "USDT", "cost": -0.4, "rate": None}
 
     canceled = exchange.cancel_order("1322590062927904769", "BTC/USDT")
     assert canceled["status"] == "canceled"
@@ -789,6 +793,7 @@ def test_xcoin_futures_fetch_order_converts_coin_qty(default_conf, mocker, monke
     assert order["filled"] == pytest.approx(0.001)
     assert order["remaining"] == pytest.approx(0.0)
     assert order["cost"] == pytest.approx(90.0)
+    assert order["fee"] == {"currency": "USDT", "cost": -0.0, "rate": None}
 
 
 def test_xcoin_futures_reduce_only_order(default_conf, mocker, monkeypatch):

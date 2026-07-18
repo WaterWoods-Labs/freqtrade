@@ -282,6 +282,8 @@ class OrderSchema(BaseModel):
     order_timestamp: int | None = None
     order_filled_timestamp: int | None = None
     ft_fee_base: float | None = None
+    ft_fee_cost: float | None = None
+    ft_fee_currency: str | None = None
     ft_order_tag: str | None = None
 
 

@@ -2016,6 +2016,7 @@ def test_update_order_from_ccxt(caplog, time_machine):
         "remaining": 11,
         "status": "open",
         "timestamp": 1599394315123,
+        "fee": {"currency": "USDT", "cost": -0.25, "rate": -0.00001},
     }
     o = Order.parse_from_ccxt_object(ccxt_order, "ADA/USDT", "buy", 20.01, 1234.6)
     assert isinstance(o, Order)
@@ -2031,6 +2032,8 @@ def test_update_order_from_ccxt(caplog, time_machine):
     assert o.order_date is not None
     assert o.ft_is_open
     assert o.order_filled_date is None
+    assert o.ft_fee_cost == -0.25
+    assert o.ft_fee_currency == "USDT"
 
     # Order is unfilled, "filled" not set
     # https://github.com/freqtrade/freqtrade/issues/5404
@@ -2353,6 +2356,153 @@ def test_recalc_trade_from_orders(fee):
     assert trade.open_rate == avg_price
     assert pytest.approx(trade.fee_open_cost) == o1_fee_cost + o2_fee_cost + o3_fee_cost
     assert pytest.approx(trade.open_trade_value) == o1_trade_val + o2_trade_val + o3_trade_val
+
+
+@pytest.mark.parametrize(
+    ("is_short", "entry_prices", "entry_fees", "exit_price", "exit_fee", "expected_profit"),
+    [
+        (False, (10.0, 8.0), (0.16, -0.04), 11.0, 0.352, 399.528),
+        (True, (10.0, 12.0), (0.16, -0.06), 9.0, 0.288, 399.612),
+    ],
+)
+def test_recalc_trade_from_orders_uses_signed_order_fees(
+    is_short, entry_prices, entry_fees, exit_price, exit_fee, expected_profit
+):
+    entry_side = "sell" if is_short else "buy"
+    exit_side = "buy" if is_short else "sell"
+    trade = Trade(
+        pair="TEST/USDT:USDT",
+        stake_currency="USDT",
+        stake_amount=1000,
+        open_date=dt_now() - timedelta(hours=2),
+        amount=100,
+        fee_open=0.00016,
+        fee_close=0.00016,
+        exchange="xcoin",
+        open_rate=entry_prices[0],
+        max_rate=entry_prices[0],
+        leverage=1,
+        is_short=is_short,
+        trading_mode=TradingMode.FUTURES,
+    )
+
+    for index, (price, fee_cost) in enumerate(zip(entry_prices, entry_fees, strict=True)):
+        trade.orders.append(
+            Order(
+                order_id=f"entry-{index}",
+                ft_order_side=entry_side,
+                ft_pair=trade.pair,
+                ft_is_open=False,
+                ft_amount=100,
+                ft_price=price,
+                status="closed",
+                side=entry_side,
+                average=price,
+                amount=100,
+                filled=100,
+                remaining=0,
+                cost=100 * price,
+                ft_fee_cost=fee_cost,
+                ft_fee_currency="USDT",
+                order_date=trade.open_date + timedelta(minutes=index),
+                order_filled_date=trade.open_date + timedelta(minutes=index),
+            )
+        )
+
+    trade.orders.append(
+        Order(
+            order_id="exit",
+            ft_order_side=exit_side,
+            ft_pair=trade.pair,
+            ft_is_open=False,
+            ft_amount=200,
+            ft_price=exit_price,
+            status="closed",
+            side=exit_side,
+            average=exit_price,
+            amount=200,
+            filled=200,
+            remaining=0,
+            cost=200 * exit_price,
+            ft_fee_cost=exit_fee,
+            ft_fee_currency="USDT",
+            order_date=trade.open_date + timedelta(minutes=2),
+            order_filled_date=trade.open_date + timedelta(minutes=2),
+        )
+    )
+
+    trade.close(exit_price)
+
+    assert trade.close_profit_abs == pytest.approx(expected_profit)
+    assert trade.fee_open_cost == pytest.approx(sum(entry_fees))
+    assert trade.fee_open == pytest.approx(sum(entry_fees) / (100 * sum(entry_prices)))
+    assert trade.fee_close_cost == pytest.approx(exit_fee)
+    assert trade.fee_close == pytest.approx(exit_fee / (200 * exit_price))
+
+
+def test_recalc_trade_from_orders_uses_signed_order_fees_for_partial_exit():
+    trade = Trade(
+        pair="TEST/USDT:USDT",
+        stake_currency="USDT",
+        stake_amount=1000,
+        open_date=dt_now() - timedelta(hours=2),
+        amount=100,
+        fee_open=0.00016,
+        fee_close=0.00016,
+        exchange="xcoin",
+        open_rate=10,
+        max_rate=10,
+        leverage=1,
+        trading_mode=TradingMode.FUTURES,
+    )
+    trade.orders.extend(
+        [
+            Order(
+                order_id="entry",
+                ft_order_side="buy",
+                ft_pair=trade.pair,
+                ft_is_open=False,
+                status="closed",
+                side="buy",
+                average=10,
+                amount=100,
+                filled=100,
+                remaining=0,
+                cost=1000,
+                ft_fee_cost=-0.16,
+                ft_fee_currency="USDT",
+                order_date=trade.open_date,
+                order_filled_date=trade.open_date,
+            ),
+            Order(
+                order_id="partial-exit",
+                ft_order_side="sell",
+                ft_pair=trade.pair,
+                ft_is_open=False,
+                status="closed",
+                side="sell",
+                average=11,
+                amount=40,
+                filled=40,
+                remaining=0,
+                cost=440,
+                ft_fee_cost=0.07,
+                ft_fee_currency="USDT",
+                order_date=trade.open_date + timedelta(minutes=1),
+                order_filled_date=trade.open_date + timedelta(minutes=1),
+            ),
+        ]
+    )
+
+    trade.recalc_trade_from_orders()
+
+    assert trade.amount == pytest.approx(60)
+    assert trade.stake_amount == pytest.approx(600)
+    assert trade.realized_profit == pytest.approx(39.994)
+    assert trade.close_profit_abs == pytest.approx(39.994)
+    assert trade.close_profit == pytest.approx(39.994 / 999.84)
+    assert trade.fee_open == pytest.approx(-0.00016)
+    assert trade.open_trade_value == pytest.approx(599.904)
 
 
 @pytest.mark.usefixtures("init_persistence")

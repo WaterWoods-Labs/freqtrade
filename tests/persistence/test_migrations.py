@@ -289,6 +289,8 @@ def test_migrate(mocker, default_conf, fee, caplog):
     assert len(orders) == 4
     assert orders[0].order_id == "dry_buy_order"
     assert orders[0].ft_order_side == "buy"
+    assert orders[0].ft_fee_cost is None
+    assert orders[0].ft_fee_currency is None
 
     # All dry-run stoploss orders will be closed
     assert orders[-1].order_id == "dry_stop_order_id222"
