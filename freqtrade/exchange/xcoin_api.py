@@ -17,6 +17,7 @@ from freqtrade.exchange.xcoin_connector import (
     ccxt_symbol_to_xcoin,
     xcoin_symbol_to_ccxt,
 )
+from freqtrade.util.ft_precise import FtPrecise
 
 
 __all__ = [
@@ -182,7 +183,7 @@ class XCoinSync:
         if amount is None or not self._is_futures_symbol(symbol):
             return amount
         contract_size = self._contract_size(symbol)
-        return amount / contract_size if contract_size else amount
+        return float(FtPrecise(amount) / FtPrecise(contract_size)) if contract_size else amount
 
     def _symbol_family(self, symbol: str) -> str:
         family = self._market(symbol).get("info", {}).get("symbolFamily")
@@ -694,8 +695,7 @@ class XCoinSync:
             return None
         symbol = xcoin_symbol_to_ccxt(raw.get("symbol") or "")
         # XCoin reports the position size in coin; express it in contracts for ccxt.
-        contract_size = self._contract_size(symbol)
-        contracts = abs(position_qty) / contract_size if contract_size else abs(position_qty)
+        contracts = self._coin_amount_to_contracts(symbol, abs(position_qty))
         if position_qty > 0:
             side: str | None = "long"
         elif position_qty < 0:

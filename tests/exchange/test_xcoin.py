@@ -833,6 +833,49 @@ def test_xcoin_fetch_positions_mapping(default_conf, mocker, monkeypatch):
     assert pos["marginMode"] == "cross"
 
 
+@pytest.mark.parametrize(
+    ("symbol", "market_id", "position_qty", "contract_size", "expected_contracts"),
+    [
+        ("HYPE/USDT:USDT", "HYPE-USDT-PERP", "-1.4", 0.1, 14.0),
+        ("NVDA/USDT:USDT", "NVDA-USDT-PERP", "-0.47", 0.01, 47.0),
+    ],
+)
+def test_xcoin_position_contract_conversion_avoids_float_truncation(
+    default_conf,
+    mocker,
+    monkeypatch,
+    symbol,
+    market_id,
+    position_qty,
+    contract_size,
+    expected_contracts,
+):
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
+    monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
+    _patch_xcoin_futures_request(mocker)
+    exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
+
+    market = deepcopy(exchange._api.markets["BTC/USDT:USDT"])
+    market.update(
+        {
+            "id": market_id,
+            "symbol": symbol,
+            "base": symbol.split("/")[0],
+            "contractSize": contract_size,
+        }
+    )
+    exchange._api.markets[symbol] = market
+    exchange.markets[symbol] = market
+
+    position = exchange._api._parse_position(
+        {"symbol": market_id, "positionQty": position_qty, "im": "1"}
+    )
+
+    assert position is not None
+    assert position["contracts"] == expected_contracts
+    assert exchange._contracts_to_amount(symbol, position["contracts"]) == abs(float(position_qty))
+
+
 def test_xcoin_set_leverage_calls_lever_endpoint(default_conf, mocker, monkeypatch):
     monkeypatch.setenv("FREQTRADE__EXCHANGE__KEY", "env-key")
     monkeypatch.setenv("FREQTRADE__EXCHANGE__SECRET", "env-secret")
