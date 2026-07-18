@@ -251,6 +251,7 @@ class FreqtradeBot(LoggingMixin):
         # Only update open orders on startup
         # This will update the database after the initial migration
         self.startup_update_open_orders()
+        self.wallets.update()
         self.exchange.validate_existing_positions(
             self.wallets.get_all_positions(), Trade.get_open_trades()
         )
@@ -2368,6 +2369,10 @@ class FreqtradeBot(LoggingMixin):
         Trade.commit()
 
         self.order_close_notify(trade, order_obj, stoploss_order, send_msg)
+        if not trade.is_open and order_obj.ft_order_side == trade.exit_side:
+            self.exchange.validate_existing_positions(
+                self.wallets.get_all_positions(), Trade.get_open_trades()
+            )
 
         return False
 

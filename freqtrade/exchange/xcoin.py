@@ -212,7 +212,7 @@ class Xcoin(Exchange):
     def validate_existing_positions(
         self, positions: dict[str, Any], open_trades: list[Any]
     ) -> None:
-        """Block live futures startup when exchange positions and the database disagree."""
+        """Block live futures trading when exchange positions and the database disagree."""
         if self._config.get("dry_run", True) or self.trading_mode != TradingMode.FUTURES:
             return
 
@@ -263,9 +263,9 @@ class Xcoin(Exchange):
         if conflicts:
             details = "; ".join(conflicts)
             raise OperationalException(
-                "XCoin startup blocked because live futures positions conflict with the "
+                "XCoin trading blocked because live futures positions conflict with the "
                 f"trade database: {details}. Reconcile or close the conflicting positions "
-                "before starting the bot. Use a dedicated exchange account to prevent "
+                "before starting or resuming the bot. Use a dedicated exchange account to prevent "
                 "untracked positions from being netted into new trades."
             )
 
