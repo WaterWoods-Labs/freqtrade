@@ -1483,14 +1483,31 @@ def test_update_trade_state_partial_exit_skips_position_validation(default_conf_
     validator.assert_not_called()
 
 
-def test_update_trade_state_defers_validation_for_another_pending_exit(
-    default_conf_usdt, mocker
-):
+def test_update_trade_state_defers_validation_for_another_pending_exit(default_conf_usdt, mocker):
     freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
     trade = MagicMock(is_open=False, exit_side="sell")
     order = MagicMock(ft_order_side="sell")
     trade.select_order_by_order_id.return_value = order
     pending_trade = MagicMock(exit_side="buy")
+    pending_trade.open_orders = [MagicMock(ft_order_side="buy")]
+    mocker.patch.object(Trade, "get_open_trades", return_value=[pending_trade])
+    mocker.patch.object(freqtrade.exchange, "check_order_canceled_empty", return_value=False)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
+    mocker.patch.object(freqtrade, "handle_order_fee")
+    mocker.patch.object(freqtrade, "_update_trade_after_fill", return_value=trade)
+    mocker.patch.object(freqtrade, "order_close_notify")
+
+    freqtrade.update_trade_state(trade, "exit-order", {"id": "exit-order", "status": "closed"})
+
+    validator.assert_not_called()
+
+
+def test_update_trade_state_defers_validation_for_another_pending_entry(default_conf_usdt, mocker):
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    trade = MagicMock(is_open=False, exit_side="sell")
+    order = MagicMock(ft_order_side="sell")
+    trade.select_order_by_order_id.return_value = order
+    pending_trade = MagicMock(exit_side="sell")
     pending_trade.open_orders = [MagicMock(ft_order_side="buy")]
     mocker.patch.object(Trade, "get_open_trades", return_value=[pending_trade])
     mocker.patch.object(freqtrade.exchange, "check_order_canceled_empty", return_value=False)
