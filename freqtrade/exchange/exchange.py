@@ -376,7 +376,7 @@ class Exchange:
     ) -> None:
         """Validate exchange positions against trades loaded from the database.
 
-        Exchanges that require strict startup reconciliation can override this hook.
+        Exchanges that require strict position reconciliation can override this hook.
         The default implementation intentionally leaves existing behavior unchanged.
         """
 

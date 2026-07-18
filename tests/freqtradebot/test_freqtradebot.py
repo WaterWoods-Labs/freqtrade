@@ -1435,6 +1435,7 @@ def test_update_trade_state_sell(
 
     patch_exchange(mocker)
     freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
     amount = l_order["amount"]
     wallet_mock.reset_mock()
     trade = Trade(
@@ -1463,6 +1464,23 @@ def test_update_trade_state_sell(
     assert not trade.is_open
     # Order is updated by update_trade_state
     assert order.status == "closed"
+    validator.assert_called_once_with(freqtrade.wallets.get_all_positions(), [])
+
+
+def test_update_trade_state_partial_exit_skips_position_validation(default_conf_usdt, mocker):
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    trade = MagicMock(is_open=True, exit_side="sell")
+    order = MagicMock(ft_order_side="sell")
+    trade.select_order_by_order_id.return_value = order
+    mocker.patch.object(freqtrade.exchange, "check_order_canceled_empty", return_value=False)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
+    mocker.patch.object(freqtrade, "handle_order_fee")
+    mocker.patch.object(freqtrade, "_update_trade_after_fill", return_value=trade)
+    mocker.patch.object(freqtrade, "order_close_notify")
+
+    freqtrade.update_trade_state(trade, "exit-order", {"id": "exit-order", "status": "closed"})
+
+    validator.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -4440,6 +4458,7 @@ def test_startup_validates_existing_positions(default_conf_usdt, mocker):
     mocker.patch.object(
         ftbot, "startup_update_open_orders", side_effect=lambda: calls.append("orders")
     )
+    mocker.patch.object(ftbot.wallets, "update", side_effect=lambda: calls.append("wallets"))
     validator = mocker.patch.object(
         ftbot.exchange,
         "validate_existing_positions",
@@ -4449,7 +4468,7 @@ def test_startup_validates_existing_positions(default_conf_usdt, mocker):
     ftbot.startup()
 
     validator.assert_called_once_with(ftbot.wallets.get_all_positions(), [])
-    assert calls == ["orders", "validation"]
+    assert calls == ["orders", "wallets", "validation"]
 
 
 @pytest.mark.usefixtures("init_persistence")
