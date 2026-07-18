@@ -122,6 +122,8 @@ def test_rpc_trade_status(default_conf, ticker, fee, mocker) -> None:
                 "status": ANY,
                 "ft_is_entry": True,
                 "ft_fee_base": None,
+                "ft_fee_cost": None,
+                "ft_fee_currency": None,
                 "funding_fee": ANY,
                 "ft_order_tag": None,
             }
@@ -202,6 +204,12 @@ def test_rpc_trade_status(default_conf, ticker, fee, mocker) -> None:
             "has_open_orders": False,
         }
     )
+    response["orders"][0].update(
+        {
+            "ft_fee_cost": pytest.approx(2.5e-06),
+            "ft_fee_currency": "BTC",
+        }
+    )
     assert results[0] == response
 
     mocker.patch(
@@ -224,6 +232,12 @@ def test_rpc_trade_status(default_conf, ticker, fee, mocker) -> None:
             "total_profit_abs": ANY,
             "total_profit_ratio": ANY,
             "current_rate": ANY,
+        }
+    )
+    response_norate["orders"][0].update(
+        {
+            "ft_fee_cost": pytest.approx(2.5e-06),
+            "ft_fee_currency": "BTC",
         }
     )
     assert results[0] == response_norate

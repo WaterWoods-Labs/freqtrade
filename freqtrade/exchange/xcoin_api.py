@@ -553,11 +553,13 @@ class XCoinSync:
         base = market.get("base")
         quote = market.get("quote")
         quote_fee = _clean_float(raw.get("quoteFee"))
-        if quote_fee:
-            return {"currency": quote, "cost": abs(quote_fee), "rate": None}
+        if quote_fee is not None:
+            # XCoin reports deductions as negative and rebates as positive. CCXT's fee
+            # cost uses the opposite convention: costs are positive, rebates negative.
+            return {"currency": quote, "cost": -quote_fee, "rate": None}
         base_fee = _clean_float(raw.get("baseFee"))
-        if base_fee:
-            return {"currency": base, "cost": abs(base_fee), "rate": None}
+        if base_fee is not None:
+            return {"currency": base, "cost": -base_fee, "rate": None}
         return None
 
     def create_order(
