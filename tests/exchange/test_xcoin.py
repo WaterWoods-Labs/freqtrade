@@ -1,6 +1,6 @@
 import hmac
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -488,7 +488,7 @@ def _xcoin_futures_config(default_conf: dict, *, dry_run: bool = True) -> dict:
     return conf
 
 
-def _xcoin_futures_response(method, path, params=None, data=None, private=False):
+def _xcoin_futures_response(method, path, params=None, data=None, private=False):  # noqa: C901
     params = params or {}
     if path == "/v2/public/symbols":
         assert params.get("businessType") == "linear_perpetual"
@@ -559,8 +559,20 @@ def _xcoin_futures_response(method, path, params=None, data=None, private=False)
             "code": "0",
             "msg": "Success",
             "data": [
-                ["5m", "1769131800000", "1769132099999", "89600", "89700",
-                 "89800", "89500", "444.6", "39895537", "238", "100", "0.001"],
+                [
+                    "5m",
+                    "1769131800000",
+                    "1769132099999",
+                    "89600",
+                    "89700",
+                    "89800",
+                    "89500",
+                    "444.6",
+                    "39895537",
+                    "238",
+                    "100",
+                    "0.001",
+                ],
             ],
             "ts": "1769133527828",
         }
@@ -591,10 +603,18 @@ def _xcoin_futures_response(method, path, params=None, data=None, private=False)
             "code": "0",
             "msg": "Success",
             "data": [
-                {"symbol": "BTC-USDT-PERP", "fundingRate": "0.0001",
-                 "fundingTime": "1769040000000", "markPrice": "90000"},
-                {"symbol": "BTC-USDT-PERP", "fundingRate": "-0.0002",
-                 "fundingTime": "1769011200000", "markPrice": "89500"},
+                {
+                    "symbol": "BTC-USDT-PERP",
+                    "fundingRate": "0.0001",
+                    "fundingTime": "1769040000000",
+                    "markPrice": "90000",
+                },
+                {
+                    "symbol": "BTC-USDT-PERP",
+                    "fundingRate": "-0.0002",
+                    "fundingTime": "1769011200000",
+                    "markPrice": "89500",
+                },
             ],
             "ts": "1769133527828",
         }
@@ -609,8 +629,13 @@ def _xcoin_futures_response(method, path, params=None, data=None, private=False)
                 "totalMarginBalance": "1000",
                 "totalAvailableBalance": "800",
                 "details": [
-                    {"currency": "USDT", "equity": "1000", "totalBalance": "0",
-                     "cashBalance": "0", "frozen": "0"},
+                    {
+                        "currency": "USDT",
+                        "equity": "1000",
+                        "totalBalance": "0",
+                        "cashBalance": "0",
+                        "frozen": "0",
+                    },
                 ],
             },
             "ts": "1769133527828",
@@ -994,7 +1019,7 @@ def test_xcoin_get_funding_fees_uses_rate_history(default_conf, mocker, monkeypa
     exchange = ExchangeResolver.load_exchange(_xcoin_futures_config(default_conf, dry_run=False))
     helper = mocker.patch.object(exchange, "_fetch_and_calculate_funding_fees", return_value=1.23)
 
-    open_date = datetime(2026, 1, 22, tzinfo=timezone.utc)
+    open_date = datetime(2026, 1, 22, tzinfo=UTC)
 
     assert exchange.get_funding_fees("BTC/USDT:USDT", 0.1, True, open_date) == 1.23
     helper.assert_called_once_with("BTC/USDT:USDT", 0.1, True, open_date)
