@@ -145,7 +145,7 @@ def test_rpc_trade_status(default_conf, ticker, fee, mocker) -> None:
     with pytest.raises(RPCException, match=r".*no active trade*"):
         rpc._rpc_trade_status()
 
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
 
     # Open order...
     results = rpc._rpc_trade_status()
@@ -261,7 +261,7 @@ def test_rpc_status_table(default_conf, ticker, fee, mocker, time_machine) -> No
     with pytest.raises(RPCException, match=r".*no active trade*"):
         rpc._rpc_status_table(default_conf["stake_currency"], "USD")
     mocker.patch(f"{EXMS}._dry_is_price_crossed", return_value=False)
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
 
     result, headers, fiat_profit_sum, total_sum = rpc._rpc_status_table(
         default_conf["stake_currency"], "USD"
@@ -1008,11 +1008,11 @@ def test_rpc_force_exit(default_conf, ticker, fee, mocker) -> None:
     msg = rpc._rpc_force_exit("all")
     assert msg == {"result": "Created exit orders for all open trades."}
 
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
     msg = rpc._rpc_force_exit("all")
     assert msg == {"result": "Created exit orders for all open trades."}
 
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
     msg = rpc._rpc_force_exit("2")
     assert msg == {"result": "Created exit order for trade 2."}
 
@@ -1026,7 +1026,7 @@ def test_rpc_force_exit(default_conf, ticker, fee, mocker) -> None:
     freqtradebot.state = State.RUNNING
     assert cancel_order_mock.call_count == 0
     mocker.patch(f"{EXMS}._dry_is_price_crossed", MagicMock(return_value=False))
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
     # make an limit-buy open trade
     trade = Trade.session.scalars(select(Trade).filter(Trade.id == "3")).first()
     filled_amount = trade.amount_requested / 2
@@ -1062,7 +1062,7 @@ def test_rpc_force_exit(default_conf, ticker, fee, mocker) -> None:
     )
 
     freqtradebot.config["max_open_trades"] = 3
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(3)
 
     cancel_order_mock.reset_mock()
     trade = Trade.session.scalars(select(Trade).filter(Trade.id == "3")).first()
@@ -1163,7 +1163,7 @@ def test_enter_tag_performance_handle(default_conf, ticker, fee, mocker) -> None
 
     # Create some test data
     create_mock_trades_usdt(fee)
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
 
     res = rpc._rpc_enter_tag_performance(None)
 
@@ -1333,7 +1333,7 @@ def test_rpc_count(mocker, default_conf, ticker, fee) -> None:
     assert counts["current"] == 0
 
     # Create some test data
-    freqtradebot.enter_positions()
+    freqtradebot.enter_positions(1)
     counts = rpc._rpc_count()
     assert counts["current"] == 1
 
