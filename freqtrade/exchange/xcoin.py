@@ -81,8 +81,7 @@ class Xcoin(Exchange):
             )
         if self.trading_mode == TradingMode.FUTURES and self.margin_mode != MarginMode.CROSS:
             raise OperationalException(
-                "XCoin futures trading only supports cross margin mode. "
-                "Set `margin_mode: cross`."
+                "XCoin futures trading only supports cross margin mode. Set `margin_mode: cross`."
             )
 
         live_enabled = exchange_config.get("xcoin_live_trading_enabled", False)
@@ -242,7 +241,7 @@ class Xcoin(Exchange):
                 )
 
             contract_size = self.get_contract_size(pair)
-            amount_tolerance = max(contract_size * 1e-6, 1e-12)
+            amount_tolerance = max((contract_size or 1.0) * 1e-6, 1e-12)
             if not isclose(
                 position.position,
                 trade.amount,

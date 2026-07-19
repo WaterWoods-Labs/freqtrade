@@ -1,0 +1,66 @@
+name: Sync official mirror branches
+
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-official-mirrors
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fast-forward official mirror branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git remote add upstream https://github.com/freqtrade/freqtrade.git
+          git fetch --prune upstream develop stable
+          git fetch --prune origin develop stable
+
+          failed=0
+          for branch in develop stable; do
+            current="$(git rev-parse "origin/$branch")"
+            target="$(git rev-parse "upstream/$branch")"
+
+            if [ "$current" = "$target" ]; then
+              echo "$branch is up to date at $current"
+            elif git merge-base --is-ancestor "$current" "$target"; then
+              git push origin "upstream/$branch:refs/heads/$branch"
+              echo "$branch fast-forwarded from $current to $target"
+            else
+              echo "::error::$branch diverged: origin=$current upstream=$target"
+              failed=1
+            fi
+          done
+
+          exit "$failed"
+
+      - name: Open a maintenance issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Official mirror synchronization failed"
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh issue create \
+              --title "$title" \
+              --body "The develop or stable mirror could not be fast-forwarded. No history was rewritten. Inspect: $RUN_URL"
+          else
+            gh issue comment "$existing" --body "The mirror synchronization failed again. Inspect: $RUN_URL"
+          fi

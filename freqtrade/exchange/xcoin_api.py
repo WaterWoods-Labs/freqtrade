@@ -130,9 +130,7 @@ class XCoinSync:
         self.session = self.client._http
         # Market scope for whole-market calls (load_markets / fetch_tickers without a symbol).
         # Per-symbol calls always derive the business type from the symbol itself.
-        self.default_business_type = (
-            config.get("default_business_type") or XCOIN_BUSINESS_SPOT
-        )
+        self.default_business_type = config.get("default_business_type") or XCOIN_BUSINESS_SPOT
         self.markets: dict[str, dict[str, Any]] = {}
         self.markets_by_id: dict[str, dict[str, Any]] = {}
         self.options = {
@@ -190,9 +188,11 @@ class XCoinSync:
         if family:
             return family
         market_id = self.market_id(symbol)
-        return market_id[: -(len(XCOIN_PERP_SUFFIX) + 1)] if market_id.endswith(
-            f"-{XCOIN_PERP_SUFFIX}"
-        ) else market_id
+        return (
+            market_id[: -(len(XCOIN_PERP_SUFFIX) + 1)]
+            if market_id.endswith(f"-{XCOIN_PERP_SUFFIX}")
+            else market_id
+        )
 
     def _base_currency(self, symbol: str) -> str:
         market = self._market(symbol)
@@ -363,8 +363,7 @@ class XCoinSync:
         tickers = {
             ticker["symbol"]: ticker
             for ticker in (
-                self._parse_ticker(item, timestamp=timestamp)
-                for item in payload.get("data", [])
+                self._parse_ticker(item, timestamp=timestamp) for item in payload.get("data", [])
             )
         }
         if symbols:
@@ -423,7 +422,11 @@ class XCoinSync:
 
         if price == "mark":
             payload = self.client.mark_price_klines(
-                market_id, period, since=since, limit=limit, params=params,
+                market_id,
+                period,
+                since=since,
+                limit=limit,
+                params=params,
                 business_type=business_type,
             )
             return self._parse_priced_klines(payload)
@@ -434,7 +437,11 @@ class XCoinSync:
             return self._parse_priced_klines(payload)
 
         payload = self.client.klines(
-            market_id, period, since=since, limit=limit, params=params,
+            market_id,
+            period,
+            since=since,
+            limit=limit,
+            params=params,
             business_type=business_type,
         )
         candles = [
@@ -522,9 +529,7 @@ class XCoinSync:
         filled = self._coin_amount_to_contracts(symbol, raw_filled) or 0.0
         fee = self._parse_order_fee(raw, symbol)
         raw_status = raw.get("status")
-        parsed_status = XCOIN_STATUS_MAP.get(
-            str(raw_status).lower(), raw_status or "open"
-        )
+        parsed_status = XCOIN_STATUS_MAP.get(str(raw_status).lower(), raw_status or "open")
         order_side = raw.get("side") or side
         return {
             "id": raw.get("orderId"),
@@ -573,9 +578,7 @@ class XCoinSync:
     ) -> dict[str, Any]:
         order_type = order_type.lower()
         if order_type not in {"limit", "market", "post_only"}:
-            raise ccxt.InvalidOrder(
-                "XCoin adapter only supports limit/market/post_only orders"
-            )
+            raise ccxt.InvalidOrder("XCoin adapter only supports limit/market/post_only orders")
         if order_type in {"limit", "post_only"} and price is None:
             raise ccxt.InvalidOrder("XCoin limit orders require a price")
         params = params or {}
@@ -819,12 +822,12 @@ class XCoinSync:
 class XCoinAsync(XCoinSync):
     """Async facade used by Freqtrade candle and market refresh paths."""
 
-    async def load_markets(
+    async def load_markets(  # type: ignore[override]
         self, reload: bool = False, params: dict[str, Any] | None = None
     ) -> dict[str, dict[str, Any]]:
         return await asyncio.to_thread(super().load_markets, reload, params)
 
-    async def fetch_ohlcv(
+    async def fetch_ohlcv(  # type: ignore[override]
         self,
         symbol: str,
         timeframe: str = "1m",
@@ -834,7 +837,7 @@ class XCoinAsync(XCoinSync):
     ) -> list[list[float]]:
         return await asyncio.to_thread(super().fetch_ohlcv, symbol, timeframe, since, limit, params)
 
-    async def fetch_funding_rate_history(
+    async def fetch_funding_rate_history(  # type: ignore[override]
         self,
         symbol: str | None = None,
         since: int | None = None,
@@ -845,5 +848,5 @@ class XCoinAsync(XCoinSync):
             super().fetch_funding_rate_history, symbol, since, limit, params
         )
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # type: ignore[override]
         super().close()
