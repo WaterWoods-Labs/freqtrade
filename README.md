@@ -1,5 +1,10 @@
 # ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade_poweredby.svg)
 
+> [!IMPORTANT]
+> This WaterWoods fork keeps the XCoin integration on the `xcoin` branch. The `develop` and `stable`
+> branches are clean upstream mirrors. See [XCoin maintenance](docs/xcoin-maintenance.md) before
+> creating branches, synchronizing upstream, or publishing a runtime image.
+
 [![Freqtrade CI](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml)
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.04864/status.svg)](https://doi.org/10.21105/joss.04864)
 [![codecov](https://codecov.io/gh/freqtrade/freqtrade/branch/develop/graph/badge.svg?token=AD5BG3ATKI)](https://codecov.io/gh/freqtrade/freqtrade)

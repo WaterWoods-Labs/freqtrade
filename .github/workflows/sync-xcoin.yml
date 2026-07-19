@@ -1,0 +1,71 @@
+name: Prepare XCoin upstream sync
+
+on:
+  schedule:
+    - cron: "30 2 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-xcoin-upstream
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Merge the official mirror into a sync branch
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git fetch --prune origin xcoin develop
+
+          if git merge-base --is-ancestor origin/develop origin/xcoin; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "xcoin already contains origin/develop"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C sync/upstream-develop origin/xcoin
+          git merge --no-ff origin/develop -m "Merge upstream develop into XCoin"
+          git push --force-with-lease origin HEAD:refs/heads/sync/upstream-develop
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the synchronization pull request
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number="$(gh pr list \
+            --base xcoin \
+            --head sync/upstream-develop \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -z "$number" ]; then
+            gh pr create \
+              --base xcoin \
+              --head sync/upstream-develop \
+              --title "Merge upstream develop into XCoin" \
+              --body "Automated upstream synchronization. This pull request is never merged automatically and requires XCoin CI."
+          fi
+
+      - name: Dispatch the full XCoin validation
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run xcoin-ci.yml --ref sync/upstream-develop -f full=true
