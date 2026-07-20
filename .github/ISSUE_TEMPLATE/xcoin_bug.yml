@@ -1,0 +1,68 @@
+name: XCoin bug
+description: Report a reproducible problem in the WaterWoods XCoin integration.
+title: "[XCoin Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form only for XCoin-specific behavior. General Freqtrade problems belong in the official Freqtrade repository. Never paste credentials, account identifiers, private orders, or unredacted live logs.
+  - type: checkboxes
+    id: routing
+    attributes:
+      label: Routing and safety
+      options:
+        - label: The problem is specific to XCoin or the WaterWoods integration.
+          required: true
+        - label: I reproduced it on an immutable XCoin release or the current `xcoin` branch.
+          required: true
+        - label: I removed credentials, account identifiers, private order data, and other secrets.
+          required: true
+  - type: dropdown
+    id: market_mode
+    attributes:
+      label: Market mode
+      options:
+        - Spot
+        - USDT perpetual futures (cross margin)
+        - Both
+        - Not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime_mode
+    attributes:
+      label: Runtime mode
+      options:
+        - Dry-run
+        - Live
+        - Backtest or data command
+        - CI or development environment
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: XCoin release or commit
+      description: Provide the `xcoin-YYYY.MM.DD.N` tag, immutable image digest, or commit SHA.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest safe configuration fragment needed to reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior and sanitized logs
+      render: shell
+    validations:
+      required: true

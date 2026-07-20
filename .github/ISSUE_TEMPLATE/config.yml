@@ -1,6 +1,12 @@
 ---
 blank_issues_enabled: false
 contact_links:
-  - name: Discord Server
+  - name: Official Freqtrade issue tracker
+    url: https://github.com/freqtrade/freqtrade/issues
+    about: Report problems that reproduce on official Freqtrade without the XCoin integration.
+  - name: Official Freqtrade documentation
+    url: https://www.freqtrade.io/en/stable/
+    about: Read the official configuration, strategy, backtesting, and exchange documentation.
+  - name: Official Freqtrade Discord
     url: https://discord.gg/p7nuUNVfP7
-    about: Ask a question or get community support from our Discord server
+    about: Ask general Freqtrade usage and strategy questions in the upstream community.
