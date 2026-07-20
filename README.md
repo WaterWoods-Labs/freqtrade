@@ -1,9 +1,27 @@
 # ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade_poweredby.svg)
 
-> [!IMPORTANT]
-> This WaterWoods fork keeps the XCoin integration on the `xcoin` branch. The `develop` and `stable`
-> branches are clean upstream mirrors. See [XCoin maintenance](docs/xcoin-maintenance.md) before
-> creating branches, synchronizing upstream, or publishing a runtime image.
+[![XCoin CI](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/xcoin-ci.yml/badge.svg?branch=xcoin)](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/xcoin-ci.yml)
+[![Latest XCoin release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=xcoin-*&label=XCoin%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases/latest)
+
+## WaterWoods XCoin fork
+
+This fork adds native XCoin support to Freqtrade while preserving clean mirrors of the official
+project:
+
+- `xcoin` is the default branch and the only long-lived XCoin integration branch.
+- `develop` and `stable` are read-only, fast-forward mirrors of official Freqtrade.
+- XCoin spot and USDT perpetual futures are supported. Futures use cross margin only.
+- Always validate with dry-run first. Live trading additionally requires
+  `exchange.xcoin_live_trading_enabled=true`.
+- Runtime images are published from immutable `xcoin-YYYY.MM.DD.N` releases. Pin the reported
+  `ghcr.io/waterwoods-labs/freqtrade-xcoin@sha256:...` digest instead of a mutable tag.
+
+Start with the [latest release](https://github.com/WaterWoods-Labs/freqtrade/releases/latest) and
+read [XCoin maintenance](docs/xcoin-maintenance.md) before creating branches, synchronizing
+upstream, or publishing an image. Report XCoin-specific problems through this repository's issue
+forms; route general Freqtrade problems to the
+[official project](https://github.com/freqtrade/freqtrade/issues). See [support](SUPPORT.md) and
+[security reporting](SECURITY.md) for details.
 
 [![Freqtrade CI](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml)
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.04864/status.svg)](https://doi.org/10.21105/joss.04864)

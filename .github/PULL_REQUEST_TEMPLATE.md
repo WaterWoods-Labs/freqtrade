@@ -1,22 +1,38 @@
-<!-- Thank you for sending your pull request. But first, have you included
-unit tests, and is your code PEP8 conformant? [More details](https://github.com/freqtrade/freqtrade/blob/develop/CONTRIBUTING.md)
-
-Did you use AI to create your changes?
-If so, please state it clearly in the PR description (failing to do so may result in your PR being closed).
-
-Also, please do a self review of the changes made before submitting the PR to make sure only relevant changes are included.
--->
 ## Summary
 
-<!-- Explain in one sentence the goal of this PR -->
+<!-- Explain the goal and why it belongs in the WaterWoods XCoin fork. -->
 
 Solve the issue: #___
 
-## Quick changelog
+## Target and scope
 
-- <change log 1>
-- <change log 1>
+- [ ] This PR targets `xcoin` (never `develop` or `stable`).
+- [ ] XCoin spot
+- [ ] XCoin perpetual futures
+- [ ] Freqtrade core integration
+- [ ] CI, synchronization, release, or documentation only
 
-## What's new?
+## Validation
 
-<!-- Explain in details what this PR solve or improve. You can include visuals. -->
+- [ ] Ran the focused XCoin tests: `pytest tests/exchange/test_xcoin.py`
+- [ ] Ran all tests affected by the change.
+- [ ] Ran pre-commit or equivalent lint/type checks.
+- [ ] Added or updated regression tests where behavior changed.
+
+## Runtime evidence
+
+- Dry-run mode, pair, timeframe, and duration:
+- Observed result:
+- Full upstream test suite required: yes / no
+
+## Trading and security risk
+
+- [ ] No exchange keys, API credentials, account identifiers, private order data, or raw live logs are included.
+- [ ] Live trading remains explicitly gated by `xcoin_live_trading_enabled=true`.
+- [ ] Futures margin, leverage, position reconciliation, fee, and quantity-conversion impacts were reviewed where relevant.
+- Rollback notes:
+
+## AI-assisted changes
+
+- AI assistance used: yes / no
+- Human review performed:
