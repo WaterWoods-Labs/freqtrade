@@ -18,6 +18,18 @@ Do not commit XCoin changes to `develop` or `stable`. Do not force-push any long
 sync` creates or updates a pull request that merges `develop` into `xcoin` every week. A divergence
 in either mirror is reported without rewriting history.
 
+The built-in `GITHUB_TOKEN` can fast-forward ordinary upstream commits. GitHub requires a separate
+credential when the update changes `.github/workflows/*`. Configure the `MIRROR_SYNC_TOKEN`
+repository secret with a dedicated credential limited to this repository and granted both Contents
+and Workflows write permissions. Use a fine-grained personal access token with an expiration date;
+do not reuse a broad personal token or store the credential in the repository. A future GitHub App
+migration must mint its short-lived installation token during each workflow run rather than saving
+that token as a long-lived secret.
+
+When the secret is missing, workflow-file updates stop before the push and explain the required
+configuration in the job summary. Failure issue creation is best-effort so a notification-policy
+restriction cannot hide the original synchronization error.
+
 ## Releases
 
 Create an immutable release tag only after the `xcoin` commit has passed CI and dry-run review:
