@@ -24,8 +24,17 @@ jobs:
 
       - name: Fast-forward official mirror branches
         env:
-          GH_TOKEN: ${{ github.token }}
+          FALLBACK_TOKEN: ${{ github.token }}
+          MIRROR_SYNC_TOKEN: ${{ secrets.MIRROR_SYNC_TOKEN }}
         run: |
+          if [ -n "$MIRROR_SYNC_TOKEN" ]; then
+            export GH_TOKEN="$MIRROR_SYNC_TOKEN"
+            echo "Using the dedicated mirror synchronization token"
+          else
+            export GH_TOKEN="$FALLBACK_TOKEN"
+            echo "Using GITHUB_TOKEN; workflow-file updates require MIRROR_SYNC_TOKEN"
+          fi
+
           gh auth setup-git
           git remote add upstream https://github.com/freqtrade/freqtrade.git
           git fetch --prune upstream develop stable
@@ -39,8 +48,20 @@ jobs:
             if [ "$current" = "$target" ]; then
               echo "$branch is up to date at $current"
             elif git merge-base --is-ancestor "$current" "$target"; then
-              git push origin "upstream/$branch:refs/heads/$branch"
-              echo "$branch fast-forwarded from $current to $target"
+              workflow_changes="$(git diff --name-only "$current" "$target" -- .github/workflows/)"
+              if [ -n "$workflow_changes" ] && [ -z "$MIRROR_SYNC_TOKEN" ]; then
+                echo "::error title=Mirror token required::$branch contains workflow-file changes. Configure the MIRROR_SYNC_TOKEN repository secret with Contents and Workflows write permissions."
+                printf 'Workflow files requiring the dedicated token:\n%s\n' "$workflow_changes"
+                failed=1
+                continue
+              fi
+
+              if git push origin "upstream/$branch:refs/heads/$branch"; then
+                echo "$branch fast-forwarded from $current to $target"
+              else
+                echo "::error title=Mirror push failed::Could not fast-forward $branch from $current to $target"
+                failed=1
+              fi
             else
               echo "::error::$branch diverged: origin=$current upstream=$target"
               failed=1
@@ -49,18 +70,37 @@ jobs:
 
           exit "$failed"
 
-      - name: Open a maintenance issue on failure
+      - name: Record the synchronization failure
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Official mirror synchronization failed"
-          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          {
+            echo "### Official mirror synchronization failed"
+            echo
+            echo "No mirror history was rewritten. Inspect the failed run: $RUN_URL"
+            echo
+            echo "If the update changes \`.github/workflows/*\`, verify that the \`MIRROR_SYNC_TOKEN\` repository secret is configured with Contents and Workflows write permissions."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if ! existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty' 2>&1)"; then
+            echo "::warning title=Issue notification unavailable::Could not query maintenance issues; the job summary contains the failure details."
+            printf '%s\n' "$existing"
+            exit 0
+          fi
+
           if [ -z "$existing" ]; then
-            gh issue create \
+            if ! output="$(gh issue create \
               --title "$title" \
-              --body "The develop or stable mirror could not be fast-forwarded. No history was rewritten. Inspect: $RUN_URL"
+              --body "The develop or stable mirror could not be fast-forwarded. No history was rewritten. Inspect: $RUN_URL" 2>&1)"; then
+              echo "::warning title=Issue notification unavailable::Could not create the maintenance issue; the job summary contains the failure details."
+              printf '%s\n' "$output"
+            fi
           else
-            gh issue comment "$existing" --body "The mirror synchronization failed again. Inspect: $RUN_URL"
+            if ! output="$(gh issue comment "$existing" --body "The mirror synchronization failed again. Inspect: $RUN_URL" 2>&1)"; then
+              echo "::warning title=Issue notification unavailable::Could not update maintenance issue #$existing; the job summary contains the failure details."
+              printf '%s\n' "$output"
+            fi
           fi
