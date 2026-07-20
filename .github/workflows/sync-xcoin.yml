@@ -26,8 +26,17 @@ jobs:
       - name: Merge the official mirror into a sync branch
         id: merge
         env:
-          GH_TOKEN: ${{ github.token }}
+          FALLBACK_TOKEN: ${{ github.token }}
+          MIRROR_SYNC_TOKEN: ${{ secrets.MIRROR_SYNC_TOKEN }}
         run: |
+          if [ -n "$MIRROR_SYNC_TOKEN" ]; then
+            export GH_TOKEN="$MIRROR_SYNC_TOKEN"
+            echo "Using the dedicated mirror synchronization token for Git pushes"
+          else
+            export GH_TOKEN="$FALLBACK_TOKEN"
+            echo "Using GITHUB_TOKEN; workflow-file updates require MIRROR_SYNC_TOKEN"
+          fi
+
           gh auth setup-git
           git fetch --prune origin xcoin develop
 
@@ -41,7 +50,18 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C sync/upstream-develop origin/xcoin
           git merge --no-ff origin/develop -m "Merge upstream develop into XCoin"
-          git push --force-with-lease origin HEAD:refs/heads/sync/upstream-develop
+
+          workflow_changes="$(git diff --name-only origin/xcoin..HEAD -- .github/workflows/)"
+          if [ -n "$workflow_changes" ] && [ -z "$MIRROR_SYNC_TOKEN" ]; then
+            echo "::error title=Mirror token required::The upstream merge changes workflow files. Configure MIRROR_SYNC_TOKEN with Contents and Workflows write permissions."
+            printf 'Workflow files requiring the dedicated token:\n%s\n' "$workflow_changes"
+            exit 1
+          fi
+
+          if ! git push --force-with-lease origin HEAD:refs/heads/sync/upstream-develop; then
+            echo "::error title=Synchronization branch push failed::Could not update sync/upstream-develop"
+            exit 1
+          fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create or update the synchronization pull request

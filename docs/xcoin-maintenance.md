@@ -30,6 +30,10 @@ When the secret is missing, workflow-file updates stop before the push and expla
 configuration in the job summary. Failure issue creation is best-effort so a notification-policy
 restriction cannot hide the original synchronization error.
 
+`Prepare XCoin upstream sync` uses the same secret only to authenticate the Git push that updates
+`sync/upstream-develop`. Pull request creation and full XCoin CI dispatch continue to use the
+short-lived built-in `GITHUB_TOKEN`.
+
 ## Releases
 
 Create an immutable release tag only after the `xcoin` commit has passed CI and dry-run review:
