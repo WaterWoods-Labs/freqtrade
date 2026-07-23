@@ -11,8 +11,7 @@ concurrency:
 
 permissions:
   actions: write
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   prepare:
@@ -23,20 +22,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Create mirror synchronization token
+        id: mirror-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MIRROR_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MIRROR_SYNC_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
       - name: Merge the official mirror into a sync branch
         id: merge
         env:
-          FALLBACK_TOKEN: ${{ github.token }}
-          MIRROR_SYNC_TOKEN: ${{ secrets.MIRROR_SYNC_TOKEN }}
+          GH_TOKEN: ${{ steps.mirror-token.outputs.token }}
         run: |
-          if [ -n "$MIRROR_SYNC_TOKEN" ]; then
-            export GH_TOKEN="$MIRROR_SYNC_TOKEN"
-            echo "Using the dedicated mirror synchronization token for Git pushes"
-          else
-            export GH_TOKEN="$FALLBACK_TOKEN"
-            echo "Using GITHUB_TOKEN; workflow-file updates require MIRROR_SYNC_TOKEN"
-          fi
-
           gh auth setup-git
           git fetch --prune origin xcoin develop
 
@@ -51,23 +50,26 @@ jobs:
           git switch -C sync/upstream-develop origin/xcoin
           git merge --no-ff origin/develop -m "Merge upstream develop into XCoin"
 
-          workflow_changes="$(git diff --name-only origin/xcoin..HEAD -- .github/workflows/)"
-          if [ -n "$workflow_changes" ] && [ -z "$MIRROR_SYNC_TOKEN" ]; then
-            echo "::error title=Mirror token required::The upstream merge changes workflow files. Configure MIRROR_SYNC_TOKEN with Contents and Workflows write permissions."
-            printf 'Workflow files requiring the dedicated token:\n%s\n' "$workflow_changes"
-            exit 1
-          fi
-
           if ! git push --force-with-lease origin HEAD:refs/heads/sync/upstream-develop; then
             echo "::error title=Synchronization branch push failed::Could not update sync/upstream-develop"
             exit 1
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
+      - name: Create synchronization pull request token
+        if: steps.merge.outputs.changed == 'true'
+        id: pull-request-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MIRROR_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MIRROR_SYNC_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+
       - name: Create or update the synchronization pull request
         if: steps.merge.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.pull-request-token.outputs.token }}
         run: |
           number="$(gh pr list \
             --base xcoin \

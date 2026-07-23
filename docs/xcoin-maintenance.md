@@ -18,21 +18,29 @@ Do not commit XCoin changes to `develop` or `stable`. Do not force-push any long
 sync` creates or updates a pull request that merges `develop` into `xcoin` every week. A divergence
 in either mirror is reported without rewriting history.
 
-The built-in `GITHUB_TOKEN` can fast-forward ordinary upstream commits. GitHub requires a separate
-credential when the update changes `.github/workflows/*`. Configure the `MIRROR_SYNC_TOKEN`
-repository secret with a dedicated credential limited to this repository and granted both Contents
-and Workflows write permissions. Use a fine-grained personal access token with an expiration date;
-do not reuse a broad personal token or store the credential in the repository. A future GitHub App
-migration must mint its short-lived installation token during each workflow run rather than saving
-that token as a long-lived secret.
+Both workflows authenticate through a dedicated GitHub App installed only on
+`WaterWoods-Labs/freqtrade`. The App is named `WaterWoods XCoin Mirror Sync` and the installation
+grants only the repository permissions required by the synchronization:
 
-When the secret is missing, workflow-file updates stop before the push and explain the required
-configuration in the job summary. Failure issue creation is best-effort so a notification-policy
-restriction cannot hide the original synchronization error.
+- Contents: read and write
+- Pull requests: read and write
+- Workflows: read and write
 
-`Prepare XCoin upstream sync` uses the same secret only to authenticate the Git push that updates
-`sync/upstream-develop`. Pull request creation and full XCoin CI dispatch continue to use the
-short-lived built-in `GITHUB_TOKEN`.
+The workflows store the App client ID in the `MIRROR_SYNC_APP_CLIENT_ID` repository variable and its
+private key in the `MIRROR_SYNC_APP_PRIVATE_KEY` repository secret. They mint short-lived
+installation tokens at runtime and request only the permission subset needed by each step:
+Contents and Workflows for Git pushes, and Contents and Pull requests for pull request creation.
+Installation tokens are never saved as repository secrets. Full XCoin CI dispatch continues to use
+the short-lived built-in `GITHUB_TOKEN`.
+
+The organization-level policy intentionally prevents the built-in `GITHUB_TOKEN` from creating or
+approving pull requests, so synchronization pull requests also use a short-lived App installation
+token. Failure issue creation remains best-effort with the built-in credential so a notification
+failure cannot hide the original mirror error.
+
+Never store the App private key in Git, documentation, chat, command output, or logs. Rotate the
+private key through the organization-owned App settings, update the repository secret, validate
+both synchronization workflows, and only then delete the previous App key.
 
 ## Releases
 
