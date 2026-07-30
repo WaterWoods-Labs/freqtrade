@@ -1426,6 +1426,7 @@ class FreqtradeBot(LoggingMixin):
         Force-sells the pair (using EmergencySell reason) in case of Problems creating the order.
         :return: True if the order succeeded, and False in case of problems.
         """
+        portfolio_margin = getattr(self.exchange, "portfolio_margin_enabled", False) is True
         try:
             stoploss_order = self.exchange.create_stoploss(
                 pair=trade.pair,
@@ -1443,17 +1444,169 @@ class FreqtradeBot(LoggingMixin):
             return True
         except InsufficientFundsError as e:
             logger.warning(f"Unable to place stoploss order {e}.")
-            # Try to figure out what went wrong
-            self.handle_insufficient_funds(trade)
+            if portfolio_margin:
+                self._portfolio_margin_stoploss_emergency_exit(trade, stop_price)
+            else:
+                # Try to figure out what went wrong
+                self.handle_insufficient_funds(trade)
 
         except InvalidOrderException as e:
             logger.error(f"Unable to place a stoploss order on exchange. {e}")
             logger.warning("Exiting the trade forcefully")
-            self.emergency_exit(trade, stop_price)
+            if portfolio_margin:
+                self._portfolio_margin_stoploss_emergency_exit(trade, stop_price)
+            else:
+                self.emergency_exit(trade, stop_price)
 
         except ExchangeError:
             logger.exception("Unable to place a stoploss order on exchange.")
+            if portfolio_margin:
+                self._portfolio_margin_stoploss_emergency_exit(trade, stop_price)
+        except Exception:
+            if not portfolio_margin:
+                raise
+            logger.exception("Unable to confirm the Binance Portfolio Margin stoploss order.")
+            self._portfolio_margin_stoploss_emergency_exit(trade, stop_price)
         return False
+
+    def _portfolio_margin_position_is_flat(self, pair: str) -> bool:
+        """
+        Verify a Portfolio Margin position through one no-retry PAPI position snapshot.
+        """
+        position_check = getattr(
+            self.exchange,
+            "is_portfolio_margin_position_flat",
+            None,
+        )
+        if not callable(position_check):
+            raise DependencyException(
+                "The exchange does not provide a bounded PAPI position verification method."
+            )
+        result = position_check(pair)
+        if not isinstance(result, bool):
+            raise DependencyException("PAPI returned an invalid position verification result.")
+        return result
+
+    def _confirm_portfolio_margin_position_flat(self, pair: str) -> bool:
+        """
+        Confirm a market emergency exit using bounded PAPI position checks.
+
+        The live profile and adapter cap each exchange request at five seconds.
+        Two attempts plus the short delay keep this verification inside the
+        emergency window.
+        """
+        consecutive_flat_snapshots = 0
+        for attempt in range(2):
+            try:
+                if self._portfolio_margin_position_is_flat(pair):
+                    consecutive_flat_snapshots += 1
+                    if consecutive_flat_snapshots == 2:
+                        return True
+                else:
+                    consecutive_flat_snapshots = 0
+            except Exception:
+                logger.exception(
+                    "PAPI position verification failed after a Binance Portfolio "
+                    "Margin emergency exit."
+                )
+                return False
+            if attempt == 0:
+                sleep(1.0)
+        return False
+
+    def _cleanup_portfolio_margin_unknown_stoploss(self, pair: str) -> bool:
+        """
+        Reconcile and remove a conditional order whose create result was unknown.
+
+        The exchange-specific implementation only uses bounded PAPI GET/DELETE calls.
+        Missing support is handled fail-closed because the bot is already stopped.
+        """
+        cleanup = getattr(
+            self.exchange,
+            "cleanup_portfolio_margin_unknown_conditional_order",
+            None,
+        )
+        if not callable(cleanup):
+            logger.critical(
+                "Binance Portfolio Margin conditional-order cleanup is unavailable. "
+                "The bot remains STOPPED and an exchange stop order may still be open."
+            )
+            return False
+        try:
+            cleanup_confirmed = cleanup(pair)
+        except Exception:
+            logger.exception(
+                "Binance Portfolio Margin conditional-order cleanup failed. "
+                "The bot remains STOPPED and an exchange stop order may still be open."
+            )
+            return False
+        if cleanup_confirmed is not True:
+            logger.critical(
+                "Binance Portfolio Margin conditional-order cleanup was not confirmed. "
+                "The bot remains STOPPED and an exchange stop order may still be open."
+            )
+            return False
+        return True
+
+    def _cleanup_portfolio_margin_known_stoploss(self, trade: Trade) -> bool:
+        """Best-effort cleanup for stop orders already recorded on the trade."""
+        if not trade.open_sl_orders:
+            return True
+        try:
+            self.cancel_stoploss_on_exchange(trade)
+        except Exception:
+            logger.exception(
+                "Known Binance Portfolio Margin stop-order cleanup failed after "
+                "the emergency exit. The bot remains STOPPED and an exchange stop "
+                "order may still be open."
+            )
+            return False
+        return True
+
+    def _portfolio_margin_stoploss_emergency_exit(self, trade: Trade, stop_price: float) -> None:
+        """
+        Fail closed when Portfolio Margin exchange stop-loss protection is unavailable.
+
+        The bot is stopped before a reduce-only market exit is attempted and stays
+        stopped even when either the exit or conditional-order cleanup fails.
+        """
+        self.state = State.STOPPED
+        exit_submitted = False
+        position_flat = False
+        try:
+            try:
+                exit_submitted = self.emergency_exit(trade, stop_price)
+            except Exception:
+                logger.exception(
+                    "Binance Portfolio Margin emergency reduce-only market exit raised "
+                    "an unexpected error."
+                )
+            if exit_submitted:
+                position_flat = self._confirm_portfolio_margin_position_flat(trade.pair)
+        finally:
+            self._cleanup_portfolio_margin_known_stoploss(trade)
+            self._cleanup_portfolio_margin_unknown_stoploss(trade.pair)
+            self.state = State.STOPPED
+
+        if position_flat:
+            logger.critical(
+                "PAPI confirmed the Binance Portfolio Margin position is flat after "
+                "the emergency reduce-only market exit. The bot remains STOPPED pending "
+                "manual reconciliation."
+            )
+        elif exit_submitted:
+            logger.critical(
+                "The Binance Portfolio Margin emergency reduce-only market exit was "
+                "submitted, but PAPI did not confirm a flat position within the bounded "
+                "verification window. The position may still be open and the bot remains "
+                "STOPPED."
+            )
+        else:
+            logger.critical(
+                "The Binance Portfolio Margin emergency reduce-only market exit was not "
+                "confirmed submitted. The position may still be open and the bot remains "
+                "STOPPED."
+            )
 
     def handle_stoploss_on_exchange(self, trade: Trade) -> bool:
         """
@@ -1652,9 +1805,9 @@ class FreqtradeBot(LoggingMixin):
 
     def emergency_exit(
         self, trade: Trade, price: float, sub_trade_amt: float | None = None
-    ) -> None:
+    ) -> bool:
         try:
-            self.execute_trade_exit(
+            return self.execute_trade_exit(
                 trade,
                 price,
                 exit_check=ExitCheckTuple(exit_type=ExitType.EMERGENCY_EXIT),
@@ -1662,6 +1815,7 @@ class FreqtradeBot(LoggingMixin):
             )
         except DependencyException as exception:
             logger.warning(f"Unable to emergency exit trade {trade.pair}: {exception}")
+            return False
 
     def replace_order_failed(self, trade: Trade, msg: str) -> None:
         """
@@ -2089,14 +2243,19 @@ class FreqtradeBot(LoggingMixin):
         :param exit_check: CheckTuple with signal and reason
         :return: True if it succeeds False
         """
-        trade.set_funding_fees(
-            self.exchange.get_funding_fees(
-                pair=trade.pair,
-                amount=trade.amount,
-                is_short=trade.is_short,
-                open_date=trade.date_last_filled_utc,
-            )
+        portfolio_margin_emergency = (
+            exit_check.exit_type == ExitType.EMERGENCY_EXIT
+            and getattr(self.exchange, "portfolio_margin_enabled", False) is True
         )
+        if not portfolio_margin_emergency:
+            trade.set_funding_fees(
+                self.exchange.get_funding_fees(
+                    pair=trade.pair,
+                    amount=trade.amount,
+                    is_short=trade.is_short,
+                    open_date=trade.date_last_filled_utc,
+                )
+            )
 
         exit_type = "exit"
         exit_reason = exit_tag or exit_check.exit_reason
@@ -2108,9 +2267,13 @@ class FreqtradeBot(LoggingMixin):
             exit_type = "stoploss"
 
         order_type = (
-            (ordertype or self.strategy.order_types[exit_type])
-            if exit_check.exit_type != ExitType.EMERGENCY_EXIT
-            else self.strategy.order_types.get("emergency_exit", "market")
+            "market"
+            if portfolio_margin_emergency
+            else (
+                (ordertype or self.strategy.order_types[exit_type])
+                if exit_check.exit_type != ExitType.EMERGENCY_EXIT
+                else self.strategy.order_types.get("emergency_exit", "market")
+            )
         )
 
         # set custom_exit_price if available
@@ -2132,14 +2295,20 @@ class FreqtradeBot(LoggingMixin):
 
         limit = self.get_valid_price(custom_exit_price, proposed_limit_rate)
 
-        # First cancelling stoploss on exchange ...
-        trade = self.cancel_stoploss_on_exchange(trade, allow_nonblocking=True)
-
-        amount = self._safe_exit_amount(trade, trade.pair, sub_trade_amt or trade.amount)
+        if portfolio_margin_emergency:
+            # Do not delay the reduce-only market POST with funding, wallet, or
+            # stop-order network calls. Known and unknown stops are reconciled
+            # after the emergency order attempt while the bot stays stopped.
+            amount = sub_trade_amt or trade.amount
+        else:
+            # First cancelling stoploss on exchange ...
+            trade = self.cancel_stoploss_on_exchange(trade, allow_nonblocking=True)
+            amount = self._safe_exit_amount(trade, trade.pair, sub_trade_amt or trade.amount)
         time_in_force = self.strategy.order_time_in_force["exit"]
 
         if (
             exit_check.exit_type != ExitType.LIQUIDATION
+            and not portfolio_margin_emergency
             and not sub_trade_amt
             and not strategy_safe_wrapper(self.strategy.confirm_trade_exit, default_retval=True)(
                 pair=trade.pair,
@@ -2156,8 +2325,17 @@ class FreqtradeBot(LoggingMixin):
             logger.info(f"User denied exit for {trade.pair}.")
             return False
 
-        if trade.has_open_orders:
-            if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
+        if trade.has_open_orders and portfolio_margin_emergency:
+            logger.critical(
+                "Existing orders are present during a Binance Portfolio Margin "
+                "emergency exit. Submitting the reduce-only market order first; "
+                "the bot remains STOPPED pending reconciliation."
+            )
+        elif trade.has_open_orders:
+            open_order_still_present = self.handle_similar_open_order(
+                trade, limit, amount, trade.exit_side
+            )
+            if open_order_still_present:
                 return False
 
         try:
@@ -2175,8 +2353,9 @@ class FreqtradeBot(LoggingMixin):
             )
         except InsufficientFundsError as e:
             logger.warning(f"Unable to place order {e}.")
-            # Try to figure out what went wrong
-            self.handle_insufficient_funds(trade)
+            if not portfolio_margin_emergency:
+                # Try to figure out what went wrong
+                self.handle_insufficient_funds(trade)
             return False
 
         self._exit_reason_cache[f"{trade.pair}_{trade.id}_{exit_reason}"] = dt_now()

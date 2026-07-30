@@ -657,6 +657,31 @@ def test_validate_default_conf(default_conf) -> None:
     validate_config_schema(default_conf)
 
 
+def test_validate_portfolio_margin_risk_schema(default_conf) -> None:
+    risk = {
+        "pair": "BTC/USDT:USDT",
+        "side": "long",
+        "max_leverage": 1,
+        "max_entry_notional": 50,
+        "force_entry_order_type": "market",
+        "reject_force_entry_price": True,
+    }
+    conf = deepcopy(default_conf)
+    conf["exchange"]["portfolio_margin_risk"] = risk
+    validate_config_schema(conf)
+
+    invalid_risks = (
+        {**risk, "max_leverage": True},
+        {**risk, "max_entry_notional": 51},
+        {**risk, "unexpected": True},
+    )
+    for invalid_risk in invalid_risks:
+        conf = deepcopy(default_conf)
+        conf["exchange"]["portfolio_margin_risk"] = invalid_risk
+        with pytest.raises(ConfigurationError):
+            validate_config_schema(conf)
+
+
 @pytest.mark.parametrize("fiat", ["EUR", "USD", "", None])
 def test_validate_fiat_currency_options(default_conf, fiat) -> None:
     # Validate via our validator - we allow setting defaults!

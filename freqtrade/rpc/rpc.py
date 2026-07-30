@@ -6,6 +6,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
 from datetime import UTC, date, datetime, timedelta
+from math import isclose, isfinite
 from typing import TYPE_CHECKING, Any
 
 import psutil
@@ -1152,6 +1153,55 @@ class RPC:
                 f"Wrong pair selected. Only pairs with stake-currency {stake_currency} allowed."
             )
 
+    def _portfolio_margin_force_entry_validations(
+        self,
+        pair: str,
+        price: float | None,
+        order_type: str | None,
+        order_side: SignalDirection,
+        stake_amount: float | None,
+        leverage: float | None,
+    ) -> None:
+        risk = getattr(self._freqtrade.exchange, "portfolio_margin_risk", None)
+        if not isinstance(risk, dict):
+            return
+
+        expected_order_type = risk["force_entry_order_type"]
+        strategy_order_type = self._freqtrade.strategy.order_types.get(
+            "force_entry", self._freqtrade.strategy.order_types["entry"]
+        )
+        if pair != risk["pair"]:
+            raise RPCException("Portfolio Margin force-entry is restricted to the reviewed pair.")
+        if order_side != SignalDirection.LONG:
+            raise RPCException("Portfolio Margin force-entry is long-only.")
+        if strategy_order_type != expected_order_type or (
+            order_type is not None and order_type != expected_order_type
+        ):
+            raise RPCException(
+                "Portfolio Margin force-entry order type cannot override the reviewed market order."
+            )
+        if risk["reject_force_entry_price"] and price is not None:
+            raise RPCException(
+                "Portfolio Margin market force-entry cannot accept an explicit price; "
+                "the live exchange rate must determine quantity."
+            )
+        if stake_amount is not None and (
+            not isfinite(stake_amount)
+            or stake_amount <= 0
+            or stake_amount > float(risk["max_entry_notional"])
+        ):
+            raise RPCException("Portfolio Margin force-entry stake exceeds the reviewed maximum.")
+        if leverage is not None and (
+            not isfinite(leverage)
+            or not isclose(
+                leverage,
+                float(risk["max_leverage"]),
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise RPCException("Portfolio Margin force-entry leverage must remain 1x.")
+
     def _rpc_force_entry(
         self,
         pair: str,
@@ -1167,6 +1217,14 @@ class RPC:
         Handler for forcebuy <asset> <price>
         Buys a pair trade at the given or current price
         """
+        self._portfolio_margin_force_entry_validations(
+            pair,
+            price,
+            order_type,
+            order_side,
+            stake_amount,
+            leverage,
+        )
         self._force_entry_validations(pair, order_side)
 
         # check if valid pair
@@ -1201,17 +1259,35 @@ class RPC:
                 "force_entry", self._freqtrade.strategy.order_types["entry"]
             )
         with self._freqtrade._exit_lock:
-            if self._freqtrade.execute_entry(
-                pair,
-                stake_amount,
-                price,
-                ordertype=order_type,
-                trade=trade,
-                is_short=is_short,
-                enter_tag=enter_tag,
-                leverage_=leverage,
-                mode="pos_adjust" if trade else "initial",
-            ):
+            try:
+                entry_created = self._freqtrade.execute_entry(
+                    pair,
+                    stake_amount,
+                    price,
+                    ordertype=order_type,
+                    trade=trade,
+                    is_short=is_short,
+                    enter_tag=enter_tag,
+                    leverage_=leverage,
+                    mode="pos_adjust" if trade else "initial",
+                )
+            except Exception:
+                if (
+                    getattr(
+                        self._freqtrade.exchange,
+                        "portfolio_margin_unknown_order_latched",
+                        False,
+                    )
+                    is True
+                ):
+                    self._freqtrade.state = State.STOPPED
+                    logger.critical(
+                        "Stopping the bot because the Binance Portfolio Margin "
+                        "force-entry result is unknown. Inspect PAPI positions and "
+                        "orders before restarting."
+                    )
+                raise
+            if entry_created:
                 Trade.commit()
                 trade = Trade.get_trades([Trade.is_open.is_(True), Trade.pair == pair]).first()
                 return trade
