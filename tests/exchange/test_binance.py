@@ -755,6 +755,7 @@ def test_additional_exchange_init_binance(default_conf, mocker):
     api_mock.fapiPrivateGetMultiAssetsMargin = MagicMock(return_value={"multiAssetsMargin": False})
     exchange = get_patched_exchange(mocker, default_conf, exchange="binance", api_mock=api_mock)
     assert exchange
+    assert exchange._portfolio_create_lock is None
     ccxt_exceptionhandlers(
         mocker,
         default_conf,
@@ -932,6 +933,7 @@ def test_binance_non_portfolio_use_v2_behavior_is_unchanged(default_conf, mocker
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
 
     assert exchange._portfolio_margin is False
+    assert exchange._portfolio_create_lock is None
 
 
 def test_binance_non_portfolio_does_not_expose_portfolio_risk(default_conf, mocker):
@@ -949,6 +951,18 @@ def test_binance_non_portfolio_does_not_expose_portfolio_risk(default_conf, mock
 
     assert exchange.portfolio_margin_enabled is False
     assert exchange.portfolio_margin_risk is None
+    assert exchange._portfolio_create_lock is None
+
+
+def test_binance_portfolio_margin_dry_run_does_not_create_order_lock(default_conf, mocker):
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf),
+        exchange="binance",
+    )
+
+    assert exchange.portfolio_margin_enabled is True
+    assert exchange._portfolio_create_lock is None
 
 
 def test_binance_portfolio_margin_rejects_non_linear_market(default_conf, mocker):
@@ -968,6 +982,7 @@ def test_binance_portfolio_margin_additional_exchange_init(default_conf, mocker)
     exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
 
     assert exchange
+    assert exchange._portfolio_create_lock is not None
     api_mock.papiGetUmPositionSideDual.assert_called_once_with()
     api_mock.papiGetUmAccountConfig.assert_called_once_with()
     api_mock.fapiPrivateGetPositionSideDual.assert_not_called()

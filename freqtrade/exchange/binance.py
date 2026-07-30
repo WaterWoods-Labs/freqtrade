@@ -119,7 +119,9 @@ class Binance(Exchange):
         )
         risk_config = exchange_config.get("portfolio_margin_risk")
         self._portfolio_margin_risk = risk_config if isinstance(risk_config, dict) else None
-        self._portfolio_create_lock = Lock()
+        self._portfolio_create_lock = (
+            Lock() if self._portfolio_margin and not config.get("dry_run", True) else None
+        )
         self._portfolio_active_client_order_id: str | None = None
         self._portfolio_unknown_conditional_client_order_id: str | None = None
         self._portfolio_unknown_conditional_pair: str | None = None
@@ -144,6 +146,16 @@ class Binance(Exchange):
     def portfolio_margin_enabled(self) -> bool:
         """Expose whether this adapter instance explicitly uses Portfolio Margin."""
         return self._portfolio_margin
+
+    def _get_portfolio_create_lock(self) -> Any:
+        """Return the live PAPI order lock, failing closed if it was not initialized."""
+        portfolio_create_lock = self._portfolio_create_lock
+        if portfolio_create_lock is None:
+            raise OperationalException(
+                "Binance Portfolio Margin live order serialization is unavailable. "
+                "Trading remains stopped."
+            )
+        return portfolio_create_lock
 
     @staticmethod
     def _nested_option_dicts(options: dict) -> list[dict]:
@@ -1001,7 +1013,7 @@ class Binance(Exchange):
                 initial_order=initial_order,
             )
 
-        with self._portfolio_create_lock:
+        with self._get_portfolio_create_lock():
             if self._portfolio_unknown_order_latched and not reduceOnly:
                 raise OperationalException(
                     "Binance Portfolio Margin has a latched unknown order state. "
@@ -1100,7 +1112,7 @@ class Binance(Exchange):
         if not self._portfolio_margin or self._config["dry_run"]:
             return super().create_stoploss(pair, amount, stop_price, order_types, side, leverage)
 
-        with self._portfolio_create_lock:
+        with self._get_portfolio_create_lock():
             if self._portfolio_unknown_order_latched:
                 raise InvalidOrderException(
                     "Binance Portfolio Margin has a latched unknown order state. "
@@ -1185,7 +1197,7 @@ class Binance(Exchange):
                 "match the pending safety record. Trading remains stopped."
             )
 
-        with self._portfolio_create_lock:
+        with self._get_portfolio_create_lock():
             stable_absent_snapshots = 0
             cancellation_error: Exception | None = None
             params = self._portfolio_margin_params({"trigger": True})
