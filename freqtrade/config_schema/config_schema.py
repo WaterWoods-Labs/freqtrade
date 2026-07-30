@@ -1041,6 +1041,34 @@ CONF_SCHEMA = {
                     ),
                     "type": "object",
                 },
+                "portfolio_margin_risk": {
+                    "description": (
+                        "Optional fail-closed entry policy for the initial Binance "
+                        "Portfolio Margin adapter."
+                    ),
+                    "type": "object",
+                    "properties": {
+                        "pair": {"type": "string"},
+                        "side": {"type": "string", "const": "long"},
+                        "max_leverage": {"type": "number", "const": 1},
+                        "max_entry_notional": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": 50,
+                        },
+                        "force_entry_order_type": {"type": "string", "const": "market"},
+                        "reject_force_entry_price": {"type": "boolean", "const": True},
+                    },
+                    "required": [
+                        "pair",
+                        "side",
+                        "max_leverage",
+                        "max_entry_notional",
+                        "force_entry_order_type",
+                        "reject_force_entry_price",
+                    ],
+                    "additionalProperties": False,
+                },
             },
             "required": ["name"],
         },
