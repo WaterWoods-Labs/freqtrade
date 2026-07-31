@@ -3,13 +3,14 @@ from datetime import datetime, timedelta
 from random import randint
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
+from urllib.parse import parse_qs, urlparse
 
 import ccxt
 import pandas as pd
 import pytest
 
 from freqtrade.data.converter.trade_converter import trades_dict_to_list
-from freqtrade.enums import CandleType, MarginMode, RunMode, TradingMode
+from freqtrade.enums import CandleType, MarginMode, PriceType, RunMode, TradingMode
 from freqtrade.exceptions import (
     DependencyException,
     InvalidOrderException,
@@ -55,8 +56,50 @@ def portfolio_margin_risk_conf(default_conf, *, dry_run: bool = True):
     return conf
 
 
+def configure_portfolio_algo_api_mock(api_mock):
+    api_mock.request.return_value = []
+    api_mock.market.side_effect = lambda pair: {
+        "id": pair.replace("/", "").split(":")[0],
+        "symbol": pair,
+    }
+    api_mock.parse_order.side_effect = lambda order, market=None: order
+    api_mock.parse_orders.side_effect = lambda orders, market=None: orders
+    return api_mock
+
+
+def portfolio_algo_create_request(client_order_id: str) -> dict:
+    return {
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "clientAlgoId": client_order_id,
+        "newOrderRespType": "RESULT",
+        "type": "STOP_MARKET",
+        "quantity": "1",
+        "triggerPrice": "1900",
+        "reduceOnly": True,
+        "maxRetriesOnFailure": 0,
+    }
+
+
+def portfolio_algo_order(order_id: str, client_order_id: str, status: str = "open") -> dict:
+    return {
+        "id": order_id,
+        "clientOrderId": client_order_id,
+        "symbol": "ETH/USDT:USDT",
+        "type": "stop_market",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": status,
+        "info": {
+            "algoId": order_id,
+            "clientAlgoId": client_order_id,
+        },
+    }
+
+
 def portfolio_margin_live_api_mock():
-    return MagicMock(
+    api_mock = MagicMock(
         **{
             "fetch_leverage_tiers.return_value": {},
             "papiGetUmPositionSideDual.return_value": {"dualSidePosition": False},
@@ -69,6 +112,7 @@ def portfolio_margin_live_api_mock():
             "papiGetMarginOpenOrderList.return_value": [],
         }
     )
+    return configure_portfolio_algo_api_mock(api_mock)
 
 
 @pytest.mark.parametrize(
@@ -1257,32 +1301,13 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
         "side": "BUY",
         "updateTime": 1,
     }
-    conditional_order = {
-        "symbol": "ETHUSDT",
-        "strategyId": 73,
-        "newClientStrategyId": "ftpm-stop",
-        "strategyStatus": "NEW",
-        "strategyType": "STOP",
-        "origQty": "1",
-        "executedQty": "0",
-        "price": "0",
-        "stopPrice": "1900",
-        "side": "SELL",
-        "timeInForce": "GTC",
-        "updateTime": 1,
-    }
     endpoint_responses = {
         "papiGetBalance": [],
         "papiPostUmOrder": regular_order,
-        "papiPostUmConditionalOrder": conditional_order,
         "papiGetUmOrder": regular_order,
         "papiDeleteUmOrder": regular_order,
-        "papiGetUmConditionalOpenOrder": conditional_order,
-        "papiDeleteUmConditionalOrder": conditional_order,
         "papiGetUmOpenOrders": [regular_order],
-        "papiGetUmConditionalOpenOrders": [conditional_order],
         "papiGetUmAllOrders": [regular_order],
-        "papiGetUmConditionalAllOrders": [conditional_order],
         "papiGetUmUserTrades": [],
         "papiPostUmLeverage": {
             "symbol": "ETHUSDT",
@@ -1317,13 +1342,6 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
     pair = "ETH/USDT:USDT"
     api.fetch_balance(dict(route_params))
     api.create_order(pair, "limit", "buy", 1, 2000, dict(route_params))
-    api.create_order(
-        pair,
-        "market",
-        "sell",
-        1,
-        params={**route_params, "stopPrice": 1900, "reduceOnly": True},
-    )
     api.fetch_order("42", pair, dict(route_params))
     api.fetch_order(
         "ftpm-order",
@@ -1331,12 +1349,8 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
         {**route_params, "origClientOrderId": "ftpm-order"},
     )
     api.cancel_order("42", pair, dict(route_params))
-    api.fetch_open_order("73", pair, params={**route_params, "trigger": True})
-    api.cancel_order("73", pair, params={**route_params, "trigger": True})
     api.fetch_open_orders(params=dict(route_params))
-    api.fetch_open_orders(params={**route_params, "trigger": True})
     api.fetch_orders(pair, params=dict(route_params))
-    api.fetch_orders(pair, params={**route_params, "trigger": True})
     api.fetch_my_trades(pair, params=dict(route_params))
     api.set_leverage(1, pair, dict(route_params))
     api.fetch_funding_history(pair, params=dict(route_params))
@@ -1352,6 +1366,154 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
     assert [name for name, _ in recorded] == expected_endpoints
     routing_keys = {"papi", "portfolioMargin", "subType"}
     assert all(routing_keys.isdisjoint(request) for _, request in recorded)
+
+
+def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, markets):
+    """Use CCXT 4.5.67 signing with a fake transport for the full Algo lifecycle."""
+    assert ccxt.__version__ == "4.5.67"
+    pair = "ETH/USDT:USDT"
+    market = deepcopy(markets[pair])
+    market["id"] = "ETHUSDT"
+    market["contractSize"] = 10
+    market["precision"] = {"amount": 0.1, "price": 0.05}
+    market["info"] = {
+        "orderTypes": [
+            "LIMIT",
+            "MARKET",
+            "STOP",
+            "STOP_MARKET",
+            "TAKE_PROFIT",
+            "TAKE_PROFIT_MARKET",
+        ]
+    }
+
+    api = ccxt.binance(
+        {
+            "apiKey": "test-api-key",
+            "secret": "test-api-secret",
+            "enableRateLimit": False,
+            "options": {
+                "defaultType": "swap",
+                "portfolioMargin": True,
+            },
+        }
+    )
+    api.set_markets([market])
+    raw_order = {
+        "algoId": 73,
+        "clientAlgoId": "ftpm-raw-stop",
+        "algoType": "CONDITIONAL",
+        "orderType": "STOP_MARKET",
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "timeInForce": "GTC",
+        "quantity": "0.1",
+        "algoStatus": "NEW",
+        "triggerPrice": "1900",
+        "price": "0",
+        "workingType": "MARK_PRICE",
+        "priceProtect": False,
+        "reduceOnly": True,
+        "createTime": 1,
+        "updateTime": 1,
+        "actualOrderId": "",
+    }
+    recorded: list[dict] = []
+
+    def fake_fetch(url, method="GET", headers=None, body=None):
+        recorded.append({"url": url, "method": method, "body": body})
+        path = urlparse(url).path
+        if path == "/papi/v1/um/algo/order" and method == "POST":
+            return raw_order
+        if path == "/papi/v1/um/algo/order" and method == "DELETE":
+            return {"complete": True}
+        if path == "/papi/v1/um/algo/algoOrder":
+            return raw_order
+        if path in (
+            "/papi/v1/um/algo/openAlgoOrders",
+            "/papi/v1/um/algo/allAlgoOrders",
+        ):
+            return [raw_order]
+        raise AssertionError(f"Unexpected fake transport request: {method} {path}")
+
+    mocker.patch.object(api, "fetch", side_effect=fake_fetch)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        portfolio_margin_live_api_mock(),
+        exchange="binance",
+    )
+    exchange._api = api
+    exchange._markets = {pair: market}
+    mocker.patch.object(exchange, "_lev_prep")
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        return_value="ftpm-raw-stop",
+    )
+
+    created = exchange.create_stoploss(
+        pair=pair,
+        amount=1,
+        stop_price=1900,
+        order_types={
+            "stoploss": "market",
+            "stoploss_price_type": PriceType.MARK,
+        },
+        side="sell",
+        leverage=1,
+    )
+    assert created["id"] == "73"
+    assert created["amount"] == 1.0
+    fetched = exchange.fetch_stoploss_order("73", pair)
+    assert fetched["id"] == "73"
+    assert fetched["amount"] == 1.0
+    assert exchange._fetch_portfolio_algo_open_orders()[0]["id"] == "73"
+    assert exchange._fetch_portfolio_algo_order_history(pair, order_id="73")[0]["id"] == "73"
+    recovered = exchange._recover_portfolio_order(
+        pair,
+        "ftpm-raw-stop",
+        conditional=True,
+    )
+    assert recovered is not None
+    assert recovered["amount"] == 1.0
+    assert exchange.cancel_stoploss_order("73", pair)["status"] == "canceled"
+
+    assert [(item["method"], urlparse(item["url"]).path) for item in recorded] == [
+        ("POST", "/papi/v1/um/algo/order"),
+        ("GET", "/papi/v1/um/algo/algoOrder"),
+        ("GET", "/papi/v1/um/algo/openAlgoOrders"),
+        ("GET", "/papi/v1/um/algo/allAlgoOrders"),
+        ("GET", "/papi/v1/um/algo/allAlgoOrders"),
+        ("DELETE", "/papi/v1/um/algo/order"),
+    ]
+    assert all("/fapi/" not in item["url"] for item in recorded)
+    assert all("/um/conditional/" not in item["url"] for item in recorded)
+
+    post = recorded[0]
+    post_body = post["body"].decode() if isinstance(post["body"], bytes) else post["body"]
+    post_params = parse_qs(post_body or urlparse(post["url"]).query)
+    assert {
+        "algoType": ["CONDITIONAL"],
+        "symbol": ["ETHUSDT"],
+        "side": ["SELL"],
+        "type": ["STOP_MARKET"],
+        "quantity": ["0.1"],
+        "triggerPrice": ["1900"],
+        "clientAlgoId": ["ftpm-raw-stop"],
+        "reduceOnly": ["true"],
+        "workingType": ["MARK_PRICE"],
+        "newOrderRespType": ["RESULT"],
+    }.items() <= post_params.items()
+    assert {
+        "strategyType",
+        "stopPrice",
+        "newClientStrategyId",
+        "papi",
+        "portfolioMargin",
+        "maxRetriesOnFailure",
+    }.isdisjoint(post_params)
 
 
 def test_binance_portfolio_margin_ccxt_disables_transport_retry():
@@ -1474,7 +1636,7 @@ def test_binance_portfolio_margin_order_lifecycle_routes(default_conf, mocker):
 
 
 def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
-    api_mock = MagicMock()
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
     api_mock.fetch_leverage_tiers.return_value = {}
     order = {
         "id": "73",
@@ -1485,7 +1647,7 @@ def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
         "status": "open",
         "info": {},
     }
-    api_mock.fetch_open_order.return_value = order
+    api_mock.request.return_value = order
     exchange = get_patched_exchange(
         mocker,
         portfolio_margin_conf(default_conf),
@@ -1494,32 +1656,89 @@ def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
     )
 
     assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
-    assert api_mock.fetch_open_order.call_args.kwargs["params"] == {
-        "papi": True,
-        "portfolioMargin": True,
-        "maxRetriesOnFailure": 0,
-        "trigger": True,
-    }
-    api_mock.fetch_open_order.side_effect = ccxt.OrderNotFound("not open")
-    api_mock.fetch_orders.return_value = [order]
-    assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
-    assert api_mock.fetch_orders.call_args.kwargs["params"]["trigger"] is True
+    api_mock.request.assert_called_once_with(
+        "um/algo/algoOrder",
+        "papi",
+        "GET",
+        {
+            "algoId": "73",
+            "maxRetriesOnFailure": 0,
+        },
+        config={"cost": 1},
+    )
+    api_mock.fetch_open_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
 
-    api_mock.fetch_open_order.side_effect = ccxt.InvalidOrder("invalid")
+    api_mock.request.reset_mock()
+    api_mock.request.side_effect = [ccxt.OrderNotFound("not open"), [order]]
+    assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
+    assert [call.args[:3] for call in api_mock.request.call_args_list] == [
+        ("um/algo/algoOrder", "papi", "GET"),
+        ("um/algo/allAlgoOrders", "papi", "GET"),
+    ]
+    assert api_mock.request.call_args_list[1].args[3] == {
+        "symbol": "ETHUSDT",
+        "algoId": "73",
+        "maxRetriesOnFailure": 0,
+    }
+
+    api_mock.request.side_effect = ccxt.InvalidOrder("invalid")
     with pytest.raises(InvalidOrderException, match="invalid Portfolio Margin"):
         exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
 
-    api_mock.fetch_open_order.side_effect = ccxt.RequestTimeout("timeout")
+    api_mock.request.side_effect = ccxt.RequestTimeout("timeout")
     with pytest.raises(TemporaryError, match="Could not get Portfolio Margin"):
         exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
 
-    api_mock.fetch_open_order.side_effect = ccxt.AuthenticationError("bad key")
+    api_mock.request.side_effect = ccxt.AuthenticationError("bad key")
     with pytest.raises(TemporaryError, match="bad key"):
         exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
 
-    api_mock.fetch_open_order.side_effect = ccxt.BaseError("unexpected")
+    api_mock.request.side_effect = ccxt.BaseError("unexpected")
     with pytest.raises(OperationalException, match="unexpected"):
         exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+
+def test_binance_portfolio_margin_stoploss_query_triggered(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    type(api_mock).has = PropertyMock(return_value={"fetchOrder": True})
+    stop_order = portfolio_algo_order("73", "ftpm-stop", status="closed")
+    stop_order["stopPrice"] = 1900.0
+    stop_order["info"]["actualOrderId"] = "9001"
+    api_mock.request.return_value = stop_order
+    api_mock.fetch_order.return_value = {
+        "id": "9001",
+        "symbol": "ETH/USDT:USDT",
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+        "status": "closed",
+        "info": {},
+    }
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    order = exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+    assert order["id"] == "73"
+    assert order["id_stop"] == "9001"
+    assert order["status_stop"] == "triggered"
+    assert order["stopPrice"] == 1900.0
+    api_mock.fetch_order.assert_called_once_with(
+        "9001",
+        "ETH/USDT:USDT",
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    )
+    api_mock.fetch_open_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
 
 
 def test_binance_portfolio_margin_recovers_unknown_create(default_conf, mocker):
@@ -1796,22 +2015,15 @@ def test_binance_portfolio_margin_stoploss_rechecks_latch_after_order_lock(defau
 
 def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker):
     mocker.patch("freqtrade.exchange.binance.sleep")
-    api_mock = MagicMock()
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
     api_mock.fetch_leverage_tiers.return_value = {}
     api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
     api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
-    api_mock.create_order.side_effect = ccxt.RequestTimeout("execution status unknown")
-    api_mock.fetch_orders.return_value = [
-        {
-            "id": "92",
-            "clientOrderId": "ftpm-stop",
-            "symbol": "ETH/USDT:USDT",
-            "amount": 1.0,
-            "filled": 0.0,
-            "remaining": 1.0,
-            "status": "open",
-            "info": {"newClientStrategyId": "ftpm-stop"},
-        }
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-stop")
+    recovered_order = portfolio_algo_order("92", "ftpm-stop")
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        [recovered_order],
     ]
     type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
     mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
@@ -1834,17 +2046,21 @@ def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker
     )
 
     assert recovered["id"] == "92"
-    assert api_mock.create_order.call_count == 1
-    assert api_mock.create_order.call_args.kwargs["params"]["clientOrderId"] == "ftpm-stop"
-    assert api_mock.fetch_orders.call_args.kwargs["params"] == {
-        "trigger": True,
-        "papi": True,
-        "portfolioMargin": True,
-        "maxRetriesOnFailure": 0,
-    }
+    assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
+    post_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "POST"]
+    assert len(post_calls) == 1
+    assert post_calls[0].args[:3] == ("um/algo/order", "papi", "POST")
+    assert post_calls[0].args[3]["clientAlgoId"] == "ftpm-stop"
+    assert post_calls[0].args[3]["algoType"] == "CONDITIONAL"
+    assert {"strategyType", "stopPrice", "newClientStrategyId"}.isdisjoint(post_calls[0].args[3])
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
 
-    api_mock.create_order.side_effect = ccxt.DDoSProtection("rate limited")
-    api_mock.fetch_orders.reset_mock(side_effect=True)
+    api_mock.request.reset_mock(side_effect=True)
+    api_mock.request.side_effect = [
+        ccxt.DDoSProtection("rate limited"),
+        [recovered_order],
+    ]
     recovered = exchange.create_stoploss(
         pair="ETH/USDT:USDT",
         amount=1,
@@ -1855,9 +2071,11 @@ def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker
     )
     assert recovered["id"] == "92"
 
-    api_mock.create_order.side_effect = ccxt.RequestTimeout("execution status unknown")
-    api_mock.fetch_orders.return_value = []
-    api_mock.fetch_orders.reset_mock()
+    api_mock.request.reset_mock(side_effect=True)
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        [],
+    ]
     with pytest.raises(InvalidOrderException, match="emergency exit"):
         exchange.create_stoploss(
             pair="ETH/USDT:USDT",
@@ -1867,12 +2085,15 @@ def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker
             side="sell",
             leverage=1,
         )
-    assert api_mock.fetch_orders.call_count == 1
+    assert [call.args[2] for call in api_mock.request.call_args_list] == [
+        "POST",
+        "GET",
+    ]
+    assert len([call for call in api_mock.request.call_args_list if call.args[2] == "POST"]) == 1
     assert exchange.portfolio_margin_unknown_order_latched is True
     assert exchange.portfolio_margin_enabled is True
 
-    create_count = api_mock.create_order.call_count
-    recovery_count = api_mock.fetch_orders.call_count
+    request_count = api_mock.request.call_count
     with pytest.raises(InvalidOrderException, match="latched unknown order"):
         exchange.create_stoploss(
             pair="ETH/USDT:USDT",
@@ -1882,12 +2103,14 @@ def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker
             side="sell",
             leverage=1,
         )
-    assert api_mock.create_order.call_count == create_count
-    assert api_mock.fetch_orders.call_count == recovery_count
+    assert api_mock.request.call_count == request_count
 
     exchange._portfolio_unknown_order_latched = False
-    api_mock.fetch_orders.side_effect = ccxt.RequestTimeout("recovery timeout")
-    api_mock.fetch_orders.reset_mock()
+    api_mock.request.reset_mock(side_effect=True)
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        ccxt.RequestTimeout("recovery timeout"),
+    ]
     with pytest.raises(InvalidOrderException, match="recovery query failed"):
         exchange.create_stoploss(
             pair="ETH/USDT:USDT",
@@ -1897,15 +2120,18 @@ def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker
             side="sell",
             leverage=1,
         )
-    assert api_mock.fetch_orders.call_count == 1
+    assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
 
 
 def test_binance_portfolio_margin_recovers_malformed_stoploss_response(default_conf, mocker):
-    api_mock = MagicMock()
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
     api_mock.fetch_leverage_tiers.return_value = {}
     api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
     api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
-    api_mock.create_order.return_value = {
+    api_mock.create_order_request.return_value = portfolio_algo_create_request(
+        "ftpm-stop-malformed"
+    )
+    malformed_order = {
         "id": 0,
         "clientOrderId": "ftpm-stop-malformed",
         "symbol": "ETH/USDT:USDT",
@@ -1916,18 +2142,10 @@ def test_binance_portfolio_margin_recovers_malformed_stoploss_response(default_c
         "status": "open",
         "info": {},
     }
-    api_mock.fetch_orders.return_value = [
-        {
-            "id": "95",
-            "clientOrderId": "ftpm-stop-malformed",
-            "symbol": "ETH/USDT:USDT",
-            "type": "stop_market",
-            "amount": 1.0,
-            "filled": 0.0,
-            "remaining": 1.0,
-            "status": "open",
-            "info": {"newClientStrategyId": "ftpm-stop-malformed"},
-        }
+    recovered_order = portfolio_algo_order("95", "ftpm-stop-malformed")
+    api_mock.request.side_effect = [
+        malformed_order,
+        [recovered_order],
     ]
     type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
     mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
@@ -1954,9 +2172,10 @@ def test_binance_portfolio_margin_recovers_malformed_stoploss_response(default_c
     )
 
     assert recovered["id"] == "95"
-    assert api_mock.create_order.call_count == 1
-    assert api_mock.fetch_orders.call_count == 1
-    assert api_mock.create_order.call_args.kwargs["params"]["maxRetriesOnFailure"] == 0
+    assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
+    assert api_mock.request.call_args_list[0].args[3]["maxRetriesOnFailure"] == 0
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
 
 
 def test_binance_portfolio_margin_unknown_entry_flattens_detected_exposure(default_conf, mocker):
@@ -2142,11 +2361,12 @@ def test_binance_portfolio_margin_unknown_entry_cancel_fill_race_is_flattened(de
 def test_binance_portfolio_margin_stoploss_failure_forces_emergency_exit(
     default_conf, mocker, ccxt_error
 ):
-    api_mock = MagicMock()
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
     api_mock.fetch_leverage_tiers.return_value = {}
     api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
     api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
-    api_mock.create_order.side_effect = ccxt_error
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-stop")
+    api_mock.request.side_effect = ccxt_error
     type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
     mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
     mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
@@ -2167,6 +2387,9 @@ def test_binance_portfolio_margin_stoploss_failure_forces_emergency_exit(
             leverage=1,
         )
     assert type(exc_info.value) is InvalidOrderException
+    assert api_mock.request.call_count == 1
+    assert api_mock.request.call_args.args[:3] == ("um/algo/order", "papi", "POST")
+    api_mock.create_order.assert_not_called()
     api_mock.fetch_orders.assert_not_called()
 
 
@@ -2174,22 +2397,18 @@ def test_binance_portfolio_margin_delayed_unknown_stop_is_cancelled_after_emerge
     default_conf, mocker
 ):
     sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
-    api_mock = MagicMock()
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
     api_mock.fetch_leverage_tiers.return_value = {}
     api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
     api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
-    api_mock.create_order.side_effect = ccxt.RequestTimeout("execution status unknown")
-    api_mock.fetch_orders.return_value = []
-    delayed_order = {
-        "id": "delayed-stop-92",
-        "clientOrderId": "ftpm-delayed-stop",
-        "symbol": "ETH/USDT:USDT",
-        "status": "open",
-        "info": {"newClientStrategyId": "ftpm-delayed-stop"},
-    }
-    api_mock.fetch_open_orders.side_effect = [
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-delayed-stop")
+    delayed_order = portfolio_algo_order("delayed-stop-92", "ftpm-delayed-stop")
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        [],
         [],
         [delayed_order],
+        {"complete": True},
         [],
         [],
         [],
@@ -2221,29 +2440,41 @@ def test_binance_portfolio_margin_delayed_unknown_stop_is_cancelled_after_emerge
 
     # Creation performs only the one configured fast recovery query. The
     # post-emergency cleanup owns all delayed visibility polling.
-    assert api_mock.fetch_orders.call_count == 1
+    assert [call.args[:3] for call in api_mock.request.call_args_list] == [
+        ("um/algo/order", "papi", "POST"),
+        ("um/algo/allAlgoOrders", "papi", "GET"),
+    ]
     sleep_mock.assert_not_called()
     assert exchange.cleanup_portfolio_margin_unknown_conditional_order("ETH/USDT:USDT")
 
-    conditional_params = {
-        "trigger": True,
-        "papi": True,
-        "portfolioMargin": True,
+    open_params = {
+        "algoType": "CONDITIONAL",
+        "symbol": "ETHUSDT",
         "maxRetriesOnFailure": 0,
     }
-    assert [call.kwargs["params"] for call in api_mock.fetch_open_orders.call_args_list] == [
-        conditional_params,
-        conditional_params,
-        conditional_params,
-        conditional_params,
-        conditional_params,
+    cleanup_calls = api_mock.request.call_args_list[2:]
+    assert [call.args[:3] for call in cleanup_calls] == [
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/order", "papi", "DELETE"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
     ]
-    api_mock.cancel_order.assert_called_once_with(
-        "delayed-stop-92",
-        "ETH/USDT:USDT",
-        params=conditional_params,
-    )
-    assert api_mock.create_order.call_count == 1
+    assert [
+        call.args[3]
+        for call in cleanup_calls
+        if call.args[:3] == ("um/algo/openAlgoOrders", "papi", "GET")
+    ] == [open_params] * 5
+    delete_call = next(call for call in cleanup_calls if call.args[2] == "DELETE")
+    assert delete_call.args[3] == {
+        "algoId": "delayed-stop-92",
+        "maxRetriesOnFailure": 0,
+    }
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+    api_mock.fetch_open_orders.assert_not_called()
+    api_mock.cancel_order.assert_not_called()
     assert exchange.portfolio_margin_unknown_order_latched is True
     assert exchange._portfolio_unknown_conditional_client_order_id is None
     assert exchange._portfolio_unknown_conditional_pair is None
@@ -2254,14 +2485,12 @@ def test_binance_portfolio_margin_unknown_stop_cleanup_fails_closed_if_still_ope
 ):
     mocker.patch("freqtrade.exchange.binance.sleep")
     api_mock = portfolio_margin_live_api_mock()
-    delayed_order = {
-        "id": "delayed-stop-93",
-        "clientOrderId": "ftpm-persistent-stop",
-        "symbol": "ETH/USDT:USDT",
-        "status": "open",
-        "info": {"newClientStrategyId": "ftpm-persistent-stop"},
-    }
-    api_mock.fetch_open_orders.return_value = [delayed_order]
+    delayed_order = portfolio_algo_order("delayed-stop-93", "ftpm-persistent-stop")
+
+    def persistent_algo_order(path, api, method, params, **kwargs):
+        return {"complete": True} if method == "DELETE" else [delayed_order]
+
+    api_mock.request.side_effect = persistent_algo_order
     exchange = get_patched_exchange(
         mocker,
         portfolio_margin_conf(default_conf, dry_run=False),
@@ -2275,8 +2504,14 @@ def test_binance_portfolio_margin_unknown_stop_cleanup_fails_closed_if_still_ope
     with pytest.raises(OperationalException, match="could not confirm"):
         exchange.cleanup_portfolio_margin_unknown_conditional_order("ETH/USDT:USDT")
 
-    assert api_mock.fetch_open_orders.call_count == exchange._portfolio_conditional_cleanup_attempts
-    assert api_mock.cancel_order.call_count == exchange._portfolio_conditional_cleanup_attempts
+    get_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "GET"]
+    delete_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "DELETE"]
+    assert len(get_calls) == exchange._portfolio_conditional_cleanup_attempts
+    assert len(delete_calls) == exchange._portfolio_conditional_cleanup_attempts
+    assert all(call.args[0] == "um/algo/openAlgoOrders" for call in get_calls)
+    assert all(call.args[0] == "um/algo/order" for call in delete_calls)
+    api_mock.fetch_open_orders.assert_not_called()
+    api_mock.cancel_order.assert_not_called()
     api_mock.create_order.assert_not_called()
     assert exchange._portfolio_unknown_conditional_client_order_id == "ftpm-persistent-stop"
 
@@ -2369,7 +2604,8 @@ def test_binance_portfolio_margin_rejects_untracked_open_orders(
     default_conf, mocker, exchange_orders, order_kind
 ):
     api_mock = portfolio_margin_live_api_mock()
-    api_mock.fetch_open_orders.side_effect = exchange_orders
+    api_mock.fetch_open_orders.return_value = exchange_orders[0]
+    api_mock.request.return_value = exchange_orders[1]
     exchange = get_patched_exchange(
         mocker,
         portfolio_margin_conf(default_conf, dry_run=False),
@@ -2380,28 +2616,32 @@ def test_binance_portfolio_margin_rejects_untracked_open_orders(
     with pytest.raises(OperationalException, match=rf"untracked {order_kind} open order"):
         exchange.validate_existing_positions({}, [])
 
-    assert [item.kwargs["params"] for item in api_mock.fetch_open_orders.call_args_list] == [
-        {
+    api_mock.fetch_open_orders.assert_called_once_with(
+        params={
             "papi": True,
             "portfolioMargin": True,
             "maxRetriesOnFailure": 0,
-        },
+        }
+    )
+    api_mock.request.assert_called_once_with(
+        "um/algo/openAlgoOrders",
+        "papi",
+        "GET",
         {
-            "trigger": True,
-            "papi": True,
-            "portfolioMargin": True,
+            "algoType": "CONDITIONAL",
             "maxRetriesOnFailure": 0,
         },
-    ]
+        config={"cost": 40},
+    )
 
 
 def test_binance_portfolio_margin_accepts_tracked_open_orders(default_conf, mocker):
     mocker.patch("freqtrade.exchange.binance.sleep")
     api_mock = portfolio_margin_live_api_mock()
-    api_mock.fetch_open_orders.side_effect = [
-        [{"id": "entry-42", "symbol": "ETH/USDT:USDT", "info": {}}],
-        [{"id": "stop-73", "symbol": "ETH/USDT:USDT", "info": {}}],
-    ] * 3
+    api_mock.fetch_open_orders.return_value = [
+        {"id": "entry-42", "symbol": "ETH/USDT:USDT", "info": {}}
+    ]
+    api_mock.request.return_value = [{"id": "stop-73", "symbol": "ETH/USDT:USDT", "info": {}}]
     exchange = get_patched_exchange(
         mocker,
         portfolio_margin_conf(default_conf, dry_run=False),
@@ -2429,14 +2669,15 @@ def test_binance_portfolio_margin_accepts_tracked_open_orders(default_conf, mock
     api_mock.dapiPrivateGetPositionRisk.assert_not_called()
     api_mock.sapiGetMarginOpenOrders.assert_not_called()
     api_mock.fapiPrivateGetOpenOrders.assert_not_called()
+    assert api_mock.fetch_open_orders.call_count == 3
+    assert api_mock.request.call_count == 3
 
 
 def test_binance_portfolio_margin_restart_detects_delayed_conditional_order(default_conf, mocker):
     sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
     api_mock = portfolio_margin_live_api_mock()
-    api_mock.fetch_open_orders.side_effect = [
-        [],
-        [],
+    api_mock.fetch_open_orders.side_effect = [[], []]
+    api_mock.request.side_effect = [
         [],
         [
             {
@@ -2458,7 +2699,8 @@ def test_binance_portfolio_margin_restart_detects_delayed_conditional_order(defa
     with pytest.raises(OperationalException, match="untracked conditional open order"):
         exchange.validate_existing_positions({}, [])
 
-    assert api_mock.fetch_open_orders.call_count == 4
+    assert api_mock.fetch_open_orders.call_count == 2
+    assert api_mock.request.call_count == 2
     assert [call.kwargs["params"] for call in api_mock.fetch_open_orders.call_args_list] == [
         {
             "papi": True,
@@ -2466,20 +2708,22 @@ def test_binance_portfolio_margin_restart_detects_delayed_conditional_order(defa
             "maxRetriesOnFailure": 0,
         },
         {
-            "trigger": True,
             "papi": True,
             "portfolioMargin": True,
             "maxRetriesOnFailure": 0,
         },
+    ]
+    assert [call.args[:3] for call in api_mock.request.call_args_list] == [
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+    ]
+    assert [call.args[3] for call in api_mock.request.call_args_list] == [
         {
-            "papi": True,
-            "portfolioMargin": True,
+            "algoType": "CONDITIONAL",
             "maxRetriesOnFailure": 0,
         },
         {
-            "trigger": True,
-            "papi": True,
-            "portfolioMargin": True,
+            "algoType": "CONDITIONAL",
             "maxRetriesOnFailure": 0,
         },
     ]
@@ -2546,6 +2790,29 @@ def test_binance_portfolio_margin_fails_closed_when_open_orders_unavailable(defa
 
     with pytest.raises(OperationalException, match="open-order reconciliation request failed"):
         exchange.validate_existing_positions({}, [])
+
+
+def test_binance_portfolio_margin_fails_closed_when_algo_orders_unavailable(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_open_orders.return_value = []
+    api_mock.request.side_effect = ccxt.RequestTimeout("algo timeout")
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(
+        OperationalException,
+        match="Algo conditional-order reconciliation request failed",
+    ):
+        exchange.validate_existing_positions({}, [])
+
+    api_mock.fetch_open_orders.assert_called_once()
+    api_mock.fetch_orders.assert_not_called()
+    api_mock.fetch_open_order.assert_not_called()
+    api_mock.cancel_order.assert_not_called()
 
 
 def test__set_leverage_binance(mocker, default_conf):
