@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   attestations: write
   contents: write
   id-token: write
@@ -31,6 +32,54 @@ jobs:
         run: |
           git fetch origin xcoin
           git merge-base --is-ancestor "$GITHUB_SHA" origin/xcoin
+
+      - name: Verify full XCoin CI passed for the release SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/xcoin-ci.yml/runs" \
+              -f branch=xcoin \
+              -f event=push \
+              -f head_sha="$GITHUB_SHA" \
+              -f status=completed \
+              -F per_page=100 \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id // empty'
+          )"
+          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Release blocked::No successful XCoin CI push run exists for $GITHUB_SHA"
+            {
+              echo "## XCoin release blocked"
+              echo
+              echo "No successful XCoin CI push run was found for exact SHA \`$GITHUB_SHA\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          full_job_id="$(
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs" \
+              -f filter=latest \
+              -F per_page=100 \
+              --jq '[.jobs[] | select(.name == "Full upstream compatibility" and .conclusion == "success")][0].id // empty'
+          )"
+          if [[ ! "$full_job_id" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Release blocked::XCoin CI run $run_id did not complete the full job successfully"
+            {
+              echo "## XCoin release blocked"
+              echo
+              echo "XCoin CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) did not contain a successful \`Full upstream compatibility\` job."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          {
+            echo "### Exact-SHA XCoin CI gate"
+            echo
+            echo "XCoin CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) passed its full job for \`$GITHUB_SHA\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -87,4 +136,3 @@ jobs:
         run: |
           echo "### XCoin image" >> "$GITHUB_STEP_SUMMARY"
           echo "\`${IMAGE_NAME}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
-

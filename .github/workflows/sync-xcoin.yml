@@ -36,6 +36,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mirror-token.outputs.token }}
         run: |
+          set -euo pipefail
           gh auth setup-git
           git fetch --prune origin xcoin develop
 
@@ -48,7 +49,47 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C sync/upstream-develop origin/xcoin
-          git merge --no-ff origin/develop -m "Merge upstream develop into XCoin"
+          if ! git merge --no-ff origin/develop -m "Merge upstream develop into XCoin"; then
+            allowed_conflict=".github/dependabot.yml"
+            conflicts=()
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+
+            if (( ${#conflicts[@]} == 1 )) && [[ "${conflicts[0]}" == "$allowed_conflict" ]]; then
+              expected_blob="$(git rev-parse "HEAD:$allowed_conflict")"
+              git checkout --ours -- "$allowed_conflict"
+              resolved_blob="$(git hash-object "$allowed_conflict")"
+              if [[ "$resolved_blob" != "$expected_blob" ]]; then
+                echo "::error title=Dependabot conflict resolution failed::Resolved policy does not match the XCoin branch"
+                exit 1
+              fi
+              git add -- "$allowed_conflict"
+              git commit --no-edit
+              echo "::notice title=Known Dependabot conflict resolved::Preserved the reviewed XCoin security-only policy"
+              {
+                echo "### Known upstream conflict resolved"
+                echo
+                echo "The only conflict was \`$allowed_conflict\`; the XCoin security-only policy was preserved."
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              conflict_text="${conflicts[*]:-<none>}"
+              echo "::error title=Unexpected upstream merge conflict::Only $allowed_conflict may be resolved automatically; found: $conflict_text"
+              {
+                echo "## XCoin upstream synchronization blocked"
+                echo
+                echo "Automatic conflict handling permits exactly one conflicted path: \`$allowed_conflict\`."
+                echo
+                if (( ${#conflicts[@]} )); then
+                  echo "Conflicted paths:"
+                  printf -- '- `%s`\n' "${conflicts[@]}"
+                else
+                  echo "Git reported a merge failure without an unmerged path; inspect the merge log."
+                fi
+              } >> "$GITHUB_STEP_SUMMARY"
+              git status --short
+              git merge --abort || true
+              exit 1
+            fi
+          fi
 
           if ! git push --force-with-lease origin HEAD:refs/heads/sync/upstream-develop; then
             echo "::error title=Synchronization branch push failed::Could not update sync/upstream-develop"
