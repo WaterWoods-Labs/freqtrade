@@ -1,25 +1,36 @@
 # ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade_poweredby.svg)
 
 [![XCoin CI](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/xcoin-ci.yml/badge.svg?branch=xcoin)](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/xcoin-ci.yml)
-[![Latest XCoin release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=xcoin-*&label=XCoin%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases/latest)
+[![Latest XCoin release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=xcoin-*&label=XCoin%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases?q=xcoin-&expanded=true)
+[![Binance Portfolio Margin CI](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/binance-portfolio-margin-ci.yml/badge.svg?branch=binance-portfolio-margin)](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/binance-portfolio-margin-ci.yml)
+[![Latest Binance Portfolio Margin release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=binance-portfolio-margin-*&label=Portfolio%20Margin%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases?q=binance-portfolio-margin-&expanded=true)
 
-## WaterWoods XCoin fork
+## WaterWoods Freqtrade products
 
-This fork adds native XCoin support to Freqtrade while preserving clean mirrors of the official
-project:
+This fork hosts two deliberately independent WaterWoods products. The default branch is `xcoin`;
+it is the repository landing page and the only long-lived XCoin integration branch. Binance
+Portfolio Margin/PAPI source lives only on `binance-portfolio-margin`.
 
-- `xcoin` is the default branch and the only long-lived XCoin integration branch.
+| Product | Source branch | Supported integration | Releases and image |
+| --- | --- | --- | --- |
+| XCoin | [`xcoin`](https://github.com/WaterWoods-Labs/freqtrade/tree/xcoin) (default) | XCoin spot and USDT perpetual futures; futures use cross margin | [XCoin releases](https://github.com/WaterWoods-Labs/freqtrade/releases?q=xcoin-&expanded=true); `ghcr.io/waterwoods-labs/freqtrade-xcoin` |
+| Binance Portfolio Margin | [`binance-portfolio-margin`](https://github.com/WaterWoods-Labs/freqtrade/tree/binance-portfolio-margin) | Binance standard Portfolio Margin, USD-M, cross margin, one-way mode through PAPI | [Binance Portfolio Margin releases](https://github.com/WaterWoods-Labs/freqtrade/releases?q=binance-portfolio-margin-&expanded=true); `ghcr.io/waterwoods-labs/freqtrade-binance-portfolio-margin` |
+
+The products have independent CI, release tags, images, maintenance rules, and runtime credentials.
+Never merge one product branch into the other or load one product's configuration with the other
+product's image. Pin the manifest digest reported in the applicable release instead of a mutable
+container tag.
+
+Repository branch roles are:
+
 - `develop` and `stable` are read-only, fast-forward mirrors of official Freqtrade.
-- XCoin spot and USDT perpetual futures are supported. Futures use cross margin only.
-- Always validate with dry-run first. Live trading additionally requires
-  `exchange.xcoin_live_trading_enabled=true`.
-- Runtime images are published from immutable `xcoin-YYYY.MM.DD.N` releases. Pin the reported
-  `ghcr.io/waterwoods-labs/freqtrade-xcoin@sha256:...` digest instead of a mutable tag.
+- `xcoin` accepts only XCoin changes; read [XCoin maintenance](docs/xcoin-maintenance.md).
+- `binance-portfolio-margin` accepts only Binance Portfolio Margin/PAPI changes; read its
+  [product maintenance policy](https://github.com/WaterWoods-Labs/freqtrade/blob/binance-portfolio-margin/docs/binance-portfolio-margin-maintenance.md).
 
-Start with the [latest release](https://github.com/WaterWoods-Labs/freqtrade/releases/latest) and
-read [XCoin maintenance](docs/xcoin-maintenance.md) before creating branches, synchronizing
-upstream, or publishing an image. Report XCoin-specific problems through this repository's issue
-forms; route general Freqtrade problems to the
+Always validate with dry-run first and follow the applicable product's live-trading gates and
+runtime runbook. Report product-specific problems through this repository's issue forms; route
+general Freqtrade problems to the
 [official project](https://github.com/freqtrade/freqtrade/issues). See [support](SUPPORT.md) and
 [security reporting](SECURITY.md) for details.
 

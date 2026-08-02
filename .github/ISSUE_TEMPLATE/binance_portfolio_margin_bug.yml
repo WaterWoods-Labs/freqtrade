@@ -1,0 +1,82 @@
+name: Binance Portfolio Margin bug
+description: Report a reproducible problem in the WaterWoods Binance Portfolio Margin/PAPI product.
+title: "[Binance Portfolio Margin Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form only for the standalone Binance Portfolio Margin/PAPI product. XCoin problems belong in an XCoin form, and general Freqtrade problems belong in the official Freqtrade repository. Never paste credentials, account identifiers, private orders, raw account responses, or unredacted live logs.
+  - type: checkboxes
+    id: routing
+    attributes:
+      label: Routing and safety
+      options:
+        - label: The problem is specific to Binance Portfolio Margin/PAPI or its WaterWoods integration.
+          required: true
+        - label: I reproduced it on an immutable Binance Portfolio Margin release or the current `binance-portfolio-margin` branch.
+          required: true
+        - label: I removed credentials, account identifiers, private order data, raw account responses, and other secrets.
+          required: true
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected area
+      options:
+        - Startup, account validation, or fail-closed behavior
+        - Balances, positions, or reconciliation
+        - Ordinary PAPI orders and fills
+        - PAPI Algo stop orders
+        - Funding, leverage, or liquidation data
+        - Configuration, CI, release, or maintenance
+    validations:
+      required: true
+  - type: dropdown
+    id: account_mode
+    attributes:
+      label: Account and position mode
+      description: Unsupported modes should fail closed; select them only when reporting that safety behavior.
+      options:
+        - Binance standard Portfolio Margin, USD-M, cross margin, one-way mode
+        - Dry-run, test, or CI environment without a live account
+        - Portfolio Margin Pro, hedge, isolated, or coin-margined mode (unsupported)
+        - Unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime_mode
+    attributes:
+      label: Runtime mode
+      options:
+        - Dry-run
+        - Live
+        - Backtest or data command
+        - CI or development environment
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Binance Portfolio Margin release or commit
+      description: Provide the `binance-portfolio-margin-YYYY.MM.DD.N` tag, immutable image digest, or commit SHA.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include only the smallest sanitized configuration fragment needed to reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior and sanitized logs
+      render: shell
+    validations:
+      required: true

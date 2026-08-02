@@ -3,7 +3,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Official Freqtrade issue tracker
     url: https://github.com/freqtrade/freqtrade/issues
-    about: Report problems that reproduce on official Freqtrade without the XCoin integration.
+    about: Report problems that reproduce on official Freqtrade without a WaterWoods product integration.
   - name: Official Freqtrade documentation
     url: https://www.freqtrade.io/en/stable/
     about: Read the official configuration, strategy, backtesting, and exchange documentation.
