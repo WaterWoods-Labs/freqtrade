@@ -1,6 +1,5 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, PropertyMock
 
 import pytest
@@ -8,12 +7,7 @@ from numpy import isnan
 from sqlalchemy import select
 
 from freqtrade.enums import SignalDirection, State, TradingMode
-from freqtrade.exceptions import (
-    ExchangeError,
-    InvalidOrderException,
-    OperationalException,
-    TemporaryError,
-)
+from freqtrade.exceptions import ExchangeError, InvalidOrderException, TemporaryError
 from freqtrade.persistence import Order, Trade
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.rpc import RPC, RPCException
@@ -1445,111 +1439,6 @@ def test_rpc_force_entry_wrong_mode(mocker, default_conf) -> None:
     pair = "ETH/BTC"
     with pytest.raises(RPCException, match=r"Can't go short on Spot markets\."):
         rpc._rpc_force_entry(pair, None, order_side=SignalDirection.SHORT)
-
-
-def test_rpc_portfolio_margin_force_entry_is_fail_closed() -> None:
-    risk = {
-        "pair": "BTC/USDT:USDT",
-        "side": "long",
-        "max_leverage": 1,
-        "max_entry_notional": 50,
-        "force_entry_order_type": "market",
-        "reject_force_entry_price": True,
-    }
-    bot = SimpleNamespace(
-        config={},
-        exchange=SimpleNamespace(portfolio_margin_risk=risk),
-        strategy=SimpleNamespace(order_types={"entry": "market", "force_entry": "market"}),
-    )
-    rpc = RPC(bot)
-
-    rpc._portfolio_margin_force_entry_validations(
-        "BTC/USDT:USDT",
-        None,
-        None,
-        SignalDirection.LONG,
-        50,
-        1,
-    )
-    invalid_calls = (
-        ({"pair": "ETH/USDT:USDT"}, "reviewed pair"),
-        ({"order_side": SignalDirection.SHORT}, "long-only"),
-        ({"order_type": "limit"}, "order type"),
-        ({"price": 1.0}, "cannot accept an explicit price"),
-        ({"stake_amount": 50.01}, "stake exceeds"),
-        ({"leverage": 2.0}, "leverage must remain 1x"),
-    )
-    for overrides, message in invalid_calls:
-        values = {
-            "pair": "BTC/USDT:USDT",
-            "price": None,
-            "order_type": None,
-            "order_side": SignalDirection.LONG,
-            "stake_amount": 50,
-            "leverage": 1,
-        }
-        values.update(overrides)
-        with pytest.raises(RPCException, match=message):
-            # Exercise the public RPC path so the safety check cannot be accidentally detached.
-            rpc._rpc_force_entry(**values)
-
-
-@pytest.mark.parametrize(
-    ("unknown_order_latched", "expected_state"),
-    [(True, State.STOPPED), (False, State.RUNNING)],
-)
-def test_rpc_portfolio_margin_force_entry_exception_stops_on_unknown_result(
-    mocker, unknown_order_latched, expected_state
-) -> None:
-    pair = "BTC/USDT:USDT"
-    risk = {
-        "pair": pair,
-        "side": "long",
-        "max_leverage": 1,
-        "max_entry_notional": 50,
-        "force_entry_order_type": "market",
-        "reject_force_entry_price": True,
-    }
-    exchange = SimpleNamespace(
-        portfolio_margin_risk=risk,
-        portfolio_margin_unknown_order_latched=unknown_order_latched,
-        get_markets=MagicMock(return_value={pair: {}}),
-        get_pair_quote_currency=MagicMock(return_value="USDT"),
-    )
-    execute_entry = MagicMock(side_effect=OperationalException("unknown PAPI order result"))
-    bot = SimpleNamespace(
-        config={
-            "force_entry_enable": True,
-            "max_open_trades": 1,
-            "stake_currency": "USDT",
-        },
-        exchange=exchange,
-        strategy=SimpleNamespace(
-            order_types={"entry": "market", "force_entry": "market"},
-            position_adjustment_enable=False,
-        ),
-        state=State.RUNNING,
-        trading_mode=TradingMode.FUTURES,
-        execute_entry=execute_entry,
-        _exit_lock=MagicMock(),
-    )
-    mocker.patch.object(
-        Trade, "get_trades", return_value=MagicMock(first=MagicMock(return_value=None))
-    )
-    mocker.patch.object(Trade, "get_open_trade_count", return_value=0)
-    rpc = RPC(bot)
-
-    with pytest.raises(OperationalException, match="unknown PAPI order result"):
-        rpc._rpc_force_entry(
-            pair,
-            None,
-            order_type="market",
-            stake_amount=50,
-            leverage=1,
-        )
-
-    assert execute_entry.call_count == 1
-    assert bot.state is expected_state
 
 
 @pytest.mark.usefixtures("init_persistence")

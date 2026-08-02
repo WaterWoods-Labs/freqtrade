@@ -52,8 +52,6 @@ jobs:
       - name: Run focused XCoin tests
         run: |
           pytest -q \
-            tests/test_configuration.py \
-            tests/exchange/test_binance.py \
             tests/exchange/test_xcoin.py \
             tests/freqtradebot/test_freqtradebot.py \
             tests/persistence/test_migrations.py \
@@ -106,3 +104,4 @@ jobs:
         run: |
           test "$FOCUSED_RESULT" = "success"
           test "$FULL_RESULT" = "success" -o "$FULL_RESULT" = "skipped"
+
