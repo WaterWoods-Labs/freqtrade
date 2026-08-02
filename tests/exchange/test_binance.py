@@ -1,20 +1,118 @@
 from copy import deepcopy
 from datetime import datetime, timedelta
 from random import randint
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
+from urllib.parse import parse_qs, urlparse
 
 import ccxt
 import pandas as pd
 import pytest
 
 from freqtrade.data.converter.trade_converter import trades_dict_to_list
-from freqtrade.enums import CandleType, MarginMode, RunMode, TradingMode
-from freqtrade.exceptions import DependencyException, InvalidOrderException, OperationalException
+from freqtrade.enums import CandleType, MarginMode, PriceType, RunMode, TradingMode
+from freqtrade.exceptions import (
+    DependencyException,
+    InvalidOrderException,
+    OperationalException,
+    TemporaryError,
+)
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_seconds
+from freqtrade.misc import deep_merge_dicts
 from freqtrade.persistence import Trade
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts, dt_utc
+from freqtrade.wallets import PositionWallet
 from tests.conftest import EXMS, get_patched_exchange
 from tests.exchange.test_exchange import ccxt_exceptionhandlers
+
+
+def portfolio_margin_conf(default_conf, *, dry_run: bool = True):
+    conf = deepcopy(default_conf)
+    conf["dry_run"] = dry_run
+    conf["trading_mode"] = TradingMode.FUTURES
+    conf["margin_mode"] = MarginMode.CROSS
+    conf["stake_currency"] = "USDT"
+    conf["exchange"]["pair_whitelist"] = ["ETH/USDT:USDT"]
+    conf["exchange"]["ccxt_config"] = {
+        "options": {
+            "defaultType": "swap",
+            "portfolioMargin": True,
+        }
+    }
+    return conf
+
+
+def portfolio_margin_risk_conf(default_conf, *, dry_run: bool = True):
+    conf = portfolio_margin_conf(default_conf, dry_run=dry_run)
+    pair = conf["exchange"]["pair_whitelist"][0]
+    conf["exchange"]["portfolio_margin_risk"] = {
+        "pair": pair,
+        "side": "long",
+        "max_leverage": 1,
+        "max_entry_notional": 50,
+        "force_entry_order_type": "market",
+        "reject_force_entry_price": True,
+    }
+    return conf
+
+
+def configure_portfolio_algo_api_mock(api_mock):
+    api_mock.request.return_value = []
+    api_mock.market.side_effect = lambda pair: {
+        "id": pair.replace("/", "").split(":")[0],
+        "symbol": pair,
+    }
+    api_mock.parse_order.side_effect = lambda order, market=None: order
+    api_mock.parse_orders.side_effect = lambda orders, market=None: orders
+    return api_mock
+
+
+def portfolio_algo_create_request(client_order_id: str) -> dict:
+    return {
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "clientAlgoId": client_order_id,
+        "newOrderRespType": "RESULT",
+        "type": "STOP_MARKET",
+        "quantity": "1",
+        "triggerPrice": "1900",
+        "reduceOnly": True,
+        "maxRetriesOnFailure": 0,
+    }
+
+
+def portfolio_algo_order(order_id: str, client_order_id: str, status: str = "open") -> dict:
+    return {
+        "id": order_id,
+        "clientOrderId": client_order_id,
+        "symbol": "ETH/USDT:USDT",
+        "type": "stop_market",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": status,
+        "info": {
+            "algoId": order_id,
+            "clientAlgoId": client_order_id,
+        },
+    }
+
+
+def portfolio_margin_live_api_mock():
+    api_mock = MagicMock(
+        **{
+            "fetch_leverage_tiers.return_value": {},
+            "papiGetUmPositionSideDual.return_value": {"dualSidePosition": False},
+            "papiGetUmAccountConfig.return_value": {"canTrade": True},
+            "fetch_open_orders.return_value": [],
+            "papiGetCmPositionRisk.return_value": [],
+            "papiGetCmOpenOrders.return_value": [],
+            "papiGetCmConditionalOpenOrders.return_value": [],
+            "papiGetMarginOpenOrders.return_value": [],
+            "papiGetMarginOpenOrderList.return_value": [],
+        }
+    )
+    return configure_portfolio_algo_api_mock(api_mock)
 
 
 @pytest.mark.parametrize(
@@ -701,6 +799,7 @@ def test_additional_exchange_init_binance(default_conf, mocker):
     api_mock.fapiPrivateGetMultiAssetsMargin = MagicMock(return_value={"multiAssetsMargin": False})
     exchange = get_patched_exchange(mocker, default_conf, exchange="binance", api_mock=api_mock)
     assert exchange
+    assert exchange._portfolio_create_lock is None
     ccxt_exceptionhandlers(
         mocker,
         default_conf,
@@ -709,6 +808,2011 @@ def test_additional_exchange_init_binance(default_conf, mocker):
         "additional_exchange_init",
         "fapiPrivateGetPositionSideDual",
     )
+
+
+def test_binance_portfolio_margin_rejects_unsupported_configs(default_conf, mocker):
+    conf = portfolio_margin_conf(default_conf)
+    conf["margin_mode"] = MarginMode.ISOLATED
+    with pytest.raises(OperationalException, match="futures trading with cross margin"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["trading_mode"] = TradingMode.SPOT
+    conf["margin_mode"] = MarginMode.NONE
+    with pytest.raises(OperationalException, match="futures trading with cross margin"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["portfolioMarginPro"] = True
+    with pytest.raises(OperationalException, match="Portfolio Margin Pro/PAPI v2 is not supported"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["defaultType"] = "delivery"
+    with pytest.raises(OperationalException, match="only supports linear USD-M perpetual"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["papi"] = False
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["loadLeverageBrackets"] = {"papi": False}
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_sync_config"] = {"options": {"papi": False}}
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {"options": {"papi": 0}}
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_sync_config"] = {"options": {"defaultPapi": False}}
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {
+        "options": {"fetchPositionsRisk": {"defaultPortfolioMargin": False}}
+    }
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_sync_config"] = {"options": {"papiV2": True}}
+    with pytest.raises(OperationalException, match="Pro/PAPI v2"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {
+        "options": {"fetchPositionsRisk": {"defaultUseV2": True}}
+    }
+    with pytest.raises(OperationalException, match="Pro/PAPI v2"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["fetchCurrencies"] = True
+    with pytest.raises(OperationalException, match="fetchCurrencies=false"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["fetchOpenOrders"] = {"warnWithoutSymbol": True}
+    with pytest.raises(OperationalException, match="no-symbol warning"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["fetchPositions"] = {"method": "account"}
+    with pytest.raises(OperationalException, match="method=positionRisk"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {"options": {"fetchPositions": "account"}}
+    with pytest.raises(OperationalException, match="method=positionRisk"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {
+        "options": {"fetchPositions": {"defaultMethod": "account"}}
+    }
+    with pytest.raises(OperationalException, match="method=positionRisk"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["fetchOpenOrders"] = {
+        "warnWithoutSymbol": False,
+        "defaultType": "margin",
+    }
+    with pytest.raises(OperationalException, match="must remain linear USD-M cross futures"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {
+        "options": {"loadLeverageBrackets": {"defaultSubType": "inverse"}}
+    }
+    with pytest.raises(OperationalException, match="must remain linear USD-M cross futures"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_config"]["options"]["maxRetriesOnFailure"] = 1
+    with pytest.raises(OperationalException, match="automatic request retries"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {
+        "options": {"createOrder": {"defaultMaxRetriesOnFailure": 1}}
+    }
+    with pytest.raises(OperationalException, match="automatic request retries"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["ccxt_async_config"] = {"timeout": 5_001}
+    with pytest.raises(OperationalException, match="timeout must be at most 5000 ms"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_conf(default_conf)
+    conf["force_entry_enable"] = True
+    with pytest.raises(OperationalException, match="force-entry requires"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_risk_conf(default_conf)
+    conf["exchange"]["portfolio_margin_risk"]["max_entry_notional"] = 51
+    with pytest.raises(OperationalException, match="at most 50 USDT"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+    conf = portfolio_margin_risk_conf(default_conf)
+    conf["exchange"]["portfolio_margin_risk"]["max_leverage"] = True
+    with pytest.raises(OperationalException, match="1x leverage"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+
+@pytest.mark.parametrize(
+    ("config_key", "options"),
+    [
+        ("ccxt_config", {"papi": True}),
+        ("ccxt_config", {"papi": 1}),
+        ("ccxt_sync_config", {"fetchBalance": {"defaultPapi": "yes"}}),
+        ("ccxt_async_config", {"createOrder": {"portfolioMargin": True}}),
+    ],
+)
+def test_binance_rejects_implicit_portfolio_margin_routing(
+    default_conf, mocker, config_key, options
+):
+    conf = deepcopy(default_conf)
+    conf["exchange"][config_key] = {"options": options}
+
+    with pytest.raises(OperationalException, match="must be enabled explicitly"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+
+def test_binance_non_portfolio_use_v2_behavior_is_unchanged(default_conf, mocker):
+    conf = deepcopy(default_conf)
+    conf["exchange"]["ccxt_config"] = {"options": {"useV2": True}}
+
+    exchange = get_patched_exchange(mocker, conf, exchange="binance")
+
+    assert exchange._portfolio_margin is False
+    assert exchange._portfolio_create_lock is None
+
+
+def test_binance_non_portfolio_does_not_expose_portfolio_risk(default_conf, mocker):
+    conf = deepcopy(default_conf)
+    conf["exchange"]["portfolio_margin_risk"] = {
+        "pair": "ETH/USDT:USDT",
+        "side": "long",
+        "max_leverage": 1,
+        "max_entry_notional": 50,
+        "force_entry_order_type": "market",
+        "reject_force_entry_price": True,
+    }
+
+    exchange = get_patched_exchange(mocker, conf, exchange="binance")
+
+    assert exchange.portfolio_margin_enabled is False
+    assert exchange.portfolio_margin_risk is None
+    assert exchange._portfolio_create_lock is None
+
+
+def test_binance_portfolio_margin_dry_run_does_not_create_order_lock(default_conf, mocker):
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf),
+        exchange="binance",
+    )
+
+    assert exchange.portfolio_margin_enabled is True
+    assert exchange._portfolio_create_lock is None
+
+
+def test_binance_portfolio_margin_rejects_non_linear_market(default_conf, mocker):
+    conf = portfolio_margin_conf(default_conf)
+    conf["exchange"]["pair_whitelist"] = ["ETH/BTC"]
+    with pytest.raises(OperationalException, match="linear USD-M perpetual markets only"):
+        get_patched_exchange(mocker, conf, exchange="binance")
+
+
+def test_binance_portfolio_margin_additional_exchange_init(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    conf = portfolio_margin_conf(default_conf, dry_run=False)
+
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+
+    assert exchange
+    assert exchange._portfolio_create_lock is not None
+    api_mock.papiGetUmPositionSideDual.assert_called_once_with()
+    api_mock.papiGetUmAccountConfig.assert_called_once_with()
+    api_mock.fapiPrivateGetPositionSideDual.assert_not_called()
+    api_mock.fapiPrivateGetMultiAssetsMargin.assert_not_called()
+
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": True}
+    with pytest.raises(OperationalException, match="One-way Mode"):
+        get_patched_exchange(
+            mocker,
+            portfolio_margin_conf(default_conf, dry_run=False),
+            api_mock,
+            exchange="binance",
+        )
+
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": False}
+    with pytest.raises(OperationalException, match="trading permission is disabled"):
+        get_patched_exchange(
+            mocker,
+            portfolio_margin_conf(default_conf, dry_run=False),
+            api_mock,
+            exchange="binance",
+        )
+
+
+def test_binance_portfolio_margin_private_routes(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.fetch_balance.return_value = {"info": {}, "free": {}, "used": {}, "total": {}}
+    api_mock.fetch_positions.return_value = []
+    api_mock.fetch_funding_history.return_value = [{"amount": 0.12}, {"amount": -0.02}]
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchLeverageTiers": True,
+            "setLeverage": True,
+            "fetchFundingHistory": True,
+        }
+    )
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    api_mock.reset_mock()
+
+    assert exchange._get_params("buy", "limit", 1, False) == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+    assert exchange._get_stop_params("sell", "stop", 100) == {
+        "stopPrice": 100,
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+    assert exchange.get_balances() == {}
+    api_mock.fetch_balance.assert_called_once_with(
+        {"papi": True, "portfolioMargin": True, "maxRetriesOnFailure": 0}
+    )
+
+    assert exchange.fetch_positions() == []
+    api_mock.fetch_positions.assert_called_once_with(None, params={"maxRetriesOnFailure": 0})
+    api_mock.fetch_positions.reset_mock()
+    assert (
+        exchange.fetch_positions(
+            params={
+                "subType": "linear",
+                "defaultSubType": "linear",
+                "defaultType": "swap",
+                "marginMode": "cross",
+            }
+        )
+        == []
+    )
+    api_mock.fetch_positions.assert_called_once_with(None, params={"maxRetriesOnFailure": 0})
+
+    api_mock.fetch_leverage_tiers.return_value = {}
+    assert exchange.get_leverage_tiers() == {}
+    api_mock.fetch_leverage_tiers.assert_called_once_with(
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        }
+    )
+
+    exchange._set_leverage(1.0, "ETH/USDT:USDT")
+    api_mock.set_leverage.assert_called_once_with(
+        symbol="ETH/USDT:USDT",
+        leverage=1,
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    )
+    with pytest.raises(OperationalException, match="restricted to 1x leverage"):
+        exchange._set_leverage(1.1, "ETH/USDT:USDT")
+
+    assert exchange._get_funding_fees_from_exchange(
+        "ETH/USDT:USDT", datetime(2026, 1, 1)
+    ) == pytest.approx(0.1)
+    assert api_mock.fetch_funding_history.call_args.kwargs["params"] == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        exchange._portfolio_margin_params({"papi": False})
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        exchange._portfolio_margin_params({"portfolioMargin": False})
+    with pytest.raises(OperationalException, match="non-USD-M markets"):
+        exchange._portfolio_margin_params({"subType": "inverse"})
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        exchange._portfolio_margin_params({"papi": 0})
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        exchange._portfolio_margin_params({"portfolioMargin": 0})
+    with pytest.raises(OperationalException, match="cannot disable PAPI"):
+        exchange._portfolio_margin_params({"defaultPapi": False})
+    with pytest.raises(OperationalException, match="safe retry controls"):
+        exchange._portfolio_margin_params({"defaultUseV2": True})
+    with pytest.raises(OperationalException, match="safe retry controls"):
+        exchange._portfolio_margin_params({"maxRetriesOnFailure": 1})
+    with pytest.raises(OperationalException, match="non-USD-M markets"):
+        exchange.fetch_positions(params={"callerMethodName": "unsafe"})
+    with pytest.raises(OperationalException, match="positionRisk"):
+        exchange.fetch_positions(params={"method": "account"})
+    with pytest.raises(OperationalException, match="positionRisk"):
+        exchange.fetch_positions(params={"defaultMethod": "account"})
+    with pytest.raises(OperationalException, match="non-USD-M markets"):
+        exchange._portfolio_margin_params({"type": "delivery"})
+    assert exchange._portfolio_margin_params({"subType": "linear"}) == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+
+    exchange.set_margin_mode("ETH/USDT:USDT", MarginMode.CROSS)
+    api_mock.set_margin_mode.assert_not_called()
+    with pytest.raises(OperationalException, match="isolated mode is not supported"):
+        exchange.set_margin_mode("ETH/USDT:USDT", MarginMode.ISOLATED)
+    assert exchange.fetch_trading_fees() == {}
+    api_mock.fetch_trading_fees.assert_not_called()
+
+
+def test_binance_portfolio_margin_entry_risk_guard(default_conf, mocker):
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_risk_conf(default_conf),
+        exchange="binance",
+    )
+    pair = "ETH/USDT:USDT"
+
+    exchange._validate_portfolio_margin_entry_order(
+        pair=pair,
+        side="buy",
+        amount=0.025,
+        rate=2000,
+        leverage=1,
+        reduce_only=False,
+    )
+    for overrides in (
+        {"pair": "XRP/USDT:USDT"},
+        {"side": "sell"},
+        {"amount": 0.026},
+        {"rate": 0},
+        {"leverage": 2},
+    ):
+        values = {
+            "pair": pair,
+            "side": "buy",
+            "amount": 0.025,
+            "rate": 2000,
+            "leverage": 1,
+            "reduce_only": False,
+        }
+        values.update(overrides)
+        with pytest.raises(OperationalException, match="entry blocked"):
+            exchange._validate_portfolio_margin_entry_order(**values)
+
+    # Emergency/normal reduce-only exits must remain available even if entry limits differ.
+    exchange._validate_portfolio_margin_entry_order(
+        pair="XRP/USDT:USDT",
+        side="sell",
+        amount=100,
+        rate=2000,
+        leverage=5,
+        reduce_only=True,
+    )
+
+
+def test_binance_portfolio_margin_preserves_open_position(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.fetch_positions.return_value = [
+        {
+            "symbol": "ETH/USDT:USDT",
+            "contracts": 2.0,
+            "notional": 4000.0,
+            "leverage": 2.0,
+            "initialMargin": 2000.0,
+            "collateral": 0.0,
+            "side": "long",
+            "marginMode": None,
+        }
+    ]
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    positions = exchange.fetch_positions()
+
+    assert positions[0]["collateral"] == 2000.0
+    assert positions[0]["marginMode"] == "cross"
+    assert positions[0]["contracts"] == 2.0
+    api_mock.fetch_positions.assert_called_once_with(None, params={"maxRetriesOnFailure": 0})
+
+
+def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets):
+    """Exercise CCXT 4.5.67 and record the raw endpoint requests without network access."""
+    assert ccxt.__version__ == "4.5.67"
+    conf = portfolio_margin_conf(default_conf)
+    exchange = get_patched_exchange(mocker, conf, exchange="binance")
+    route_params = exchange._portfolio_margin_params({"subType": "linear"})
+
+    market = deepcopy(markets["ETH/USDT:USDT"])
+    market["id"] = "ETHUSDT"
+    market["info"] = {
+        "orderTypes": [
+            "LIMIT",
+            "MARKET",
+            "STOP",
+            "STOP_MARKET",
+            "TAKE_PROFIT",
+            "TAKE_PROFIT_MARKET",
+        ]
+    }
+    raw_ccxt_config = deep_merge_dicts(
+        conf["exchange"]["ccxt_config"], deepcopy(exchange._ccxt_config)
+    )
+    api = ccxt.binance(raw_ccxt_config)
+    assert api.options["fetchCurrencies"] is False
+    assert api.options["fetchMarkets"]["types"] == ["linear"]
+    assert api.options["fetchOpenOrders"]["warnWithoutSymbol"] is False
+    assert api.options["fetchPositions"]["method"] == "positionRisk"
+    assert api.options["defaultSubType"] == "linear"
+    assert api.options["maxRetriesOnFailure"] == 0
+    assert api.options["useV2"] is False
+    api.set_markets([market])
+    recorded: list[tuple[str, dict]] = []
+
+    regular_order = {
+        "symbol": "ETHUSDT",
+        "orderId": 42,
+        "clientOrderId": "ftpm-order",
+        "price": "2000",
+        "origQty": "1",
+        "executedQty": "0",
+        "status": "NEW",
+        "timeInForce": "GTC",
+        "type": "LIMIT",
+        "side": "BUY",
+        "updateTime": 1,
+    }
+    endpoint_responses = {
+        "papiGetBalance": [],
+        "papiPostUmOrder": regular_order,
+        "papiGetUmOrder": regular_order,
+        "papiDeleteUmOrder": regular_order,
+        "papiGetUmOpenOrders": [regular_order],
+        "papiGetUmAllOrders": [regular_order],
+        "papiGetUmUserTrades": [],
+        "papiPostUmLeverage": {
+            "symbol": "ETHUSDT",
+            "leverage": 1,
+            "maxNotionalValue": "100000",
+        },
+        "papiGetUmIncome": [],
+        "papiGetUmLeverageBracket": [],
+        "papiGetUmPositionRisk": [],
+    }
+
+    def record_endpoint(name, response):
+        def endpoint(params=None):
+            recorded.append((name, params or {}))
+            return response
+
+        return endpoint
+
+    for endpoint_name, response in endpoint_responses.items():
+        setattr(api, endpoint_name, record_endpoint(endpoint_name, response))
+
+    fapi_calls: list[str] = []
+
+    def reject_fapi(*args, **kwargs):
+        fapi_calls.append("fapi")
+        raise AssertionError("Portfolio Margin route attempted to call FAPI")
+
+    for attribute in dir(api):
+        if attribute.startswith("fapi") and callable(getattr(api, attribute)):
+            setattr(api, attribute, reject_fapi)
+
+    pair = "ETH/USDT:USDT"
+    api.fetch_balance(dict(route_params))
+    api.create_order(pair, "limit", "buy", 1, 2000, dict(route_params))
+    api.fetch_order("42", pair, dict(route_params))
+    api.fetch_order(
+        "ftpm-order",
+        pair,
+        {**route_params, "origClientOrderId": "ftpm-order"},
+    )
+    api.cancel_order("42", pair, dict(route_params))
+    api.fetch_open_orders(params=dict(route_params))
+    api.fetch_orders(pair, params=dict(route_params))
+    api.fetch_my_trades(pair, params=dict(route_params))
+    api.set_leverage(1, pair, dict(route_params))
+    api.fetch_funding_history(pair, params=dict(route_params))
+    api.fetch_leverage_tiers(params=dict(route_params))
+    api.fetch_positions([pair], {})
+
+    assert fapi_calls == []
+    expected_endpoints = list(endpoint_responses)
+    expected_endpoints.insert(expected_endpoints.index("papiDeleteUmOrder"), "papiGetUmOrder")
+    expected_endpoints.insert(
+        expected_endpoints.index("papiGetUmPositionRisk"), "papiGetUmLeverageBracket"
+    )
+    assert [name for name, _ in recorded] == expected_endpoints
+    routing_keys = {"papi", "portfolioMargin", "subType"}
+    assert all(routing_keys.isdisjoint(request) for _, request in recorded)
+
+
+def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, markets):
+    """Use CCXT 4.5.67 signing with a fake transport for the full Algo lifecycle."""
+    assert ccxt.__version__ == "4.5.67"
+    pair = "ETH/USDT:USDT"
+    market = deepcopy(markets[pair])
+    market["id"] = "ETHUSDT"
+    market["contractSize"] = 10
+    market["precision"] = {"amount": 0.1, "price": 0.05}
+    market["info"] = {
+        "orderTypes": [
+            "LIMIT",
+            "MARKET",
+            "STOP",
+            "STOP_MARKET",
+            "TAKE_PROFIT",
+            "TAKE_PROFIT_MARKET",
+        ]
+    }
+
+    api = ccxt.binance(
+        {
+            "apiKey": "test-api-key",
+            "secret": "test-api-secret",
+            "enableRateLimit": False,
+            "options": {
+                "defaultType": "swap",
+                "portfolioMargin": True,
+            },
+        }
+    )
+    api.set_markets([market])
+    raw_order = {
+        "algoId": 73,
+        "clientAlgoId": "ftpm-raw-stop",
+        "algoType": "CONDITIONAL",
+        "orderType": "STOP_MARKET",
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "timeInForce": "GTC",
+        "quantity": "0.1",
+        "algoStatus": "NEW",
+        "triggerPrice": "1900",
+        "price": "0",
+        "workingType": "MARK_PRICE",
+        "priceProtect": False,
+        "reduceOnly": True,
+        "createTime": 1,
+        "updateTime": 1,
+        "actualOrderId": "",
+    }
+    recorded: list[dict] = []
+
+    def fake_fetch(url, method="GET", headers=None, body=None):
+        recorded.append({"url": url, "method": method, "body": body})
+        path = urlparse(url).path
+        if path == "/papi/v1/um/algo/order" and method == "POST":
+            return raw_order
+        if path == "/papi/v1/um/algo/order" and method == "DELETE":
+            return {"complete": True}
+        if path == "/papi/v1/um/algo/algoOrder":
+            return raw_order
+        if path in (
+            "/papi/v1/um/algo/openAlgoOrders",
+            "/papi/v1/um/algo/allAlgoOrders",
+        ):
+            return [raw_order]
+        raise AssertionError(f"Unexpected fake transport request: {method} {path}")
+
+    mocker.patch.object(api, "fetch", side_effect=fake_fetch)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        portfolio_margin_live_api_mock(),
+        exchange="binance",
+    )
+    exchange._api = api
+    exchange._markets = {pair: market}
+    mocker.patch.object(exchange, "_lev_prep")
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        return_value="ftpm-raw-stop",
+    )
+
+    created = exchange.create_stoploss(
+        pair=pair,
+        amount=1,
+        stop_price=1900,
+        order_types={
+            "stoploss": "market",
+            "stoploss_price_type": PriceType.MARK,
+        },
+        side="sell",
+        leverage=1,
+    )
+    assert created["id"] == "73"
+    assert created["amount"] == 1.0
+    fetched = exchange.fetch_stoploss_order("73", pair)
+    assert fetched["id"] == "73"
+    assert fetched["amount"] == 1.0
+    assert exchange._fetch_portfolio_algo_open_orders()[0]["id"] == "73"
+    assert exchange._fetch_portfolio_algo_order_history(pair, order_id="73")[0]["id"] == "73"
+    recovered = exchange._recover_portfolio_order(
+        pair,
+        "ftpm-raw-stop",
+        conditional=True,
+    )
+    assert recovered is not None
+    assert recovered["amount"] == 1.0
+    assert exchange.cancel_stoploss_order("73", pair)["status"] == "canceled"
+
+    assert [(item["method"], urlparse(item["url"]).path) for item in recorded] == [
+        ("POST", "/papi/v1/um/algo/order"),
+        ("GET", "/papi/v1/um/algo/algoOrder"),
+        ("GET", "/papi/v1/um/algo/openAlgoOrders"),
+        ("GET", "/papi/v1/um/algo/allAlgoOrders"),
+        ("GET", "/papi/v1/um/algo/allAlgoOrders"),
+        ("DELETE", "/papi/v1/um/algo/order"),
+    ]
+    assert all("/fapi/" not in item["url"] for item in recorded)
+    assert all("/um/conditional/" not in item["url"] for item in recorded)
+
+    post = recorded[0]
+    post_body = post["body"].decode() if isinstance(post["body"], bytes) else post["body"]
+    post_params = parse_qs(post_body or urlparse(post["url"]).query)
+    assert {
+        "algoType": ["CONDITIONAL"],
+        "symbol": ["ETHUSDT"],
+        "side": ["SELL"],
+        "type": ["STOP_MARKET"],
+        "quantity": ["0.1"],
+        "triggerPrice": ["1900"],
+        "clientAlgoId": ["ftpm-raw-stop"],
+        "reduceOnly": ["true"],
+        "workingType": ["MARK_PRICE"],
+        "newOrderRespType": ["RESULT"],
+    }.items() <= post_params.items()
+    assert {
+        "strategyType",
+        "stopPrice",
+        "newClientStrategyId",
+        "papi",
+        "portfolioMargin",
+        "maxRetriesOnFailure",
+    }.isdisjoint(post_params)
+
+
+def test_binance_portfolio_margin_ccxt_disables_transport_retry():
+    assert ccxt.__version__ == "4.5.67"
+    api = ccxt.binance(
+        {
+            "enableRateLimit": False,
+            "options": {"maxRetriesOnFailure": 5},
+        }
+    )
+    api.sign = MagicMock(
+        return_value={
+            "url": "https://papi.binance.com/papi/v1/um/order",
+            "method": "POST",
+            "headers": {},
+            "body": "",
+        }
+    )
+    api.fetch = MagicMock(side_effect=ccxt.RequestTimeout("unknown order result"))
+
+    with pytest.raises(ccxt.RequestTimeout):
+        api.fetch2(
+            "um/order",
+            "papi",
+            "POST",
+            {
+                "symbol": "ETHUSDT",
+                "maxRetriesOnFailure": 0,
+            },
+        )
+
+    assert api.fetch.call_count == 1
+    signed_params = api.sign.call_args.args[3]
+    assert signed_params == {"symbol": "ETHUSDT"}
+
+
+def test_binance_portfolio_margin_ccxt_market_loading_avoids_signed_sapi(default_conf, mocker):
+    """Authenticated market loading must use only public linear-market metadata."""
+    assert ccxt.__version__ == "4.5.67"
+    conf = portfolio_margin_conf(default_conf)
+    exchange = get_patched_exchange(mocker, conf, exchange="binance")
+    raw_ccxt_config = deep_merge_dicts(
+        conf["exchange"]["ccxt_config"], deepcopy(exchange._ccxt_config)
+    )
+    raw_ccxt_config.update({"apiKey": "not-a-real-key", "secret": "not-a-real-secret"})
+    api = ccxt.binance(raw_ccxt_config)
+    recorded: list[tuple[str, str, str]] = []
+
+    def record_request(path, api_name="public", method="GET", *args, **kwargs):
+        normalized_api = "/".join(api_name) if isinstance(api_name, list) else str(api_name)
+        recorded.append((normalized_api, method, path))
+        if "private" in normalized_api.lower() or normalized_api.lower().startswith("sapi"):
+            raise AssertionError(f"Signed non-PAPI market-loading request: {normalized_api}")
+        return {"symbols": []}
+
+    api.request = record_request
+
+    assert api.load_markets() == {}
+    assert recorded
+    assert all(api_name == "fapiPublic" for api_name, _, _ in recorded)
+
+
+def test_binance_portfolio_margin_order_lifecycle_routes(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    order = {
+        "id": "42",
+        "symbol": "ETH/USDT:USDT",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": "open",
+        "info": {},
+    }
+    api_mock.fetch_order.return_value = order
+    api_mock.cancel_order.return_value = order
+    api_mock.fetch_orders.return_value = [order]
+    api_mock.fetch_my_trades.return_value = []
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchOrder": True,
+            "fetchOrders": True,
+            "fetchMyTrades": True,
+        }
+    )
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    api_mock.reset_mock()
+
+    exchange.fetch_order("42", "ETH/USDT:USDT")
+    assert api_mock.fetch_order.call_args.kwargs["params"] == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+    exchange.cancel_order("42", "ETH/USDT:USDT")
+    assert api_mock.cancel_order.call_args.kwargs["params"] == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+    exchange._fetch_orders("ETH/USDT:USDT", datetime(2026, 1, 1))
+    assert api_mock.fetch_orders.call_args.kwargs["params"] == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+    exchange.get_trades_for_order("42", "ETH/USDT:USDT", datetime(2026, 1, 1))
+    assert api_mock.fetch_my_trades.call_args.kwargs["params"] == {
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+
+
+def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
+    api_mock.fetch_leverage_tiers.return_value = {}
+    order = {
+        "id": "73",
+        "symbol": "ETH/USDT:USDT",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": "open",
+        "info": {},
+    }
+    api_mock.request.return_value = order
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf),
+        api_mock,
+        exchange="binance",
+    )
+
+    assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
+    api_mock.request.assert_called_once_with(
+        "um/algo/algoOrder",
+        "papi",
+        "GET",
+        {
+            "algoId": "73",
+            "maxRetriesOnFailure": 0,
+        },
+        config={"cost": 1},
+    )
+    api_mock.fetch_open_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+
+    api_mock.request.reset_mock()
+    api_mock.request.side_effect = [ccxt.OrderNotFound("not open"), [order]]
+    assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
+    assert [call.args[:3] for call in api_mock.request.call_args_list] == [
+        ("um/algo/algoOrder", "papi", "GET"),
+        ("um/algo/allAlgoOrders", "papi", "GET"),
+    ]
+    assert api_mock.request.call_args_list[1].args[3] == {
+        "symbol": "ETHUSDT",
+        "algoId": "73",
+        "maxRetriesOnFailure": 0,
+    }
+
+    api_mock.request.side_effect = ccxt.InvalidOrder("invalid")
+    with pytest.raises(InvalidOrderException, match="invalid Portfolio Margin"):
+        exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+    api_mock.request.side_effect = ccxt.RequestTimeout("timeout")
+    with pytest.raises(TemporaryError, match="Could not get Portfolio Margin"):
+        exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+    api_mock.request.side_effect = ccxt.AuthenticationError("bad key")
+    with pytest.raises(TemporaryError, match="bad key"):
+        exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+    api_mock.request.side_effect = ccxt.BaseError("unexpected")
+    with pytest.raises(OperationalException, match="unexpected"):
+        exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+
+def test_binance_portfolio_margin_stoploss_query_triggered(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    type(api_mock).has = PropertyMock(return_value={"fetchOrder": True})
+    stop_order = portfolio_algo_order("73", "ftpm-stop", status="closed")
+    stop_order["stopPrice"] = 1900.0
+    stop_order["info"]["actualOrderId"] = "9001"
+    api_mock.request.return_value = stop_order
+    api_mock.fetch_order.return_value = {
+        "id": "9001",
+        "symbol": "ETH/USDT:USDT",
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+        "status": "closed",
+        "info": {},
+    }
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    order = exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+    assert order["id"] == "73"
+    assert order["id_stop"] == "9001"
+    assert order["status_stop"] == "triggered"
+    assert order["stopPrice"] == 1900.0
+    api_mock.fetch_order.assert_called_once_with(
+        "9001",
+        "ETH/USDT:USDT",
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    )
+    api_mock.fetch_open_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+
+
+def test_binance_portfolio_margin_recovers_unknown_create(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order.side_effect = ccxt.RequestTimeout("execution status unknown")
+    api_mock.fetch_order.return_value = {
+        "id": "91",
+        "clientOrderId": "ftpm-fixed",
+        "symbol": "ETH/USDT:USDT",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": "open",
+        "info": {},
+    }
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value="ftpm-fixed")
+
+    recovered = exchange.create_order(
+        pair="ETH/USDT:USDT",
+        ordertype="limit",
+        side="buy",
+        amount=1,
+        rate=2000,
+        leverage=1,
+    )
+
+    assert recovered["id"] == "91"
+    assert api_mock.create_order.call_count == 1
+    assert api_mock.create_order.call_args.args[-1]["clientOrderId"] == "ftpm-fixed"
+    api_mock.fetch_order.assert_called_once_with(
+        "ftpm-fixed",
+        "ETH/USDT:USDT",
+        params={
+            "origClientOrderId": "ftpm-fixed",
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    )
+
+    api_mock.create_order.reset_mock(side_effect=True)
+    api_mock.create_order.side_effect = ccxt.DDoSProtection("rate limited")
+    api_mock.fetch_order.reset_mock(side_effect=True)
+    recovered = exchange.create_order(
+        pair="ETH/USDT:USDT",
+        ordertype="limit",
+        side="buy",
+        amount=1,
+        rate=2000,
+        leverage=1,
+    )
+    assert recovered["id"] == "91"
+    assert api_mock.create_order.call_count == 1
+    assert api_mock.fetch_order.call_count == 1
+
+    api_mock.create_order.reset_mock(side_effect=True)
+    api_mock.create_order.side_effect = ccxt.RequestTimeout("execution status unknown")
+    api_mock.fetch_order.side_effect = ccxt.OrderNotFound("not visible")
+    with pytest.raises(OperationalException, match="automatic retry is disabled"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=2000,
+            leverage=1,
+        )
+    assert api_mock.create_order.call_count == 1
+    assert exchange._portfolio_unknown_order_latched is True
+    with pytest.raises(OperationalException, match="latched unknown order"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=2000,
+            leverage=1,
+        )
+
+    exchange._portfolio_unknown_order_latched = False
+    api_mock.create_order.reset_mock(side_effect=True)
+    api_mock.create_order.side_effect = ccxt.DDoSProtection("rate limited")
+    api_mock.fetch_order.side_effect = ccxt.RequestTimeout("recovery timeout")
+    with pytest.raises(OperationalException, match="reconciliation query failed"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=2000,
+            leverage=1,
+        )
+    assert api_mock.create_order.call_count == 1
+
+
+def test_binance_portfolio_margin_recovers_malformed_create_response(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order.return_value = {
+        "id": "0",
+        "clientOrderId": "ftpm-malformed",
+        "symbol": "ETH/USDT:USDT",
+        "type": "limit",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": "open",
+        "info": {},
+    }
+    api_mock.fetch_order.return_value = {
+        "id": "93",
+        "clientOrderId": "ftpm-malformed",
+        "symbol": "ETH/USDT:USDT",
+        "type": "limit",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": "open",
+        "info": {},
+    }
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value="ftpm-malformed")
+
+    recovered = exchange.create_order(
+        pair="ETH/USDT:USDT",
+        ordertype="limit",
+        side="buy",
+        amount=1,
+        rate=2000,
+        leverage=1,
+    )
+
+    assert recovered["id"] == "93"
+    assert api_mock.create_order.call_count == 1
+    assert api_mock.fetch_order.call_count == 1
+    assert api_mock.create_order.call_args.args[-1]["maxRetriesOnFailure"] == 0
+
+
+def test_binance_portfolio_margin_latch_survives_recovered_reduce_only_order(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order.side_effect = ccxt.RequestTimeout("unknown reduce-only order")
+    api_mock.fetch_order.return_value = {
+        "id": "94",
+        "clientOrderId": "ftpm-reduce",
+        "symbol": "ETH/USDT:USDT",
+        "type": "market",
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+        "status": "closed",
+        "info": {},
+    }
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    exchange._portfolio_unknown_order_latched = True
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value="ftpm-reduce")
+
+    recovered = exchange.create_order(
+        pair="ETH/USDT:USDT",
+        ordertype="market",
+        side="sell",
+        amount=1,
+        rate=2000,
+        leverage=1,
+        reduceOnly=True,
+    )
+
+    assert recovered["id"] == "94"
+    assert exchange._portfolio_unknown_order_latched is True
+
+
+def test_binance_portfolio_margin_rechecks_latch_after_order_lock(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    class LatchingLock:
+        def __enter__(self):
+            exchange._portfolio_unknown_order_latched = True
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    exchange._portfolio_create_lock = LatchingLock()
+
+    with pytest.raises(OperationalException, match="latched unknown order"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=2000,
+            leverage=1,
+        )
+    api_mock.create_order.assert_not_called()
+
+
+def test_binance_portfolio_margin_stoploss_rechecks_latch_after_order_lock(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    class LatchingLock:
+        def __enter__(self):
+            exchange._portfolio_unknown_order_latched = True
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    exchange._portfolio_create_lock = LatchingLock()
+
+    with pytest.raises(InvalidOrderException, match="latched unknown order"):
+        exchange.create_stoploss(
+            pair="ETH/USDT:USDT",
+            amount=1,
+            stop_price=1900,
+            order_types={"stoploss": "market"},
+            side="sell",
+            leverage=1,
+        )
+    api_mock.create_order.assert_not_called()
+
+
+def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-stop")
+    recovered_order = portfolio_algo_order("92", "ftpm-stop")
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        [recovered_order],
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value="ftpm-stop")
+
+    recovered = exchange.create_stoploss(
+        pair="ETH/USDT:USDT",
+        amount=1,
+        stop_price=1900,
+        order_types={"stoploss": "market"},
+        side="sell",
+        leverage=1,
+    )
+
+    assert recovered["id"] == "92"
+    assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
+    post_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "POST"]
+    assert len(post_calls) == 1
+    assert post_calls[0].args[:3] == ("um/algo/order", "papi", "POST")
+    assert post_calls[0].args[3]["clientAlgoId"] == "ftpm-stop"
+    assert post_calls[0].args[3]["algoType"] == "CONDITIONAL"
+    assert {"strategyType", "stopPrice", "newClientStrategyId"}.isdisjoint(post_calls[0].args[3])
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+
+    api_mock.request.reset_mock(side_effect=True)
+    api_mock.request.side_effect = [
+        ccxt.DDoSProtection("rate limited"),
+        [recovered_order],
+    ]
+    recovered = exchange.create_stoploss(
+        pair="ETH/USDT:USDT",
+        amount=1,
+        stop_price=1900,
+        order_types={"stoploss": "market"},
+        side="sell",
+        leverage=1,
+    )
+    assert recovered["id"] == "92"
+
+    api_mock.request.reset_mock(side_effect=True)
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        [],
+    ]
+    with pytest.raises(InvalidOrderException, match="emergency exit"):
+        exchange.create_stoploss(
+            pair="ETH/USDT:USDT",
+            amount=1,
+            stop_price=1900,
+            order_types={"stoploss": "market"},
+            side="sell",
+            leverage=1,
+        )
+    assert [call.args[2] for call in api_mock.request.call_args_list] == [
+        "POST",
+        "GET",
+    ]
+    assert len([call for call in api_mock.request.call_args_list if call.args[2] == "POST"]) == 1
+    assert exchange.portfolio_margin_unknown_order_latched is True
+    assert exchange.portfolio_margin_enabled is True
+
+    request_count = api_mock.request.call_count
+    with pytest.raises(InvalidOrderException, match="latched unknown order"):
+        exchange.create_stoploss(
+            pair="ETH/USDT:USDT",
+            amount=1,
+            stop_price=1900,
+            order_types={"stoploss": "market"},
+            side="sell",
+            leverage=1,
+        )
+    assert api_mock.request.call_count == request_count
+
+    exchange._portfolio_unknown_order_latched = False
+    api_mock.request.reset_mock(side_effect=True)
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        ccxt.RequestTimeout("recovery timeout"),
+    ]
+    with pytest.raises(InvalidOrderException, match="recovery query failed"):
+        exchange.create_stoploss(
+            pair="ETH/USDT:USDT",
+            amount=1,
+            stop_price=1900,
+            order_types={"stoploss": "market"},
+            side="sell",
+            leverage=1,
+        )
+    assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
+
+
+def test_binance_portfolio_margin_recovers_malformed_stoploss_response(default_conf, mocker):
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order_request.return_value = portfolio_algo_create_request(
+        "ftpm-stop-malformed"
+    )
+    malformed_order = {
+        "id": 0,
+        "clientOrderId": "ftpm-stop-malformed",
+        "symbol": "ETH/USDT:USDT",
+        "type": "stop_market",
+        "amount": 1.0,
+        "filled": 0.0,
+        "remaining": 1.0,
+        "status": "open",
+        "info": {},
+    }
+    recovered_order = portfolio_algo_order("95", "ftpm-stop-malformed")
+    api_mock.request.side_effect = [
+        malformed_order,
+        [recovered_order],
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        return_value="ftpm-stop-malformed",
+    )
+
+    recovered = exchange.create_stoploss(
+        pair="ETH/USDT:USDT",
+        amount=1,
+        stop_price=1900,
+        order_types={"stoploss": "market"},
+        side="sell",
+        leverage=1,
+    )
+
+    assert recovered["id"] == "95"
+    assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
+    assert api_mock.request.call_args_list[0].args[3]["maxRetriesOnFailure"] == 0
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+
+
+def test_binance_portfolio_margin_unknown_entry_flattens_detected_exposure(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.fetch_order.side_effect = ccxt.OrderNotFound("not visible")
+    api_mock.fetch_open_orders.return_value = []
+    api_mock.fetch_positions.side_effect = [
+        [],
+        [
+            {
+                "symbol": "ETH/USDT:USDT",
+                "contracts": 0.025,
+                "side": "long",
+                "leverage": 1,
+                "marginMode": "cross",
+                "collateral": 50,
+            }
+        ],
+        [],
+        [],
+        [],
+    ]
+    api_mock.create_order.side_effect = [
+        ccxt.RequestTimeout("entry status unknown"),
+        {
+            "id": "emergency-close",
+            "clientOrderId": "ftpm-close",
+            "symbol": "ETH/USDT:USDT",
+            "status": "closed",
+            "info": {},
+        },
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_risk_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    exchange._portfolio_order_recovery_attempts = 1
+    client_ids = iter(("ftpm-entry", "ftpm-close"))
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        side_effect=lambda: next(client_ids),
+    )
+
+    with pytest.raises(OperationalException, match="flattened detected exposure"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    assert api_mock.create_order.call_count == 2
+    assert api_mock.fetch_open_orders.call_count == 5
+    assert api_mock.fetch_positions.call_count == 5
+    emergency_call = api_mock.create_order.call_args_list[1]
+    assert emergency_call.args[:3] == ("ETH/USDT:USDT", "market", "sell")
+    assert emergency_call.args[-1] == {
+        "reduceOnly": True,
+        "clientOrderId": "ftpm-close",
+        "papi": True,
+        "portfolioMargin": True,
+        "maxRetriesOnFailure": 0,
+    }
+    assert exchange._portfolio_unknown_order_latched is True
+
+
+def test_binance_portfolio_margin_unknown_entry_cancel_fill_race_is_flattened(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.fetch_order.side_effect = ccxt.OrderNotFound("not visible")
+    api_mock.fetch_open_orders.side_effect = [
+        [
+            {
+                "id": "late-entry",
+                "clientOrderId": "ftpm-entry",
+                "symbol": "ETH/USDT:USDT",
+                "status": "open",
+                "info": {},
+            }
+        ],
+        [],
+        [],
+        [],
+        [],
+    ]
+    api_mock.cancel_order.side_effect = ccxt.OrderNotFound("filled before cancel")
+    api_mock.fetch_positions.side_effect = [
+        [],
+        [
+            {
+                "symbol": "ETH/USDT:USDT",
+                "contracts": 0.025,
+                "side": "long",
+                "leverage": 1,
+                "marginMode": "cross",
+                "collateral": 50,
+            }
+        ],
+        [],
+        [],
+        [],
+    ]
+    api_mock.create_order.side_effect = [
+        ccxt.RequestTimeout("entry status unknown"),
+        {
+            "id": "emergency-close",
+            "clientOrderId": "ftpm-close",
+            "symbol": "ETH/USDT:USDT",
+            "status": "closed",
+            "info": {},
+        },
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_risk_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    exchange._portfolio_order_recovery_attempts = 1
+    client_ids = iter(("ftpm-entry", "ftpm-close"))
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        side_effect=lambda: next(client_ids),
+    )
+
+    with pytest.raises(OperationalException, match="flattened detected exposure"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    api_mock.cancel_order.assert_called_once_with(
+        "late-entry",
+        "ETH/USDT:USDT",
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    )
+    assert api_mock.fetch_open_orders.call_count == 5
+    assert api_mock.fetch_positions.call_count == 5
+    assert api_mock.create_order.call_count == 2
+    assert api_mock.create_order.call_args_list[1].args[:3] == (
+        "ETH/USDT:USDT",
+        "market",
+        "sell",
+    )
+    assert exchange.portfolio_margin_unknown_order_latched is True
+
+
+@pytest.mark.parametrize(
+    "ccxt_error",
+    [
+        ccxt.InsufficientFunds("insufficient"),
+        ccxt.InvalidOrder("invalid stop"),
+        ccxt.BaseError("unexpected"),
+    ],
+)
+def test_binance_portfolio_margin_stoploss_failure_forces_emergency_exit(
+    default_conf, mocker, ccxt_error
+):
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-stop")
+    api_mock.request.side_effect = ccxt_error
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(InvalidOrderException, match="emergency exit") as exc_info:
+        exchange.create_stoploss(
+            pair="ETH/USDT:USDT",
+            amount=1,
+            stop_price=1900,
+            order_types={"stoploss": "market"},
+            side="sell",
+            leverage=1,
+        )
+    assert type(exc_info.value) is InvalidOrderException
+    assert api_mock.request.call_count == 1
+    assert api_mock.request.call_args.args[:3] == ("um/algo/order", "papi", "POST")
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+
+
+def test_binance_portfolio_margin_delayed_unknown_stop_is_cancelled_after_emergency_exit(
+    default_conf, mocker
+):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = configure_portfolio_algo_api_mock(MagicMock())
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-delayed-stop")
+    delayed_order = portfolio_algo_order("delayed-stop-92", "ftpm-delayed-stop")
+    api_mock.request.side_effect = [
+        ccxt.RequestTimeout("execution status unknown"),
+        [],
+        [],
+        [delayed_order],
+        {"complete": True},
+        [],
+        [],
+        [],
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        return_value="ftpm-delayed-stop",
+    )
+
+    with pytest.raises(InvalidOrderException, match="emergency exit"):
+        exchange.create_stoploss(
+            pair="ETH/USDT:USDT",
+            amount=1,
+            stop_price=1900,
+            order_types={"stoploss": "market"},
+            side="sell",
+            leverage=1,
+        )
+
+    # Creation performs only the one configured fast recovery query. The
+    # post-emergency cleanup owns all delayed visibility polling.
+    assert [call.args[:3] for call in api_mock.request.call_args_list] == [
+        ("um/algo/order", "papi", "POST"),
+        ("um/algo/allAlgoOrders", "papi", "GET"),
+    ]
+    sleep_mock.assert_not_called()
+    assert exchange.cleanup_portfolio_margin_unknown_conditional_order("ETH/USDT:USDT")
+
+    open_params = {
+        "algoType": "CONDITIONAL",
+        "symbol": "ETHUSDT",
+        "maxRetriesOnFailure": 0,
+    }
+    cleanup_calls = api_mock.request.call_args_list[2:]
+    assert [call.args[:3] for call in cleanup_calls] == [
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/order", "papi", "DELETE"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+    ]
+    assert [
+        call.args[3]
+        for call in cleanup_calls
+        if call.args[:3] == ("um/algo/openAlgoOrders", "papi", "GET")
+    ] == [open_params] * 5
+    delete_call = next(call for call in cleanup_calls if call.args[2] == "DELETE")
+    assert delete_call.args[3] == {
+        "algoId": "delayed-stop-92",
+        "maxRetriesOnFailure": 0,
+    }
+    api_mock.create_order.assert_not_called()
+    api_mock.fetch_orders.assert_not_called()
+    api_mock.fetch_open_orders.assert_not_called()
+    api_mock.cancel_order.assert_not_called()
+    assert exchange.portfolio_margin_unknown_order_latched is True
+    assert exchange._portfolio_unknown_conditional_client_order_id is None
+    assert exchange._portfolio_unknown_conditional_pair is None
+
+
+def test_binance_portfolio_margin_unknown_stop_cleanup_fails_closed_if_still_open(
+    default_conf, mocker
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = portfolio_margin_live_api_mock()
+    delayed_order = portfolio_algo_order("delayed-stop-93", "ftpm-persistent-stop")
+
+    def persistent_algo_order(path, api, method, params, **kwargs):
+        return {"complete": True} if method == "DELETE" else [delayed_order]
+
+    api_mock.request.side_effect = persistent_algo_order
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    exchange._portfolio_unknown_order_latched = True
+    exchange._portfolio_unknown_conditional_client_order_id = "ftpm-persistent-stop"
+    exchange._portfolio_unknown_conditional_pair = "ETH/USDT:USDT"
+
+    with pytest.raises(OperationalException, match="could not confirm"):
+        exchange.cleanup_portfolio_margin_unknown_conditional_order("ETH/USDT:USDT")
+
+    get_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "GET"]
+    delete_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "DELETE"]
+    assert len(get_calls) == exchange._portfolio_conditional_cleanup_attempts
+    assert len(delete_calls) == exchange._portfolio_conditional_cleanup_attempts
+    assert all(call.args[0] == "um/algo/openAlgoOrders" for call in get_calls)
+    assert all(call.args[0] == "um/algo/order" for call in delete_calls)
+    api_mock.fetch_open_orders.assert_not_called()
+    api_mock.cancel_order.assert_not_called()
+    api_mock.create_order.assert_not_called()
+    assert exchange._portfolio_unknown_conditional_client_order_id == "ftpm-persistent-stop"
+
+
+def test_binance_portfolio_margin_position_flat_check_is_single_papi_read(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_positions.return_value = []
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    assert exchange.is_portfolio_margin_position_flat("ETH/USDT:USDT") is True
+    api_mock.fetch_positions.assert_called_once_with(
+        ["ETH/USDT:USDT"],
+        params={"maxRetriesOnFailure": 0},
+    )
+
+    api_mock.fetch_positions.reset_mock()
+    api_mock.fetch_positions.side_effect = ccxt.RequestTimeout("single read timeout")
+    with pytest.raises(TemporaryError, match="Portfolio Margin positions"):
+        exchange.is_portfolio_margin_position_flat("ETH/USDT:USDT")
+    assert api_mock.fetch_positions.call_count == 1
+
+
+def test_binance_portfolio_margin_reconciliation_and_liquidation(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = portfolio_margin_live_api_mock()
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    pair = "ETH/USDT:USDT"
+    position = PositionWallet(pair, position=1.0000000001, leverage=1, side="long")
+    trade = SimpleNamespace(pair=pair, amount=1.0, trade_direction="long")
+
+    exchange.validate_existing_positions({pair: position}, [trade])
+    with pytest.raises(OperationalException, match="exchange leverage is 2"):
+        exchange.validate_existing_positions(
+            {pair: PositionWallet(pair, position=1.0, leverage=2, side="long")},
+            [trade],
+        )
+    with pytest.raises(OperationalException, match="database has no open trade"):
+        exchange.validate_existing_positions({pair: position}, [])
+    with pytest.raises(OperationalException, match="exchange side is long"):
+        exchange.validate_existing_positions(
+            {pair: position}, [SimpleNamespace(pair=pair, amount=1.0, trade_direction="short")]
+        )
+    with pytest.raises(OperationalException, match="exchange has no matching position"):
+        exchange.validate_existing_positions({}, [trade])
+
+    assert (
+        exchange.get_liquidation_price(
+            pair=pair,
+            open_rate=2000,
+            is_short=False,
+            amount=1,
+            stake_amount=2000,
+            leverage=1,
+            wallet_balance=100,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("exchange_orders", "order_kind"),
+    [
+        (
+            [
+                [{"id": "regular-unknown", "symbol": "ETH/USDT:USDT", "info": {}}],
+                [],
+            ],
+            "regular",
+        ),
+        (
+            [
+                [],
+                [{"id": "stop-unknown", "symbol": "ETH/USDT:USDT", "info": {}}],
+            ],
+            "conditional",
+        ),
+    ],
+)
+def test_binance_portfolio_margin_rejects_untracked_open_orders(
+    default_conf, mocker, exchange_orders, order_kind
+):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_open_orders.return_value = exchange_orders[0]
+    api_mock.request.return_value = exchange_orders[1]
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(OperationalException, match=rf"untracked {order_kind} open order"):
+        exchange.validate_existing_positions({}, [])
+
+    api_mock.fetch_open_orders.assert_called_once_with(
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        }
+    )
+    api_mock.request.assert_called_once_with(
+        "um/algo/openAlgoOrders",
+        "papi",
+        "GET",
+        {
+            "algoType": "CONDITIONAL",
+            "maxRetriesOnFailure": 0,
+        },
+        config={"cost": 40},
+    )
+
+
+def test_binance_portfolio_margin_accepts_tracked_open_orders(default_conf, mocker):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_open_orders.return_value = [
+        {"id": "entry-42", "symbol": "ETH/USDT:USDT", "info": {}}
+    ]
+    api_mock.request.return_value = [{"id": "stop-73", "symbol": "ETH/USDT:USDT", "info": {}}]
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    pair = "ETH/USDT:USDT"
+    position = PositionWallet(pair, position=1.0, leverage=1, side="long")
+    trade = SimpleNamespace(
+        pair=pair,
+        amount=1.0,
+        trade_direction="long",
+        orders=[
+            SimpleNamespace(order_id="entry-42", ft_is_open=True),
+            SimpleNamespace(order_id="stop-73", ft_is_open=True),
+        ],
+    )
+
+    exchange.validate_existing_positions({pair: position}, [trade])
+    api_mock.papiGetCmPositionRisk.assert_called_once_with()
+    api_mock.papiGetCmOpenOrders.assert_called_once_with()
+    api_mock.papiGetCmConditionalOpenOrders.assert_called_once_with()
+    api_mock.papiGetMarginOpenOrders.assert_called_once_with()
+    api_mock.papiGetMarginOpenOrderList.assert_called_once_with()
+    api_mock.dapiPrivateGetPositionRisk.assert_not_called()
+    api_mock.sapiGetMarginOpenOrders.assert_not_called()
+    api_mock.fapiPrivateGetOpenOrders.assert_not_called()
+    assert api_mock.fetch_open_orders.call_count == 3
+    assert api_mock.request.call_count == 3
+
+
+def test_binance_portfolio_margin_restart_detects_delayed_conditional_order(default_conf, mocker):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_open_orders.side_effect = [[], []]
+    api_mock.request.side_effect = [
+        [],
+        [
+            {
+                "id": "late-stop-74",
+                "clientOrderId": "ftpm-old-process",
+                "symbol": "ETH/USDT:USDT",
+                "status": "open",
+                "info": {"newClientStrategyId": "ftpm-old-process"},
+            }
+        ],
+    ]
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(OperationalException, match="untracked conditional open order"):
+        exchange.validate_existing_positions({}, [])
+
+    assert api_mock.fetch_open_orders.call_count == 2
+    assert api_mock.request.call_count == 2
+    assert [call.kwargs["params"] for call in api_mock.fetch_open_orders.call_args_list] == [
+        {
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+        {
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    ]
+    assert [call.args[:3] for call in api_mock.request.call_args_list] == [
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", "papi", "GET"),
+    ]
+    assert [call.args[3] for call in api_mock.request.call_args_list] == [
+        {
+            "algoType": "CONDITIONAL",
+            "maxRetriesOnFailure": 0,
+        },
+        {
+            "algoType": "CONDITIONAL",
+            "maxRetriesOnFailure": 0,
+        },
+    ]
+    sleep_mock.assert_called_once_with(exchange._portfolio_order_recovery_delay)
+    api_mock.fapiPrivateGetOpenOrders.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "response", "message"),
+    [
+        (
+            "papiGetCmPositionRisk",
+            [{"symbol": "BTCUSD_PERP", "positionAmt": "1"}],
+            "unsupported COIN-M position",
+        ),
+        (
+            "papiGetCmOpenOrders",
+            [{"symbol": "BTCUSD_PERP", "orderId": "1"}],
+            "unsupported COIN-M open orders",
+        ),
+        (
+            "papiGetCmConditionalOpenOrders",
+            [{"symbol": "BTCUSD_PERP", "strategyId": "2"}],
+            "unsupported COIN-M conditional orders",
+        ),
+        (
+            "papiGetMarginOpenOrders",
+            [{"symbol": "BTCUSDT", "orderId": "3"}],
+            "unsupported margin open orders",
+        ),
+        (
+            "papiGetMarginOpenOrderList",
+            [{"symbol": "BTCUSDT", "orderListId": "4"}],
+            "unsupported margin OCO order lists",
+        ),
+    ],
+)
+def test_binance_portfolio_margin_rejects_unsupported_account_exposure(
+    default_conf, mocker, method_name, response, message
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = portfolio_margin_live_api_mock()
+    getattr(api_mock, method_name).return_value = response
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(OperationalException, match=message):
+        exchange.validate_existing_positions({}, [])
+
+
+def test_binance_portfolio_margin_fails_closed_when_open_orders_unavailable(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_open_orders.side_effect = ccxt.RequestTimeout("timeout")
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(OperationalException, match="open-order reconciliation request failed"):
+        exchange.validate_existing_positions({}, [])
+
+
+def test_binance_portfolio_margin_fails_closed_when_algo_orders_unavailable(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_open_orders.return_value = []
+    api_mock.request.side_effect = ccxt.RequestTimeout("algo timeout")
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    with pytest.raises(
+        OperationalException,
+        match="Algo conditional-order reconciliation request failed",
+    ):
+        exchange.validate_existing_positions({}, [])
+
+    api_mock.fetch_open_orders.assert_called_once()
+    api_mock.fetch_orders.assert_not_called()
+    api_mock.fetch_open_order.assert_not_called()
+    api_mock.cancel_order.assert_not_called()
 
 
 def test__set_leverage_binance(mocker, default_conf):

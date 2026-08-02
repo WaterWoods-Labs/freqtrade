@@ -20,6 +20,7 @@ from freqtrade.enums import (
     RunMode,
     SignalDirection,
     State,
+    TradingMode,
 )
 from freqtrade.exceptions import (
     DependencyException,
@@ -72,6 +73,290 @@ def patch_RPCManager(mocker) -> MagicMock:
     mocker.patch("freqtrade.rpc.telegram.Telegram", MagicMock())
     rpc_mock = mocker.patch("freqtrade.freqtradebot.RPCManager.send_msg", MagicMock())
     return rpc_mock
+
+
+@pytest.mark.parametrize(
+    "stoploss_error",
+    [
+        InvalidOrderException("unknown conditional order"),
+        InsufficientFundsError("conditional order rejected"),
+        ExchangeError("conditional API unavailable"),
+    ],
+)
+def test_create_stoploss_order_portfolio_failure_flattens_and_stops(stoploss_error, caplog):
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=True)
+    exchange.create_stoploss.side_effect = stoploss_error
+    exchange.is_portfolio_margin_position_flat.side_effect = [True, True]
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.return_value = True
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock(order_types={"stoploss": "market"})
+    freqtrade.state = State.RUNNING
+    freqtrade.execute_trade_exit = MagicMock(return_value=True)
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        exit_side="sell",
+        leverage=1,
+        open_sl_orders=[],
+    )
+
+    assert freqtrade.create_stoploss_order(trade, 95_000) is False
+
+    exchange.create_stoploss.assert_called_once()
+    freqtrade.execute_trade_exit.assert_called_once()
+    exit_check = freqtrade.execute_trade_exit.call_args.kwargs["exit_check"]
+    assert exit_check.exit_type == ExitType.EMERGENCY_EXIT
+    assert [item.args for item in exchange.is_portfolio_margin_position_flat.call_args_list] == [
+        (trade.pair,),
+        (trade.pair,),
+    ]
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.assert_called_once_with(trade.pair)
+    assert freqtrade.state is State.STOPPED
+    assert "PAPI confirmed the Binance Portfolio Margin position is flat" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "exit_result",
+    [False, DependencyException("emergency exit rejected")],
+)
+def test_create_stoploss_order_portfolio_exit_failure_stays_stopped(exit_result, caplog):
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=True)
+    exchange.create_stoploss.side_effect = InvalidOrderException("stoploss rejected")
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.return_value = True
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock(order_types={"stoploss": "market"})
+    freqtrade.state = State.RUNNING
+    freqtrade.execute_trade_exit = MagicMock()
+    if isinstance(exit_result, Exception):
+        freqtrade.execute_trade_exit.side_effect = exit_result
+    else:
+        freqtrade.execute_trade_exit.return_value = exit_result
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        exit_side="sell",
+        leverage=1,
+        open_sl_orders=[],
+    )
+
+    assert freqtrade.create_stoploss_order(trade, 95_000) is False
+
+    exchange.create_stoploss.assert_called_once()
+    freqtrade.execute_trade_exit.assert_called_once()
+    exchange.is_portfolio_margin_position_flat.assert_not_called()
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.assert_called_once_with(trade.pair)
+    assert freqtrade.state is State.STOPPED
+    assert "position may still be open" in caplog.text
+    assert "position is flat" not in caplog.text
+
+
+def test_create_stoploss_order_portfolio_requires_two_flat_snapshots(caplog):
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=True)
+    exchange.create_stoploss.side_effect = InvalidOrderException("unknown conditional order")
+    exchange.is_portfolio_margin_position_flat.side_effect = [True, False]
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.return_value = True
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock(order_types={"stoploss": "market"})
+    freqtrade.state = State.RUNNING
+    freqtrade.execute_trade_exit = MagicMock(return_value=True)
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        exit_side="sell",
+        leverage=1,
+        open_sl_orders=[],
+    )
+
+    assert freqtrade.create_stoploss_order(trade, 95_000) is False
+
+    assert exchange.is_portfolio_margin_position_flat.call_count == 2
+    assert freqtrade.state is State.STOPPED
+    assert "PAPI did not confirm a flat position" in caplog.text
+    assert "position is flat" not in caplog.text
+
+
+def test_create_stoploss_order_portfolio_cleanup_failure_preserves_exit_failure(caplog):
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=True)
+    exchange.create_stoploss.side_effect = InvalidOrderException("unknown conditional order")
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.side_effect = ExchangeError(
+        "PAPI cleanup unavailable"
+    )
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock(order_types={"stoploss": "market"})
+    freqtrade.state = State.RUNNING
+    freqtrade.execute_trade_exit = MagicMock(return_value=False)
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        exit_side="sell",
+        leverage=1,
+        open_sl_orders=[],
+    )
+
+    assert freqtrade.create_stoploss_order(trade, 95_000) is False
+
+    assert freqtrade.state is State.STOPPED
+    assert "conditional-order cleanup failed" in caplog.text
+    assert "emergency reduce-only market exit was not confirmed submitted" in caplog.text
+    assert "position is flat" not in caplog.text
+
+
+def test_portfolio_emergency_cleans_known_stop_only_after_market_attempt(caplog):
+    events = []
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=True)
+    exchange.create_stoploss.side_effect = InvalidOrderException("unknown conditional order")
+    exchange.is_portfolio_margin_position_flat.side_effect = [True, True]
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.side_effect = lambda pair: (
+        events.append("unknown-cleanup") or True
+    )
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock(order_types={"stoploss": "market"})
+    freqtrade.state = State.RUNNING
+    freqtrade.execute_trade_exit = MagicMock(
+        side_effect=lambda *args, **kwargs: events.append("market") or True
+    )
+
+    def fail_known_cleanup(*args, **kwargs):
+        events.append("known-cleanup")
+        raise ExchangeError("known stop cleanup unavailable")
+
+    freqtrade.cancel_stoploss_on_exchange = MagicMock(side_effect=fail_known_cleanup)
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        exit_side="sell",
+        leverage=1,
+        open_sl_orders=[MagicMock()],
+    )
+
+    assert freqtrade.create_stoploss_order(trade, 95_000) is False
+
+    assert events == ["market", "known-cleanup", "unknown-cleanup"]
+    assert freqtrade.state is State.STOPPED
+    assert "Known Binance Portfolio Margin stop-order cleanup failed" in caplog.text
+    assert "PAPI confirmed the Binance Portfolio Margin position is flat" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("stoploss_error", "emergency_calls", "insufficient_funds_calls"),
+    [
+        (InvalidOrderException("ordinary invalid order"), 1, 0),
+        (ExchangeError("ordinary exchange error"), 0, 0),
+        (InsufficientFundsError("ordinary insufficient funds"), 0, 1),
+    ],
+)
+def test_create_stoploss_order_ordinary_exchange_behavior_is_unchanged(
+    stoploss_error, emergency_calls, insufficient_funds_calls
+):
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=False)
+    exchange.create_stoploss.side_effect = stoploss_error
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock(order_types={"stoploss": "market"})
+    freqtrade.state = State.RUNNING
+    freqtrade.emergency_exit = MagicMock(return_value=False)
+    freqtrade.handle_insufficient_funds = MagicMock()
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        exit_side="sell",
+        leverage=1,
+        open_sl_orders=[],
+    )
+
+    assert freqtrade.create_stoploss_order(trade, 95_000) is False
+
+    assert freqtrade.emergency_exit.call_count == emergency_calls
+    assert freqtrade.handle_insufficient_funds.call_count == insufficient_funds_calls
+    exchange.cleanup_portfolio_margin_unknown_conditional_order.assert_not_called()
+    assert freqtrade.state is State.RUNNING
+
+
+@pytest.mark.parametrize(
+    ("portfolio_margin", "expected_result", "expected_confirm_calls"),
+    [(True, True, 0), (False, False, 1)],
+)
+def test_execute_trade_exit_portfolio_emergency_is_market_and_bypasses_veto(
+    mocker, portfolio_margin, expected_result, expected_confirm_calls
+):
+    freqtrade = FreqtradeBot.__new__(FreqtradeBot)
+    exchange = MagicMock()
+    type(exchange).portfolio_margin_enabled = PropertyMock(return_value=portfolio_margin)
+    exchange.get_funding_fees.return_value = 0.0
+    exchange.create_order.return_value = {"id": "emergency-close", "status": "open"}
+    freqtrade.exchange = exchange
+    freqtrade.strategy = MagicMock()
+    freqtrade.strategy.order_types = {
+        "exit": "limit",
+        "stoploss": "limit",
+        "emergency_exit": "limit",
+    }
+    freqtrade.strategy.order_time_in_force = {"exit": "GTC"}
+    freqtrade.strategy.confirm_trade_exit.return_value = False
+    freqtrade.trading_mode = TradingMode.FUTURES
+    freqtrade.cancel_stoploss_on_exchange = MagicMock()
+    freqtrade._safe_exit_amount = MagicMock(return_value=0.001)
+    freqtrade.get_valid_price = MagicMock(return_value=95_000)
+    freqtrade.handle_similar_open_order = MagicMock(return_value=portfolio_margin)
+    freqtrade._notify_exit = MagicMock()
+    freqtrade._exit_reason_cache = {}
+    order_obj = MagicMock(order_id="emergency-close")
+    mocker.patch.object(Order, "parse_from_ccxt_object", return_value=order_obj)
+    mocker.patch.object(Trade, "commit")
+    trade = MagicMock(
+        pair="BTC/USDT:USDT",
+        amount=0.001,
+        is_short=False,
+        date_last_filled_utc=dt_now(),
+        has_open_orders=portfolio_margin,
+        leverage=1,
+        exit_side="sell",
+        id=1,
+        orders=[],
+    )
+    freqtrade.cancel_stoploss_on_exchange.return_value = trade
+
+    result = freqtrade.execute_trade_exit(
+        trade,
+        95_000,
+        ExitCheckTuple(exit_type=ExitType.EMERGENCY_EXIT),
+    )
+
+    assert result is expected_result
+    assert freqtrade.strategy.confirm_trade_exit.call_count == expected_confirm_calls
+    if portfolio_margin:
+        exchange.get_funding_fees.assert_not_called()
+        freqtrade.cancel_stoploss_on_exchange.assert_not_called()
+        freqtrade._safe_exit_amount.assert_not_called()
+        freqtrade.handle_similar_open_order.assert_not_called()
+        exchange.create_order.assert_called_once_with(
+            pair=trade.pair,
+            ordertype="market",
+            side=trade.exit_side,
+            amount=0.001,
+            rate=95_000,
+            leverage=trade.leverage,
+            reduceOnly=True,
+            time_in_force="GTC",
+            initial_order=False,
+        )
+    else:
+        exchange.get_funding_fees.assert_called_once()
+        freqtrade.cancel_stoploss_on_exchange.assert_called_once()
+        freqtrade._safe_exit_amount.assert_called_once()
+        freqtrade.handle_similar_open_order.assert_not_called()
+        exchange.create_order.assert_not_called()
 
 
 # Unit tests
@@ -1435,6 +1720,7 @@ def test_update_trade_state_sell(
 
     patch_exchange(mocker)
     freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
     amount = l_order["amount"]
     wallet_mock.reset_mock()
     trade = Trade(
@@ -1463,6 +1749,61 @@ def test_update_trade_state_sell(
     assert not trade.is_open
     # Order is updated by update_trade_state
     assert order.status == "closed"
+    validator.assert_called_once_with(freqtrade.wallets.get_all_positions(), [])
+
+
+def test_update_trade_state_partial_exit_skips_position_validation(default_conf_usdt, mocker):
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    trade = MagicMock(is_open=True, exit_side="sell")
+    order = MagicMock(ft_order_side="sell")
+    trade.select_order_by_order_id.return_value = order
+    mocker.patch.object(freqtrade.exchange, "check_order_canceled_empty", return_value=False)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
+    mocker.patch.object(freqtrade, "handle_order_fee")
+    mocker.patch.object(freqtrade, "_update_trade_after_fill", return_value=trade)
+    mocker.patch.object(freqtrade, "order_close_notify")
+
+    freqtrade.update_trade_state(trade, "exit-order", {"id": "exit-order", "status": "closed"})
+
+    validator.assert_not_called()
+
+
+def test_update_trade_state_defers_validation_for_another_pending_exit(default_conf_usdt, mocker):
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    trade = MagicMock(is_open=False, exit_side="sell")
+    order = MagicMock(ft_order_side="sell")
+    trade.select_order_by_order_id.return_value = order
+    pending_trade = MagicMock(exit_side="buy")
+    pending_trade.open_orders = [MagicMock(ft_order_side="buy")]
+    mocker.patch.object(Trade, "get_open_trades", return_value=[pending_trade])
+    mocker.patch.object(freqtrade.exchange, "check_order_canceled_empty", return_value=False)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
+    mocker.patch.object(freqtrade, "handle_order_fee")
+    mocker.patch.object(freqtrade, "_update_trade_after_fill", return_value=trade)
+    mocker.patch.object(freqtrade, "order_close_notify")
+
+    freqtrade.update_trade_state(trade, "exit-order", {"id": "exit-order", "status": "closed"})
+
+    validator.assert_not_called()
+
+
+def test_update_trade_state_defers_validation_for_another_pending_entry(default_conf_usdt, mocker):
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    trade = MagicMock(is_open=False, exit_side="sell")
+    order = MagicMock(ft_order_side="sell")
+    trade.select_order_by_order_id.return_value = order
+    pending_trade = MagicMock(exit_side="sell")
+    pending_trade.open_orders = [MagicMock(ft_order_side="buy")]
+    mocker.patch.object(Trade, "get_open_trades", return_value=[pending_trade])
+    mocker.patch.object(freqtrade.exchange, "check_order_canceled_empty", return_value=False)
+    validator = mocker.patch.object(freqtrade.exchange, "validate_existing_positions")
+    mocker.patch.object(freqtrade, "handle_order_fee")
+    mocker.patch.object(freqtrade, "_update_trade_after_fill", return_value=trade)
+    mocker.patch.object(freqtrade, "order_close_notify")
+
+    freqtrade.update_trade_state(trade, "exit-order", {"id": "exit-order", "status": "closed"})
+
+    validator.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -4528,6 +4869,26 @@ def test_startup_trade_reinit(default_conf_usdt, mocker):
     ftbot = get_patched_freqtradebot(mocker, default_conf_usdt)
     ftbot.startup()
     assert reinit_mock.call_count == 1
+
+
+def test_startup_validates_existing_positions(default_conf_usdt, mocker):
+    mocker.patch(f"{EXMS}.exchange_has", MagicMock(return_value=True))
+    ftbot = get_patched_freqtradebot(mocker, default_conf_usdt)
+    calls = []
+    mocker.patch.object(
+        ftbot, "startup_update_open_orders", side_effect=lambda: calls.append("orders")
+    )
+    mocker.patch.object(ftbot.wallets, "update", side_effect=lambda: calls.append("wallets"))
+    validator = mocker.patch.object(
+        ftbot.exchange,
+        "validate_existing_positions",
+        side_effect=lambda *_: calls.append("validation"),
+    )
+
+    ftbot.startup()
+
+    validator.assert_called_once_with(ftbot.wallets.get_all_positions(), [])
+    assert calls == ["orders", "wallets", "validation"]
 
 
 @pytest.mark.usefixtures("init_persistence")
