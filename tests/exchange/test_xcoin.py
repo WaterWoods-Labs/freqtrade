@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import ccxt
 import pytest
 
+from freqtrade.configuration.config_validation import validate_config_schema
 from freqtrade.enums import CandleType, RunMode
-from freqtrade.exceptions import ExchangeError, OperationalException
+from freqtrade.exceptions import ConfigurationError, ExchangeError, OperationalException
 from freqtrade.exchange import Xcoin
 from freqtrade.exchange.check_exchange import check_exchange
 from freqtrade.exchange.xcoin_connector import (
@@ -41,6 +42,31 @@ def _xcoin_config(default_conf: dict, *, dry_run: bool = True) -> dict:
         }
     )
     return conf
+
+
+def test_xcoin_product_rejects_removed_exchange_risk_policy(default_conf) -> None:
+    conf = _xcoin_config(default_conf)
+    removed_risk_key = "portfolio_" + "margin_risk"
+    conf["exchange"][removed_risk_key] = {"pair": "BTC/USDT"}
+
+    with pytest.raises(
+        ConfigurationError,
+        match="XCoin-only product does not support exchange account-routing extensions",
+    ):
+        validate_config_schema(conf)
+
+
+@pytest.mark.parametrize("config_key", ["ccxt_config", "ccxt_async_config"])
+def test_xcoin_product_rejects_removed_account_mode(default_conf, config_key) -> None:
+    conf = _xcoin_config(default_conf)
+    removed_account_mode = "portfolio" + "Margin"
+    conf["exchange"][config_key] = {"options": {removed_account_mode: True}}
+
+    with pytest.raises(
+        ConfigurationError,
+        match="XCoin-only product does not support exchange account-routing extensions",
+    ):
+        validate_config_schema(conf)
 
 
 def _xcoin_response(method, path, params=None, data=None, private=False):
