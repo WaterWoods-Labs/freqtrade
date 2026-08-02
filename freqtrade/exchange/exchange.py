@@ -372,6 +372,15 @@ class Exchange:
 
         self._set_startup_candle_count(config)
 
+    def validate_existing_positions(
+        self, positions: dict[str, Any], open_trades: list[Any]
+    ) -> None:
+        """Validate exchange positions against trades loaded from the database.
+
+        Exchanges that require strict position reconciliation can override this hook.
+        The default implementation intentionally leaves existing behavior unchanged.
+        """
+
     def _init_ccxt(
         self, exchange_config: dict[str, Any], sync: bool, ccxt_kwargs: dict[str, Any]
     ) -> ccxt.Exchange:
