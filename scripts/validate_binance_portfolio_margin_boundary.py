@@ -11,6 +11,7 @@ from pathlib import Path
 SELF = "scripts/validate_binance_portfolio_margin_boundary.py"
 FORBIDDEN_MARKER = b"xcoin"
 MARKER_TEST = "tests/test_binance_portfolio_margin_boundary.py"
+MAINTENANCE_POLICY = "docs/binance-portfolio-margin-maintenance.md"
 
 
 def tracked_and_untracked_files() -> list[Path]:
@@ -29,7 +30,7 @@ def main() -> int:
         if FORBIDDEN_MARKER.decode() in normalized:
             violations.append(f"forbidden product path: {relative}")
 
-        if normalized in {SELF, MARKER_TEST} or not path.is_file():
+        if normalized in {SELF, MARKER_TEST, MAINTENANCE_POLICY} or not path.is_file():
             continue
 
         content = path.read_bytes()
