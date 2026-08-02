@@ -18,7 +18,6 @@ from freqtrade.enums import TRADE_MODES, CandleType, MarginMode, PriceType, RunM
 from freqtrade.exceptions import (
     DDosProtection,
     FreqtradeException,
-    InsufficientFundsError,
     InvalidOrderException,
     OperationalException,
     RetryableOrderError,
@@ -32,7 +31,6 @@ from freqtrade.exchange.binance_public_data import (
 )
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas, Tickers
-from freqtrade.exchange.exchange_utils import ROUND_DOWN, ROUND_UP
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
 from freqtrade.misc import deep_merge_dicts, json_load
 from freqtrade.util import FtTTLCache
@@ -532,202 +530,6 @@ class Binance(Exchange):
         result["maxRetriesOnFailure"] = 0
         return result
 
-    def _portfolio_algo_request(
-        self,
-        path: str,
-        method: str,
-        params: dict[str, Any] | None = None,
-    ) -> Any:
-        """Call one explicitly supported USD-M Algo endpoint through CCXT signing.
-
-        CCXT 4.5.67 parses Binance Algo orders but does not yet expose the
-        Portfolio Margin ``um/algo`` routes. Keep this shim deliberately thin:
-        CCXT still owns signing, time synchronization, HTTP handling, error
-        mapping, and rate limiting, while this adapter fixes the private API
-        namespace and disables transport retries for order-safety.
-        """
-        if not self._portfolio_margin:
-            raise OperationalException(
-                "Binance Portfolio Margin Algo routes require portfolioMargin=true."
-            )
-
-        method = method.upper()
-        route = (path, method)
-        allowed_params: dict[tuple[str, str], set[str]] = {
-            (
-                "um/algo/order",
-                "POST",
-            ): {
-                "algoType",
-                "symbol",
-                "side",
-                "type",
-                "quantity",
-                "positionSide",
-                "timeInForce",
-                "price",
-                "triggerPrice",
-                "workingType",
-                "priceMatch",
-                "priceProtect",
-                "reduceOnly",
-                "activatePrice",
-                "callbackRate",
-                "clientAlgoId",
-                "newOrderRespType",
-                "selfTradePreventionMode",
-                "goodTillDate",
-                "recvWindow",
-                "maxRetriesOnFailure",
-            },
-            (
-                "um/algo/order",
-                "DELETE",
-            ): {
-                "algoId",
-                "clientAlgoId",
-                "recvWindow",
-                "maxRetriesOnFailure",
-            },
-            (
-                "um/algo/algoOrder",
-                "GET",
-            ): {
-                "algoId",
-                "clientAlgoId",
-                "recvWindow",
-                "maxRetriesOnFailure",
-            },
-            (
-                "um/algo/openAlgoOrders",
-                "GET",
-            ): {
-                "algoType",
-                "symbol",
-                "algoId",
-                "recvWindow",
-                "maxRetriesOnFailure",
-            },
-            (
-                "um/algo/allAlgoOrders",
-                "GET",
-            ): {
-                "symbol",
-                "algoId",
-                "startTime",
-                "endTime",
-                "limit",
-                "recvWindow",
-                "maxRetriesOnFailure",
-            },
-        }
-        if route not in allowed_params:
-            raise OperationalException(
-                f"Unsupported Binance Portfolio Margin Algo route: {method} {path}."
-            )
-
-        request_params = dict(params or {})
-        if request_params.get("maxRetriesOnFailure", 0) not in (None, 0):
-            raise OperationalException(
-                "Binance Portfolio Margin Algo requests cannot enable transport retries."
-            )
-        unexpected = set(request_params).difference(allowed_params[route])
-        if unexpected:
-            raise OperationalException(
-                "Binance Portfolio Margin Algo request contained unsupported parameters: "
-                f"{', '.join(sorted(unexpected))}."
-            )
-        request_params["maxRetriesOnFailure"] = 0
-
-        # The account-wide open-order snapshot has a documented request weight
-        # of 40. History has weight 5; all other supported routes have weight 1.
-        cost = 1
-        if path == "um/algo/openAlgoOrders" and "symbol" not in request_params:
-            cost = 40
-        elif path == "um/algo/allAlgoOrders":
-            cost = 5
-        return self._api.request(
-            path,
-            "papi",
-            method,
-            request_params,
-            config={"cost": cost},
-        )
-
-    def _parse_portfolio_algo_order(self, response: Any, pair: str) -> CcxtOrder:
-        if not isinstance(response, dict):
-            raise OperationalException(
-                "Binance Portfolio Margin returned an unexpected Algo order response."
-            )
-        order = self._api.parse_order(response, self._api.market(pair))
-        if not isinstance(order, dict):
-            raise OperationalException(
-                "Binance Portfolio Margin returned an unparsable Algo order response."
-            )
-        return self._order_contracts_to_amount(order)
-
-    def _parse_portfolio_algo_orders(
-        self, response: Any, pair: str | None = None
-    ) -> list[CcxtOrder]:
-        if not isinstance(response, list) or any(not isinstance(item, dict) for item in response):
-            raise OperationalException(
-                "Binance Portfolio Margin returned an unexpected Algo order-list response."
-            )
-        market = self._api.market(pair) if pair is not None else None
-        orders = self._api.parse_orders(response, market)
-        if not isinstance(orders, list) or any(not isinstance(item, dict) for item in orders):
-            raise OperationalException(
-                "Binance Portfolio Margin returned an unparsable Algo order-list response."
-            )
-        return [self._order_contracts_to_amount(order) for order in orders]
-
-    def _fetch_portfolio_algo_order(
-        self,
-        pair: str,
-        *,
-        order_id: str | None = None,
-        client_order_id: str | None = None,
-    ) -> CcxtOrder:
-        if (order_id is None) == (client_order_id is None):
-            raise OperationalException(
-                "Exactly one Binance Portfolio Margin Algo order identifier is required."
-            )
-        query = {"algoId": order_id} if order_id is not None else {"clientAlgoId": client_order_id}
-        response = self._portfolio_algo_request("um/algo/algoOrder", "GET", query)
-        return self._parse_portfolio_algo_order(response, pair)
-
-    def _fetch_portfolio_algo_open_orders(self, pair: str | None = None) -> list[CcxtOrder]:
-        query: dict[str, Any] = {"algoType": "CONDITIONAL"}
-        if pair is not None:
-            query["symbol"] = self._api.market(pair)["id"]
-        response = self._portfolio_algo_request("um/algo/openAlgoOrders", "GET", query)
-        return self._parse_portfolio_algo_orders(response, pair)
-
-    def _fetch_portfolio_algo_order_history(
-        self, pair: str, *, order_id: str | None = None
-    ) -> list[CcxtOrder]:
-        query: dict[str, Any] = {"symbol": self._api.market(pair)["id"]}
-        if order_id is not None:
-            query["algoId"] = order_id
-        response = self._portfolio_algo_request("um/algo/allAlgoOrders", "GET", query)
-        return self._parse_portfolio_algo_orders(response, pair)
-
-    def _cancel_portfolio_algo_order(self, order_id: str) -> dict[str, Any]:
-        response = self._portfolio_algo_request(
-            "um/algo/order",
-            "DELETE",
-            {"algoId": order_id},
-        )
-        if not isinstance(response, dict) or response.get("complete") is not True:
-            raise OperationalException(
-                "Binance Portfolio Margin did not confirm the Algo order cancellation."
-            )
-        return {
-            "id": str(order_id),
-            "status": "canceled",
-            "info": response,
-        }
-
     @property
     def portfolio_margin_risk(self) -> dict[str, Any] | None:
         """Return the optional fail-closed runtime entry policy for RPC and order guards."""
@@ -922,11 +724,7 @@ class Binance(Exchange):
         if not isinstance(order, dict):
             return False
         info = order.get("info")
-        strategy_client_id = (
-            info.get("newClientStrategyId") or info.get("clientAlgoId")
-            if isinstance(info, dict)
-            else None
-        )
+        strategy_client_id = info.get("newClientStrategyId") if isinstance(info, dict) else None
         return (
             order.get("clientOrderId") == client_order_id or strategy_client_id == client_order_id
         )
@@ -952,10 +750,13 @@ class Binance(Exchange):
         for attempt in range(recovery_attempts):
             try:
                 if conditional:
-                    # History includes ACTIVE, CANCELED, TRIGGERED, and FINISHED
-                    # orders, so a stop that triggered immediately after an
-                    # unknown POST response cannot disappear from reconciliation.
-                    orders = self._fetch_portfolio_algo_order_history(pair)
+                    params = self._portfolio_margin_params({"trigger": True})
+                    orders = self._api.fetch_orders(pair, params=params)
+                    if not isinstance(orders, list):
+                        raise OperationalException(
+                            "Binance Portfolio Margin order submission status is unknown "
+                            "because PAPI returned an unexpected reconciliation response."
+                        )
                     order = next(
                         (
                             item
@@ -988,9 +789,7 @@ class Binance(Exchange):
                 "PAPI returned a reconciliation response without an exchange order id."
             )
         self._log_exchange_response("recovered_portfolio_margin_order", order)
-        # Algo helpers normalize contracts while parsing. Ordinary CCXT order
-        # recovery still needs the standard Freqtrade conversion exactly once.
-        return order if conditional else self._order_contracts_to_amount(order)
+        return self._order_contracts_to_amount(order)
 
     def _portfolio_active_position_snapshot(self, pair: str) -> list[tuple[dict[str, Any], float]]:
         """Return validated active PAPI positions for bounded safety reconciliation."""
@@ -1295,99 +1094,6 @@ class Binance(Exchange):
             finally:
                 self._portfolio_active_client_order_id = None
 
-    def _create_portfolio_algo_stoploss(
-        self,
-        pair: str,
-        amount: float,
-        stop_price: float,
-        order_types: dict,
-        side: BuySell,
-        leverage: float,
-    ) -> CcxtOrder:
-        """Create a Portfolio Margin stop through the current PAPI Algo service."""
-        if not self._ft_has["stoploss_on_exchange"]:
-            raise OperationalException(f"stoploss is not implemented for {self.name}.")
-
-        user_order_type = order_types.get("stoploss", "market")
-        ordertype, user_order_type = self._get_stop_order_type(user_order_type)
-        round_mode = ROUND_DOWN if side == "buy" else ROUND_UP
-        stop_price_norm = self.price_to_precision(pair, stop_price, rounding_mode=round_mode)
-        limit_rate = None
-        if user_order_type == "limit":
-            limit_rate = self._get_stop_limit_rate(stop_price, order_types, side)
-            limit_rate = self.price_to_precision(pair, limit_rate, rounding_mode=round_mode)
-
-        params = self._get_stop_params(
-            side=side,
-            ordertype=ordertype,
-            stop_price=stop_price_norm,
-        )
-        params["reduceOnly"] = True
-        if "stoploss_price_type" in order_types and "stop_price_type_field" in self._ft_has:
-            price_type = self._ft_has["stop_price_type_value_mapping"][
-                order_types.get("stoploss_price_type", PriceType.LAST)
-            ]
-            params[self._ft_has["stop_price_type_field"]] = price_type
-
-        amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
-        self._lev_prep(pair, leverage, side, accept_fail=True)
-
-        # CCXT 4.5.67 already knows the current Algo field schema for linear
-        # futures, but its Portfolio Margin route still builds the retired
-        # ``strategy*`` schema. The call-local false values affect request
-        # construction only; no request is sent until the fixed PAPI call below.
-        builder_params = dict(params)
-        builder_params["papi"] = False
-        builder_params["portfolioMargin"] = False
-        try:
-            request = self._api.create_order_request(
-                pair,
-                ordertype,
-                side,
-                amount,
-                limit_rate,
-                builder_params,
-            )
-            request["algoType"] = "CONDITIONAL"
-            response = self._portfolio_algo_request("um/algo/order", "POST", request)
-        except ccxt.InsufficientFunds as e:
-            raise InsufficientFundsError(
-                f"Insufficient funds to create {ordertype} {side} order on market {pair}. "
-                f"Tried to {side} amount {amount} at rate {limit_rate} with "
-                f"stop-price {stop_price_norm}. Message: {e}"
-            ) from e
-        except (ccxt.InvalidOrder, ccxt.BadRequest, ccxt.OperationRejected) as e:
-            raise InvalidOrderException(
-                f"Could not create {ordertype} {side} order on market {pair}. "
-                f"Tried to {side} amount {amount} at rate {limit_rate} with "
-                f"stop-price {stop_price_norm}. Message: {e}"
-            ) from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not place stoploss order due to {e.__class__.__name__}. Message: {e}"
-            ) from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
-
-        # A malformed or incomplete response has an unknown execution result.
-        # Raise a built-in parsing error so the outer client-id reconciliation
-        # path runs exactly once and never blindly submits the order again.
-        if not isinstance(response, dict):
-            raise TypeError("PAPI Algo create returned a non-object response.")
-        order = self._api.parse_order(response, self._api.market(pair))
-        if not isinstance(order, dict):
-            raise TypeError("CCXT could not parse the PAPI Algo create response.")
-
-        self._log_exchange_response("create_stoploss_order", order)
-        order = self._order_contracts_to_amount(order)
-        logger.info(
-            f"stoploss {user_order_type} order added for {pair}. "
-            f"stop price: {stop_price}. limit: {limit_rate}"
-        )
-        return order
-
     def create_stoploss(
         self,
         pair: str,
@@ -1419,7 +1125,7 @@ class Binance(Exchange):
             try:
                 submission_error: Exception | None = None
                 try:
-                    order = self._create_portfolio_algo_stoploss(
+                    order = super().create_stoploss(
                         pair, amount, stop_price, order_types, side, leverage
                     )
                 except TemporaryError as e:
@@ -1494,12 +1200,13 @@ class Binance(Exchange):
         with self._get_portfolio_create_lock():
             stable_absent_snapshots = 0
             cancellation_error: Exception | None = None
+            params = self._portfolio_margin_params({"trigger": True})
             for attempt in range(self._portfolio_conditional_cleanup_attempts):
                 try:
-                    orders = self._fetch_portfolio_algo_open_orders(pair)
+                    orders = self._api.fetch_open_orders(pair, params=params)
                 except ccxt.BaseError as e:
                     raise OperationalException(
-                        "Binance Portfolio Margin could not query PAPI Algo conditional "
+                        "Binance Portfolio Margin could not query PAPI conditional "
                         "orders after the emergency exit. Trading remains stopped."
                     ) from e
                 if not isinstance(orders, list) or any(
@@ -1525,9 +1232,13 @@ class Binance(Exchange):
                             )
                             continue
                         try:
-                            self._cancel_portfolio_algo_order(str(order_id))
+                            self._api.cancel_order(
+                                str(order_id),
+                                pair,
+                                params=params,
+                            )
                         except ccxt.OrderNotFound:
-                            # The Algo order may have completed between the
+                            # The conditional order may have completed between the
                             # snapshot and DELETE. Later snapshots still have to
                             # confirm that it is not open.
                             pass
@@ -1675,31 +1386,6 @@ class Binance(Exchange):
     def cancel_order(self, order_id: str, pair: str, params: dict | None = None):
         return super().cancel_order(order_id, pair, self._portfolio_margin_params(params))
 
-    def cancel_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
-        if not self._portfolio_margin or self._config["dry_run"]:
-            return super().cancel_stoploss_order(order_id, pair, params)
-        if params:
-            unsupported = set(params).difference({"stop", "trigger"})
-            if unsupported:
-                raise OperationalException(
-                    "Binance Portfolio Margin Algo cancellation does not support "
-                    f"parameters: {', '.join(sorted(unsupported))}."
-                )
-        try:
-            order = self._cancel_portfolio_algo_order(order_id)
-            self._log_exchange_response("cancel_stoploss_order", order)
-            return order
-        except ccxt.InvalidOrder as e:
-            raise InvalidOrderException(f"Could not cancel stoploss order. Message: {e}") from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not cancel stoploss order due to {e.__class__.__name__}. Message: {e}"
-            ) from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
-
     def _fetch_orders(self, pair: str, since: datetime, params: dict | None = None):
         return super()._fetch_orders(pair, since, self._portfolio_margin_params(params))
 
@@ -1714,9 +1400,16 @@ class Binance(Exchange):
             order_id, pair, since, self._portfolio_margin_params(params)
         )
 
-    def _fetch_portfolio_conditional_order_history(self, order_id: str, pair: str) -> CcxtOrder:
+    def _fetch_portfolio_conditional_order_history(
+        self, order_id: str, pair: str, query: dict
+    ) -> CcxtOrder:
         try:
-            orders = self._fetch_portfolio_algo_order_history(pair, order_id=order_id)
+            orders = self._api.fetch_orders(pair, params=query)
+            if not isinstance(orders, list):
+                raise OperationalException(
+                    "Binance Portfolio Margin returned an unexpected conditional-order "
+                    "history response."
+                )
             order = next(
                 (
                     item
@@ -1753,17 +1446,12 @@ class Binance(Exchange):
         if not self._portfolio_margin:
             return super().fetch_stoploss_order(order_id, pair, params)
 
-        if params:
-            unsupported = set(params).difference({"stop", "trigger"})
-            if unsupported:
-                raise OperationalException(
-                    "Binance Portfolio Margin Algo query does not support "
-                    f"parameters: {', '.join(sorted(unsupported))}."
-                )
+        query = self._portfolio_margin_params(params)
+        query["trigger"] = True
         try:
-            order = self._fetch_portfolio_algo_order(pair, order_id=order_id)
+            order = self._api.fetch_open_order(order_id, pair, params=query)
         except ccxt.OrderNotFound:
-            order = self._fetch_portfolio_conditional_order_history(order_id, pair)
+            order = self._fetch_portfolio_conditional_order_history(order_id, pair, query)
         except ccxt.InvalidOrder as e:
             raise InvalidOrderException(
                 "Tried to get an invalid Portfolio Margin conditional order "
@@ -1780,6 +1468,7 @@ class Binance(Exchange):
             raise OperationalException(e) from e
 
         self._log_exchange_response("fetch_stoploss_order", order)
+        order = self._order_contracts_to_amount(order)
         val = self.get_option("stoploss_algo_order_info_id")
         if order.get("status", "open") in ("closed", "triggered"):
             info = order.get("info", {})
@@ -1942,8 +1631,10 @@ class Binance(Exchange):
                 lambda: self._api.fetch_open_orders(params=self._portfolio_margin_params()),
             )
             conditional_open_orders = self._portfolio_margin_list_response(
-                "USD-M Algo conditional-order",
-                self._fetch_portfolio_algo_open_orders,
+                "USD-M conditional-order",
+                lambda: self._api.fetch_open_orders(
+                    params=self._portfolio_margin_params({"trigger": True})
+                ),
             )
             conflicts = []
             for order_kind, orders in (
