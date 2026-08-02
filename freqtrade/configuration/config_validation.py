@@ -43,12 +43,37 @@ def _extend_validator(validator_class):
 FreqtradeValidator = _extend_validator(Draft4Validator)
 
 
+def _validate_xcoin_only_exchange_options(conf: dict[str, Any]) -> None:
+    """Reject account-routing settings that do not belong in the XCoin-only product."""
+    exchange_config = conf.get("exchange")
+    if not isinstance(exchange_config, dict):
+        return
+
+    removed_risk_key = "_".join(("portfolio", "margin", "risk"))
+    if removed_risk_key in exchange_config:
+        raise ConfigurationError(
+            "XCoin-only product does not support exchange account-routing extensions."
+        )
+
+    removed_account_mode = "".join(("portfolio", "Margin"))
+    for config_key in ("ccxt_config", "ccxt_sync_config", "ccxt_async_config"):
+        ccxt_config = exchange_config.get(config_key)
+        if not isinstance(ccxt_config, dict):
+            continue
+        options = ccxt_config.get("options")
+        if isinstance(options, dict) and options.get(removed_account_mode) is True:
+            raise ConfigurationError(
+                "XCoin-only product does not support exchange account-routing extensions."
+            )
+
+
 def validate_config_schema(conf: dict[str, Any], preliminary: bool = False) -> dict[str, Any]:
     """
     Validate the configuration follow the Config Schema
     :param conf: Config in JSON format
     :return: Returns the config if valid, otherwise throw an exception
     """
+    _validate_xcoin_only_exchange_options(conf)
     conf_schema = deepcopy(CONF_SCHEMA)
     if conf.get("runmode", RunMode.OTHER) in (RunMode.DRY_RUN, RunMode.LIVE):
         conf_schema["required"] = SCHEMA_TRADE_REQUIRED
