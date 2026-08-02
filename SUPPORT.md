@@ -1,16 +1,24 @@
 # Support
 
-## XCoin-specific support
+## WaterWoods product support
 
 Use this repository's issue forms for reproducible problems or feature requests that are specific
-to the WaterWoods XCoin adapter, its exchange behavior, or the XCoin release pipeline.
+to one of these independent products:
+
+- XCoin adapter, exchange behavior, or `xcoin-*` release pipeline;
+- Binance standard Portfolio Margin/PAPI adapter, safety behavior, or
+  `binance-portfolio-margin-*` release pipeline.
+
+Select the issue form for the affected product. Do not report XCoin behavior through a Binance
+Portfolio Margin form or PAPI behavior through an XCoin form.
 
 Include an immutable release tag, image digest, or commit SHA. Start from dry-run whenever the
 problem can be reproduced safely. Sanitize every configuration and log before attaching it.
 
 ## Official Freqtrade support
 
-If the same behavior occurs on official Freqtrade without the XCoin integration, use the
+If the same behavior occurs on official Freqtrade without either WaterWoods product integration,
+use the
 [official issue tracker](https://github.com/freqtrade/freqtrade/issues),
 [documentation](https://www.freqtrade.io/en/stable/), or
 [Discord community](https://discord.gg/p7nuUNVfP7).

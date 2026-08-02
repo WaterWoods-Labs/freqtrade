@@ -2,9 +2,16 @@
 
 ## Supported versions
 
-Security fixes are applied to the `xcoin` branch and published through the latest immutable
-`xcoin-YYYY.MM.DD.N` release. The `develop` and `stable` branches are clean upstream mirrors and do
-not contain the XCoin integration.
+WaterWoods security fixes are maintained and released independently for each product:
+
+| Product | Supported branch | Immutable releases |
+| --- | --- | --- |
+| XCoin | `xcoin` | `xcoin-YYYY.MM.DD.N` |
+| Binance Portfolio Margin | `binance-portfolio-margin` | `binance-portfolio-margin-YYYY.MM.DD.N` |
+
+The `develop` and `stable` branches are clean upstream mirrors and do not contain either
+WaterWoods product integration. Never use one product's image, configuration, or credentials to
+reproduce a vulnerability in the other product.
 
 ## Reporting a vulnerability
 

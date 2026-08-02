@@ -1,0 +1,48 @@
+name: Binance Portfolio Margin feature request
+description: Propose an improvement specific to the WaterWoods Binance Portfolio Margin/PAPI product.
+title: "[Binance Portfolio Margin Feature]: "
+body:
+  - type: checkboxes
+    id: routing
+    attributes:
+      label: Scope
+      options:
+        - label: This request is specific to Binance Portfolio Margin/PAPI and does not belong in official Freqtrade or XCoin.
+          required: true
+        - label: I searched existing WaterWoods issues and pull requests for the same request.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the operational or integration problem without including private account data.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Startup and account validation
+        - Balances, positions, or reconciliation
+        - Ordinary PAPI orders and fills
+        - PAPI Algo stop orders
+        - Funding, leverage, or liquidation data
+        - Configuration schema or RPC
+        - CI, release, or maintenance
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Trading-safety and compatibility impact
+      description: Explain fail-closed behavior, dry-run validation, live-trading risk, and compatibility with official Freqtrade.
+    validations:
+      required: true
