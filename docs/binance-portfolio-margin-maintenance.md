@@ -7,7 +7,7 @@ shortened product name.
 
 This document governs source, synchronization, CI, and release maintenance. It does not replace
 the runtime safety procedure. Operators must use the
-[Binance Portfolio Margin runbook](https://github.com/WaterWoods-Labs/team-freqtrade-xcoin-runtime/blob/main/docs/binance-portfolio-margin-runbook.md)
+[Binance Portfolio Margin runbook](https://github.com/WaterWoods-Labs/team-freqtrade-runtime/blob/main/docs/binance-portfolio-margin-runbook.md)
 for account checks, image pinning, credentials, networks, launch, reconciliation, and runtime
 recovery. Do not copy credentials, credential values, runtime configuration, databases, logs, or
 raw account responses into this repository or this document.
@@ -101,6 +101,10 @@ passes.
 
 The authoritative workflow is
 `.github/workflows/binance-portfolio-margin-ci.yml` and uses Python 3.12 on Ubuntu.
+Pull requests targeting `binance-portfolio-margin` run this product workflow, while the upstream
+`.github/workflows/ci.yml` pull-request matrix is restricted to the official `develop` and
+`stable` branches. This avoids running the upstream matrix in parallel with product CI without
+changing the product's focused, full, manual-dispatch, push, or release gates.
 
 ### Focused validation
 
@@ -221,7 +225,7 @@ next valid release after a reviewed corrective change.
 
 Runtime recovery, position and order reconciliation, container rollback, configuration checkpoints,
 and account safety remain governed exclusively by the
-[runtime Portfolio Margin runbook](https://github.com/WaterWoods-Labs/team-freqtrade-xcoin-runtime/blob/main/docs/binance-portfolio-margin-runbook.md).
+[runtime Portfolio Margin runbook](https://github.com/WaterWoods-Labs/team-freqtrade-runtime/blob/main/docs/binance-portfolio-margin-runbook.md).
 
 ## Legacy combined-build boundary
 
