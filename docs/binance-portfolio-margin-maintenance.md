@@ -101,6 +101,10 @@ passes.
 
 The authoritative workflow is
 `.github/workflows/binance-portfolio-margin-ci.yml` and uses Python 3.12 on Ubuntu.
+Pull requests targeting `binance-portfolio-margin` run this product workflow, while the upstream
+`.github/workflows/ci.yml` pull-request matrix is restricted to the official `develop` and
+`stable` branches. This avoids running the upstream matrix in parallel with product CI without
+changing the product's focused, full, manual-dispatch, push, or release gates.
 
 ### Focused validation
 
