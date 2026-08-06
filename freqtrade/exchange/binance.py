@@ -3,11 +3,13 @@
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
+from hashlib import sha256
 from math import floor, isclose, isfinite
 from pathlib import Path
 from threading import Lock
 from time import sleep
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import ccxt
@@ -25,6 +27,12 @@ from freqtrade.exceptions import (
     TemporaryError,
 )
 from freqtrade.exchange import Exchange
+from freqtrade.exchange.binance_order_intent import (
+    PortfolioOrderIntent,
+    PortfolioOrderIntentStore,
+    PortfolioOrderKind,
+    PortfolioOrderPurpose,
+)
 from freqtrade.exchange.binance_public_data import (
     concat_safe,
     download_archive_ohlcv,
@@ -146,15 +154,35 @@ class Binance(Exchange):
         )
         risk_config = exchange_config.get("portfolio_margin_risk")
         self._portfolio_margin_risk = risk_config if isinstance(risk_config, dict) else None
-        self._portfolio_create_lock = (
+        self._portfolio_create_lock: Any = (
             Lock() if self._portfolio_margin and not config.get("dry_run", True) else None
         )
         self._portfolio_active_client_order_id: str | None = None
         self._portfolio_unknown_conditional_client_order_id: str | None = None
         self._portfolio_unknown_conditional_pair: str | None = None
         self._portfolio_unknown_order_latched = False
+        self._portfolio_order_intent_store: PortfolioOrderIntentStore | None = None
         if self._portfolio_margin:
             self._validate_portfolio_margin_config(config, options)
+            if not config.get("dry_run", True):
+                intent_path = self._portfolio_order_intent_path(config)
+                allowed_pairs = set(exchange_config.get("pair_whitelist", []))
+                self._portfolio_order_intent_store = PortfolioOrderIntentStore(
+                    intent_path, allowed_pairs
+                )
+                self._portfolio_create_lock = self._portfolio_order_intent_store.operation_lock
+                pending_intents = self._portfolio_order_intent_store.intents
+                if pending_intents:
+                    self._portfolio_unknown_order_latched = True
+                    conditional_intents = [
+                        intent for intent in pending_intents if intent.order_kind == "conditional"
+                    ]
+                    if conditional_intents:
+                        conditional_intent = conditional_intents[0]
+                        self._portfolio_unknown_conditional_client_order_id = (
+                            conditional_intent.client_order_id
+                        )
+                        self._portfolio_unknown_conditional_pair = conditional_intent.pair
         elif self._has_implicit_portfolio_margin_routing(exchange_config):
             raise OperationalException(
                 "Binance Portfolio Margin must be enabled explicitly with "
@@ -173,6 +201,78 @@ class Binance(Exchange):
     def portfolio_margin_enabled(self) -> bool:
         """Expose whether this adapter instance explicitly uses Portfolio Margin."""
         return self._portfolio_margin
+
+    @staticmethod
+    def _portfolio_order_intent_path(config: dict) -> Path | None:
+        """Return a credential-free, bot-specific path under the configured user-data dir."""
+        user_data_dir = Path(config.get("user_data_dir", ""))
+        if not user_data_dir.is_absolute():
+            if config.get("runmode") == RunMode.LIVE:
+                raise OperationalException(
+                    "Binance Portfolio Margin live trading requires an absolute user_data_dir "
+                    "for crash-persistent order intents. Trading remains stopped."
+                )
+            # Direct unit-level exchange construction uses an unresolved user-data path.
+            # The normal Configuration pipeline always resolves it before live startup.
+            return None
+        if not user_data_dir.is_dir():
+            raise OperationalException(
+                "Binance Portfolio Margin could not access the configured user_data_dir for "
+                "crash-persistent order intents. Trading remains stopped."
+            )
+
+        try:
+            database_url = urlsplit(str(config.get("db_url", "")))
+            database_port = f":{database_url.port}" if database_url.port is not None else ""
+            database_identity = (
+                f"{database_url.scheme}://{database_url.hostname or ''}"
+                f"{database_port}{database_url.path}"
+            )
+        except ValueError as exc:
+            raise OperationalException(
+                "Binance Portfolio Margin could not derive a safe local order-intent state "
+                "path from the configured database. Trading remains stopped."
+            ) from exc
+        namespace = sha256(
+            f"{config.get('bot_name', 'freqtrade')}\0{database_identity}".encode()
+        ).hexdigest()[:16]
+        return user_data_dir / f".portfolio-margin-order-intents-{namespace}.json"
+
+    def _record_portfolio_order_intent(
+        self,
+        *,
+        pair: str,
+        client_order_id: str,
+        order_kind: PortfolioOrderKind,
+        purpose: PortfolioOrderPurpose = "submission",
+        parent_client_order_id: str | None = None,
+    ) -> None:
+        store = self._portfolio_order_intent_store
+        if store is None:
+            return
+        try:
+            store.add(
+                PortfolioOrderIntent(
+                    client_order_id=client_order_id,
+                    pair=pair,
+                    order_kind=order_kind,
+                    purpose=purpose,
+                    parent_client_order_id=parent_client_order_id,
+                )
+            )
+        except OperationalException:
+            self._portfolio_unknown_order_latched = True
+            raise
+
+    def _clear_portfolio_order_intent(self, client_order_id: str) -> None:
+        store = self._portfolio_order_intent_store
+        if store is None:
+            return
+        try:
+            store.remove(client_order_id)
+        except OperationalException:
+            self._portfolio_unknown_order_latched = True
+            raise
 
     def _get_portfolio_create_lock(self) -> Any:
         """Return the live PAPI order lock, failing closed if it was not initialized."""
@@ -1238,6 +1338,23 @@ class Binance(Exchange):
             order.get("clientOrderId") == client_order_id or strategy_client_id == client_order_id
         )
 
+    @classmethod
+    def _portfolio_order_matches_intent(cls, order: Any, pair: str, client_order_id: str) -> bool:
+        """Match the exact client id and pair recorded before submission."""
+        if not cls._portfolio_order_matches_client_id(order, client_order_id):
+            return False
+        if not isinstance(order, dict):
+            return False
+        info = order.get("info")
+        info_symbol = info.get("symbol") if isinstance(info, dict) else None
+        order_pair = order.get("symbol") or info_symbol
+        if order_pair != pair:
+            raise OperationalException(
+                "Binance Portfolio Margin found a pending client order id on a different "
+                "pair. No order was modified and trading remains stopped."
+            )
+        return True
+
     @staticmethod
     def _portfolio_chan_order_matches_client_id(order: Any, client_order_id: str) -> bool:
         if Binance._portfolio_order_matches_client_id(order, client_order_id):
@@ -1278,7 +1395,7 @@ class Binance(Exchange):
                         (
                             item
                             for item in orders
-                            if self._portfolio_order_matches_client_id(item, client_order_id)
+                            if self._portfolio_order_matches_intent(item, pair, client_order_id)
                         ),
                         None,
                     )
@@ -1300,6 +1417,11 @@ class Binance(Exchange):
 
         if order is None:
             return None
+        if not self._portfolio_order_matches_intent(order, pair, client_order_id):
+            raise OperationalException(
+                "Binance Portfolio Margin reconciliation did not return the exact recorded "
+                "client order id and pair. Trading remains stopped."
+            )
         if not self._portfolio_order_response_confirmed(order):
             raise OperationalException(
                 "Binance Portfolio Margin order submission status is unknown because "
@@ -1346,7 +1468,10 @@ class Binance(Exchange):
         return active_positions
 
     def _flatten_portfolio_position(
-        self, pair: str, active_positions: list[tuple[dict[str, Any], float]]
+        self,
+        pair: str,
+        active_positions: list[tuple[dict[str, Any], float]],
+        parent_client_order_id: str,
     ) -> None:
         """Submit one evidence-based reduce-only close for a reconciled PAPI position."""
         if len(active_positions) != 1:
@@ -1374,6 +1499,13 @@ class Binance(Exchange):
                 "clientOrderId": close_client_id,
             }
         )
+        self._record_portfolio_order_intent(
+            pair=pair,
+            client_order_id=close_client_id,
+            order_kind="regular",
+            purpose="containment",
+            parent_client_order_id=parent_client_order_id,
+        )
         create_failed = False
         try:
             close_order = self._api.create_order(
@@ -1399,6 +1531,7 @@ class Binance(Exchange):
                 "Binance Portfolio Margin emergency containment returned an "
                 "order response without an exchange order id."
             )
+        self._clear_portfolio_order_intent(close_client_id)
         self._log_exchange_response("portfolio_margin_emergency_flatten", close_order)
 
     def _contain_unknown_portfolio_order(  # noqa: C901
@@ -1430,7 +1563,7 @@ class Binance(Exchange):
                 matching_orders = [
                     order
                     for order in open_orders
-                    if self._portfolio_order_matches_client_id(order, client_order_id)
+                    if self._portfolio_order_matches_intent(order, pair, client_order_id)
                 ]
                 matching_order_visible = bool(matching_orders)
                 last_error = None
@@ -1471,7 +1604,7 @@ class Binance(Exchange):
                 # position snapshot is fresh evidence of exposure: the original
                 # entry may have filled after an earlier emergency close. A repeated
                 # reduce-only market close cannot reverse or open a position.
-                self._flatten_portfolio_position(pair, active_positions)
+                self._flatten_portfolio_position(pair, active_positions, client_order_id)
                 flattened = True
                 snapshot_action = True
 
@@ -1505,6 +1638,105 @@ class Binance(Exchange):
             "Binance Portfolio Margin unknown-order containment could not obtain "
             "consecutive clean PAPI snapshots. Trading remains stopped."
         )
+
+    def _cancel_persisted_regular_intent(self, pair: str, client_order_id: str) -> None:
+        """Cancel only the recorded regular order and prove it absent without flattening."""
+        stable_absent_snapshots = 0
+        last_error: Exception | None = None
+        matching_order_visible = False
+        for attempt in range(self._portfolio_containment_attempts):
+            try:
+                open_orders = self._api.fetch_open_orders(
+                    pair, params=self._portfolio_margin_params()
+                )
+                if not isinstance(open_orders, list) or any(
+                    not isinstance(order, dict) for order in open_orders
+                ):
+                    raise OperationalException(
+                        "PAPI returned an unexpected persisted-order reconciliation response."
+                    )
+                matching_orders = [
+                    order
+                    for order in open_orders
+                    if self._portfolio_order_matches_intent(order, pair, client_order_id)
+                ]
+                matching_order_visible = bool(matching_orders)
+                last_error = None
+                if matching_orders:
+                    stable_absent_snapshots = 0
+                    for order in matching_orders:
+                        order_id = order.get("id")
+                        if not order_id:
+                            raise OperationalException(
+                                "A matching persisted PAPI order had no exchange order id."
+                            )
+                        try:
+                            self._api.cancel_order(
+                                str(order_id),
+                                pair,
+                                params=self._portfolio_margin_params(),
+                            )
+                        except ccxt.OrderNotFound:
+                            pass
+                else:
+                    stable_absent_snapshots += 1
+                    if stable_absent_snapshots >= self._portfolio_containment_stable_snapshots:
+                        return
+            except (FreqtradeException, ccxt.BaseError) as exc:
+                last_error = exc
+                stable_absent_snapshots = 0
+            if attempt + 1 < self._portfolio_containment_attempts:
+                sleep(self._portfolio_order_recovery_delay)
+
+        if last_error is not None:
+            raise OperationalException(
+                "Binance Portfolio Margin could not reconcile its persisted regular order "
+                "intent. Trading remains stopped."
+            ) from last_error
+        if matching_order_visible:
+            raise OperationalException(
+                "Binance Portfolio Margin could not confirm cancellation of its persisted "
+                "regular order intent. Trading remains stopped."
+            )
+        raise OperationalException(
+            "Binance Portfolio Margin could not obtain consecutive clean snapshots for its "
+            "persisted regular order intent. Trading remains stopped."
+        )
+
+    def _recover_persisted_portfolio_order_intents(self) -> bool:
+        """Contain intents left by a crashed process, then require a fresh startup snapshot."""
+        store = self._portfolio_order_intent_store
+        if store is None or not store.intents:
+            return False
+
+        containment_intents = [
+            intent for intent in store.intents if intent.purpose == "containment"
+        ]
+        for intent in containment_intents:
+            with self._get_portfolio_create_lock():
+                self._cancel_persisted_regular_intent(intent.pair, intent.client_order_id)
+                self._clear_portfolio_order_intent(intent.client_order_id)
+
+        submission_intents = [intent for intent in store.intents if intent.purpose == "submission"]
+        for intent in submission_intents:
+            if intent.order_kind == "conditional":
+                self._portfolio_unknown_conditional_client_order_id = intent.client_order_id
+                self._portfolio_unknown_conditional_pair = intent.pair
+                self.cleanup_portfolio_margin_unknown_conditional_order(intent.pair)
+                continue
+            with self._get_portfolio_create_lock():
+                if self._portfolio_margin_risk is None:
+                    self._cancel_persisted_regular_intent(intent.pair, intent.client_order_id)
+                else:
+                    self._contain_unknown_portfolio_order(intent.pair, intent.client_order_id)
+                self._clear_portfolio_order_intent(intent.client_order_id)
+
+        if store.intents:
+            raise OperationalException(
+                "Binance Portfolio Margin could not clear every recovered order intent. "
+                "Trading remains stopped."
+            )
+        return True
 
     def create_order(  # noqa: C901
         self,
@@ -1563,6 +1795,29 @@ class Binance(Exchange):
             self._portfolio_active_client_order_id = client_order_id
             was_unknown_latched = self._portfolio_unknown_order_latched
             try:
+                intent_purpose: PortfolioOrderPurpose = "submission"
+                parent_client_order_id = None
+                store = self._portfolio_order_intent_store
+                if reduceOnly and was_unknown_latched and store is not None and store.intents:
+                    parent_intents = [
+                        intent
+                        for intent in store.intents
+                        if intent.purpose == "submission" and intent.pair == pair
+                    ]
+                    if len(parent_intents) != 1:
+                        raise OperationalException(
+                            "Binance Portfolio Margin could not bind a reduce-only order to "
+                            "exactly one pending intent for this pair. Trading remains stopped."
+                        )
+                    intent_purpose = "containment"
+                    parent_client_order_id = parent_intents[0].client_order_id
+                self._record_portfolio_order_intent(
+                    pair=pair,
+                    client_order_id=client_order_id,
+                    order_kind="regular",
+                    purpose=intent_purpose,
+                    parent_client_order_id=parent_client_order_id,
+                )
                 submission_error: Exception | None = None
                 try:
                     order = super().create_order(
@@ -1580,12 +1835,17 @@ class Binance(Exchange):
                     submission_error = e
                 except (AttributeError, KeyError, TypeError, ValueError) as e:
                     submission_error = e
+                except (InsufficientFundsError, InvalidOrderException):
+                    self._clear_portfolio_order_intent(client_order_id)
+                    raise
                 except FreqtradeException:
+                    self._portfolio_unknown_order_latched = True
                     raise
                 except Exception as e:
                     submission_error = e
                 else:
                     if self._portfolio_order_response_confirmed(order):
+                        self._clear_portfolio_order_intent(client_order_id)
                         return order
                     submission_error = OperationalException(
                         "Binance Portfolio Margin create response did not contain "
@@ -1606,6 +1866,8 @@ class Binance(Exchange):
                             "the PAPI reconciliation query failed and emergency containment "
                             "could not complete. Trading remains stopped."
                         ) from containment_error
+                    if self._portfolio_margin_risk is not None:
+                        self._clear_portfolio_order_intent(client_order_id)
                     raise OperationalException(
                         "Binance Portfolio Margin order submission status is unknown and "
                         "the PAPI reconciliation query failed. "
@@ -1617,9 +1879,12 @@ class Binance(Exchange):
                         + "Trading remains stopped."
                     ) from reconciliation_error
                 if recovered is not None:
+                    self._clear_portfolio_order_intent(client_order_id)
                     self._portfolio_unknown_order_latched = was_unknown_latched
                     return recovered
                 flattened = self._contain_unknown_portfolio_order(pair, client_order_id)
+                if self._portfolio_margin_risk is not None:
+                    self._clear_portfolio_order_intent(client_order_id)
                 raise OperationalException(
                     "Binance Portfolio Margin order submission status is unknown. "
                     f"No PAPI order was visible for client order {client_order_id}; "
@@ -1727,7 +1992,7 @@ class Binance(Exchange):
         )
         return order
 
-    def create_stoploss(
+    def create_stoploss(  # noqa: C901
         self,
         pair: str,
         amount: float,
@@ -1756,6 +2021,11 @@ class Binance(Exchange):
             self._portfolio_active_client_order_id = client_order_id
             was_unknown_latched = self._portfolio_unknown_order_latched
             try:
+                self._record_portfolio_order_intent(
+                    pair=pair,
+                    client_order_id=client_order_id,
+                    order_kind="conditional",
+                )
                 submission_error: Exception | None = None
                 try:
                     order = self._create_portfolio_algo_stoploss(
@@ -1765,7 +2035,17 @@ class Binance(Exchange):
                     submission_error = e
                 except (AttributeError, KeyError, TypeError, ValueError) as e:
                     submission_error = e
+                except (InsufficientFundsError, InvalidOrderException) as e:
+                    self._clear_portfolio_order_intent(client_order_id)
+                    raise InvalidOrderException(
+                        "Binance Portfolio Margin exchange stop-loss protection could "
+                        "not be confirmed. Freqtrade must perform its configured emergency "
+                        "exit."
+                    ) from e
                 except FreqtradeException as e:
+                    self._portfolio_unknown_order_latched = True
+                    self._portfolio_unknown_conditional_client_order_id = client_order_id
+                    self._portfolio_unknown_conditional_pair = pair
                     raise InvalidOrderException(
                         "Binance Portfolio Margin exchange stop-loss protection could "
                         "not be confirmed. Freqtrade must perform its configured emergency "
@@ -1775,6 +2055,7 @@ class Binance(Exchange):
                     submission_error = e
                 else:
                     if self._portfolio_order_response_confirmed(order):
+                        self._clear_portfolio_order_intent(client_order_id)
                         return order
                     submission_error = OperationalException(
                         "Binance Portfolio Margin conditional create response did not "
@@ -1796,6 +2077,7 @@ class Binance(Exchange):
                         "stop-loss protection could not be confirmed."
                     ) from reconciliation_error
                 if recovered is not None:
+                    self._clear_portfolio_order_intent(client_order_id)
                     self._portfolio_unknown_order_latched = was_unknown_latched
                     self._portfolio_unknown_conditional_client_order_id = None
                     self._portfolio_unknown_conditional_pair = None
@@ -1852,7 +2134,7 @@ class Binance(Exchange):
                 matching_orders = [
                     order
                     for order in orders
-                    if self._portfolio_order_matches_client_id(order, client_order_id)
+                    if self._portfolio_order_matches_intent(order, pair, client_order_id)
                 ]
                 if matching_orders:
                     stable_absent_snapshots = 0
@@ -1879,6 +2161,7 @@ class Binance(Exchange):
                         stable_absent_snapshots
                         >= self._portfolio_conditional_cleanup_stable_snapshots
                     ):
+                        self._clear_portfolio_order_intent(client_order_id)
                         self._portfolio_unknown_conditional_client_order_id = None
                         self._portfolio_unknown_conditional_pair = None
                         return True
@@ -2345,7 +2628,7 @@ class Binance(Exchange):
             conflicts.append("exchange has unsupported margin OCO order lists")
         return conflicts
 
-    def validate_existing_positions(
+    def validate_existing_positions(  # noqa: C901
         self, positions: dict[str, Any], open_trades: list[Any]
     ) -> None:
         """Block live Portfolio Margin when exchange positions and the DB disagree."""
@@ -2355,6 +2638,13 @@ class Binance(Exchange):
             or self.trading_mode != TradingMode.FUTURES
         ):
             return
+
+        if self._recover_persisted_portfolio_order_intents():
+            raise OperationalException(
+                "Binance Portfolio Margin contained order intents recovered from a previous "
+                "process. Restart once more so positions, orders, wallets, and the trade "
+                "database are validated from fresh snapshots."
+            )
 
         trades_by_pair: dict[str, Any] = {}
         conflicts: list[str] = []

@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
+import os
 from copy import deepcopy
 from datetime import datetime, timedelta
 from random import randint
@@ -79,6 +81,15 @@ def portfolio_margin_chan_risk_conf(default_conf, *, dry_run: bool = True):
         "force_entry_order_type": "market",
         "reject_force_entry_price": True,
     }
+    return conf
+
+
+def persistent_portfolio_margin_conf(default_conf, tmp_path):
+    conf = portfolio_margin_risk_conf(default_conf, dry_run=False)
+    conf["user_data_dir"] = tmp_path
+    conf["db_url"] = "sqlite:///portfolio-margin-intent-test.sqlite"
+    conf["bot_name"] = "portfolio-margin-intent-test"
+    conf["runmode"] = RunMode.LIVE
     return conf
 
 
@@ -3119,6 +3130,525 @@ def test_binance_portfolio_margin_unknown_stop_cleanup_fails_closed_if_still_ope
     api_mock.cancel_order.assert_not_called()
     api_mock.create_order.assert_not_called()
     assert exchange._portfolio_unknown_conditional_client_order_id == "ftpm-persistent-stop"
+
+
+def test_binance_portfolio_margin_persists_regular_intent_before_post(
+    default_conf, mocker, tmp_path
+):
+    api_mock = portfolio_margin_live_api_mock()
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        persistent_portfolio_margin_conf(default_conf, tmp_path),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value="ftpm-regular")
+    state_path = exchange._portfolio_order_intent_store.path
+    post_snapshots = []
+
+    def create_order(*args, **kwargs):
+        post_snapshots.append(json.loads(state_path.read_text(encoding="utf-8")))
+        return {
+            "id": "regular-1",
+            "clientOrderId": "ftpm-regular",
+            "symbol": "ETH/USDT:USDT",
+            "status": "open",
+            "amount": 1.0,
+            "filled": 0.0,
+            "remaining": 1.0,
+            "info": {},
+        }
+
+    api_mock.create_order.side_effect = create_order
+
+    exchange.create_order(
+        pair="ETH/USDT:USDT",
+        ordertype="limit",
+        side="buy",
+        amount=0.025,
+        rate=2000,
+        leverage=1,
+    )
+
+    assert post_snapshots == [
+        {
+            "version": 1,
+            "intents": [
+                {
+                    "client_order_id": "ftpm-regular",
+                    "pair": "ETH/USDT:USDT",
+                    "order_kind": "regular",
+                    "purpose": "submission",
+                    "parent_client_order_id": None,
+                }
+            ],
+        }
+    ]
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "intents": [],
+    }
+    if os.name != "nt":
+        assert state_path.stat().st_mode & 0o777 == 0o600
+        assert state_path.with_name(f"{state_path.name}.lock").stat().st_mode & 0o777 == 0o600
+
+
+def test_binance_portfolio_margin_persists_conditional_intent_before_post(
+    default_conf, mocker, tmp_path
+):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.create_order_request.return_value = portfolio_algo_create_request("ftpm-stop")
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        persistent_portfolio_margin_conf(default_conf, tmp_path),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value="ftpm-stop")
+    state_path = exchange._portfolio_order_intent_store.path
+    post_snapshots = []
+
+    def request(path, api, method, params, **kwargs):
+        assert method == "POST"
+        post_snapshots.append(json.loads(state_path.read_text(encoding="utf-8")))
+        return portfolio_algo_order("stop-1", "ftpm-stop")
+
+    api_mock.request.side_effect = request
+
+    exchange.create_stoploss(
+        pair="ETH/USDT:USDT",
+        amount=1,
+        stop_price=1900,
+        order_types={"stoploss": "market"},
+        side="sell",
+        leverage=1,
+    )
+
+    intent = post_snapshots[0]["intents"][0]
+    assert intent == {
+        "client_order_id": "ftpm-stop",
+        "pair": "ETH/USDT:USDT",
+        "order_kind": "conditional",
+        "purpose": "submission",
+        "parent_client_order_id": None,
+    }
+    assert set(intent) == {
+        "client_order_id",
+        "pair",
+        "order_kind",
+        "purpose",
+        "parent_client_order_id",
+    }
+    assert json.loads(state_path.read_text(encoding="utf-8"))["intents"] == []
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+def test_binance_portfolio_margin_blocks_post_when_intent_persistence_fails(
+    default_conf, mocker, tmp_path, conditional
+):
+    api_mock = portfolio_margin_live_api_mock()
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    exchange = get_patched_exchange(
+        mocker,
+        persistent_portfolio_margin_conf(default_conf, tmp_path),
+        api_mock,
+        exchange="binance",
+    )
+    mocker.patch.object(
+        exchange._portfolio_order_intent_store,
+        "_atomic_write",
+        side_effect=OperationalException("simulated persistence kill point"),
+    )
+
+    with pytest.raises(OperationalException, match="simulated persistence kill point"):
+        if conditional:
+            exchange.create_stoploss(
+                pair="ETH/USDT:USDT",
+                amount=1,
+                stop_price=1900,
+                order_types={"stoploss": "market"},
+                side="sell",
+                leverage=1,
+            )
+        else:
+            exchange.create_order(
+                pair="ETH/USDT:USDT",
+                ordertype="market",
+                side="buy",
+                amount=0.025,
+                rate=2000,
+                leverage=1,
+            )
+
+    api_mock.create_order.assert_not_called()
+    api_mock.request.assert_not_called()
+    assert exchange.portfolio_margin_unknown_order_latched is True
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+def test_binance_portfolio_margin_restart_contains_post_cleanup_kill_point(
+    default_conf, mocker, tmp_path, conditional
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    client_order_id = "ftpm-crashed-stop" if conditional else "ftpm-crashed-regular"
+    mocker.patch.object(exchange, "_new_portfolio_client_order_id", return_value=client_order_id)
+    if conditional:
+        api_mock.create_order_request.return_value = portfolio_algo_create_request(client_order_id)
+        api_mock.request.return_value = portfolio_algo_order("stop-2", client_order_id)
+    else:
+        api_mock.create_order.return_value = {
+            "id": "regular-2",
+            "clientOrderId": client_order_id,
+            "symbol": "ETH/USDT:USDT",
+            "status": "open",
+            "amount": 0.025,
+            "filled": 0.0,
+            "remaining": 0.025,
+            "info": {},
+        }
+    mocker.patch.object(
+        exchange._portfolio_order_intent_store,
+        "remove",
+        side_effect=OperationalException("simulated crash before intent cleanup"),
+    )
+
+    with pytest.raises(OperationalException, match="simulated crash before intent cleanup"):
+        if conditional:
+            exchange.create_stoploss(
+                pair="ETH/USDT:USDT",
+                amount=1,
+                stop_price=1900,
+                order_types={"stoploss": "market"},
+                side="sell",
+                leverage=1,
+            )
+        else:
+            exchange.create_order(
+                pair="ETH/USDT:USDT",
+                ordertype="market",
+                side="buy",
+                amount=0.025,
+                rate=2000,
+                leverage=1,
+            )
+
+    recovery_api = portfolio_margin_live_api_mock()
+    recovery_api.fetch_positions.return_value = []
+    type(recovery_api).has = PropertyMock(return_value={"setLeverage": False})
+    restarted = get_patched_exchange(mocker, conf, recovery_api, exchange="binance")
+    assert restarted.portfolio_margin_unknown_order_latched is True
+
+    with pytest.raises(OperationalException, match="Restart once more"):
+        restarted.validate_existing_positions({}, [])
+
+    state_path = restarted._portfolio_order_intent_store.path
+    assert json.loads(state_path.read_text(encoding="utf-8"))["intents"] == []
+    if conditional:
+        assert all(
+            call.args[:3] == ("um/algo/openAlgoOrders", "papi", "GET")
+            and call.args[3]["symbol"] == "ETHUSDT"
+            for call in recovery_api.request.call_args_list
+        )
+        recovery_api.create_order.assert_not_called()
+    else:
+        assert all(
+            call.args[0] == "ETH/USDT:USDT"
+            for call in recovery_api.fetch_open_orders.call_args_list
+        )
+
+
+def test_binance_portfolio_margin_conditional_cleanup_kill_point_is_recoverable(
+    default_conf, mocker, tmp_path
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT",
+        client_order_id="ftpm-cleanup-kill",
+        order_kind="conditional",
+    )
+    exchange._portfolio_unknown_order_latched = True
+    exchange._portfolio_unknown_conditional_client_order_id = "ftpm-cleanup-kill"
+    exchange._portfolio_unknown_conditional_pair = "ETH/USDT:USDT"
+    mocker.patch.object(
+        exchange._portfolio_order_intent_store,
+        "_atomic_write",
+        side_effect=OperationalException("simulated cleanup fsync kill point"),
+    )
+
+    with pytest.raises(OperationalException, match="simulated cleanup fsync kill point"):
+        exchange.cleanup_portfolio_margin_unknown_conditional_order("ETH/USDT:USDT")
+
+    restarted = get_patched_exchange(
+        mocker, conf, portfolio_margin_live_api_mock(), exchange="binance"
+    )
+    assert restarted.portfolio_margin_unknown_order_latched is True
+    assert restarted._portfolio_unknown_conditional_client_order_id == "ftpm-cleanup-kill"
+    assert restarted._portfolio_unknown_conditional_pair == "ETH/USDT:USDT"
+
+
+def test_binance_portfolio_margin_rejects_persisted_intent_for_other_pair(
+    default_conf, mocker, tmp_path
+):
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    state_path = exchange._portfolio_order_intent_store.path
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "intents": [
+                    {
+                        "client_order_id": "ftpm-other-pair",
+                        "pair": "BTC/USDT:USDT",
+                        "order_kind": "regular",
+                        "purpose": "submission",
+                        "parent_client_order_id": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    other_api = portfolio_margin_live_api_mock()
+
+    with pytest.raises(OperationalException, match="could not safely load"):
+        get_patched_exchange(mocker, conf, other_api, exchange="binance")
+
+    other_api.fetch_open_orders.assert_not_called()
+    other_api.cancel_order.assert_not_called()
+    other_api.create_order.assert_not_called()
+
+
+def test_binance_portfolio_margin_corrupt_intent_file_fails_closed(default_conf, mocker, tmp_path):
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    exchange = get_patched_exchange(
+        mocker, conf, portfolio_margin_live_api_mock(), exchange="binance"
+    )
+    state_path = exchange._portfolio_order_intent_store.path
+    state_path.write_text('{"version":1,"intents":', encoding="utf-8")
+    other_api = portfolio_margin_live_api_mock()
+
+    with pytest.raises(OperationalException, match="could not safely load"):
+        get_patched_exchange(mocker, conf, other_api, exchange="binance")
+
+    other_api.fetch_open_orders.assert_not_called()
+    other_api.cancel_order.assert_not_called()
+    other_api.create_order.assert_not_called()
+
+
+def test_binance_portfolio_margin_atomic_replace_failure_preserves_prior_intent(
+    default_conf, mocker, tmp_path
+):
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    exchange = get_patched_exchange(
+        mocker, conf, portfolio_margin_live_api_mock(), exchange="binance"
+    )
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT",
+        client_order_id="ftpm-atomic-parent",
+        order_kind="regular",
+    )
+    state_path = exchange._portfolio_order_intent_store.path
+    original_state = state_path.read_bytes()
+    mocker.patch(
+        "freqtrade.exchange.binance_order_intent.Path.replace",
+        side_effect=OSError("simulated replace kill point"),
+    )
+
+    with pytest.raises(OperationalException, match="atomically persist"):
+        exchange._record_portfolio_order_intent(
+            pair="ETH/USDT:USDT",
+            client_order_id="ftpm-atomic-child",
+            order_kind="regular",
+            purpose="containment",
+            parent_client_order_id="ftpm-atomic-parent",
+        )
+
+    assert state_path.read_bytes() == original_state
+    assert list(state_path.parent.glob(f".{state_path.name}.*.tmp")) == []
+
+
+def test_binance_portfolio_margin_stale_process_cannot_overwrite_pending_intent(
+    default_conf, mocker, tmp_path
+):
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    first_api = portfolio_margin_live_api_mock()
+    second_api = portfolio_margin_live_api_mock()
+    type(second_api).has = PropertyMock(return_value={"setLeverage": False})
+    first = get_patched_exchange(mocker, conf, first_api, exchange="binance")
+    second = get_patched_exchange(mocker, conf, second_api, exchange="binance")
+    first._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT",
+        client_order_id="ftpm-first-process",
+        order_kind="regular",
+    )
+    mocker.patch.object(second, "_new_portfolio_client_order_id", return_value="ftpm-stale-process")
+
+    with pytest.raises(OperationalException, match="another operation"):
+        second.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    second_api.create_order.assert_not_called()
+    intents = json.loads(first._portfolio_order_intent_store.path.read_text(encoding="utf-8"))[
+        "intents"
+    ]
+    assert [intent["client_order_id"] for intent in intents] == ["ftpm-first-process"]
+
+
+def test_binance_portfolio_margin_process_lock_fails_closed(default_conf, mocker, tmp_path):
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    first = get_patched_exchange(mocker, conf, portfolio_margin_live_api_mock(), exchange="binance")
+    second = get_patched_exchange(
+        mocker, conf, portfolio_margin_live_api_mock(), exchange="binance"
+    )
+
+    with first._get_portfolio_create_lock():
+        with pytest.raises(OperationalException, match="Another process is updating"):
+            with second._get_portfolio_create_lock():
+                pass
+
+
+def test_binance_portfolio_margin_containment_cleanup_kill_point_is_recoverable(
+    default_conf, mocker, tmp_path
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_positions.return_value = []
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT",
+        client_order_id="ftpm-contained-parent",
+        order_kind="regular",
+    )
+    exchange._portfolio_unknown_order_latched = True
+
+    with exchange._get_portfolio_create_lock():
+        assert (
+            exchange._contain_unknown_portfolio_order("ETH/USDT:USDT", "ftpm-contained-parent")
+            is False
+        )
+    mocker.patch.object(
+        exchange._portfolio_order_intent_store,
+        "_atomic_write",
+        side_effect=OperationalException("simulated contained cleanup kill point"),
+    )
+    with pytest.raises(OperationalException, match="contained cleanup kill point"):
+        exchange._clear_portfolio_order_intent("ftpm-contained-parent")
+
+    recovery_api = portfolio_margin_live_api_mock()
+    recovery_api.fetch_positions.return_value = []
+    restarted = get_patched_exchange(mocker, conf, recovery_api, exchange="binance")
+    with pytest.raises(OperationalException, match="Restart once more"):
+        restarted.validate_existing_positions({}, [])
+    assert (
+        json.loads(restarted._portfolio_order_intent_store.path.read_text(encoding="utf-8"))[
+            "intents"
+        ]
+        == []
+    )
+    recovery_api.papiGetCmPositionRisk.assert_not_called()
+
+
+def test_binance_portfolio_margin_persists_emergency_containment_before_post(
+    default_conf, mocker, tmp_path
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_order.side_effect = ccxt.OrderNotFound("not visible")
+    api_mock.fetch_positions.side_effect = [
+        [],
+        [
+            {
+                "symbol": "ETH/USDT:USDT",
+                "contracts": 0.025,
+                "side": "long",
+                "leverage": 1,
+                "marginMode": "cross",
+                "collateral": 50,
+            }
+        ],
+        [],
+        [],
+        [],
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        persistent_portfolio_margin_conf(default_conf, tmp_path),
+        api_mock,
+        exchange="binance",
+    )
+    exchange._portfolio_order_recovery_attempts = 1
+    client_ids = iter(("ftpm-entry-parent", "ftpm-containment-child"))
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        side_effect=lambda: next(client_ids),
+    )
+    state_path = exchange._portfolio_order_intent_store.path
+    containment_snapshots = []
+    create_count = 0
+
+    def create_order(*args, **kwargs):
+        nonlocal create_count
+        create_count += 1
+        if create_count == 1:
+            raise ccxt.RequestTimeout("entry status unknown")
+        containment_snapshots.append(json.loads(state_path.read_text(encoding="utf-8")))
+        return {
+            "id": "emergency-close",
+            "clientOrderId": "ftpm-containment-child",
+            "symbol": "ETH/USDT:USDT",
+            "status": "closed",
+            "info": {},
+        }
+
+    api_mock.create_order.side_effect = create_order
+
+    with pytest.raises(OperationalException, match="flattened detected exposure"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    intents = containment_snapshots[0]["intents"]
+    assert {(intent["client_order_id"], intent["purpose"]) for intent in intents} == {
+        ("ftpm-entry-parent", "submission"),
+        ("ftpm-containment-child", "containment"),
+    }
+    child = next(intent for intent in intents if intent["purpose"] == "containment")
+    assert child["parent_client_order_id"] == "ftpm-entry-parent"
+    assert json.loads(state_path.read_text(encoding="utf-8"))["intents"] == []
 
 
 def test_binance_portfolio_margin_position_flat_check_is_single_papi_read(default_conf, mocker):
