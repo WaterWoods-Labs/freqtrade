@@ -1399,6 +1399,11 @@
             },
             {
               "properties": {
+                "account_namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$",
+                  "description": "Non-secret stable account label shared by all local writers; only its digest is used in runtime state paths."
+                },
                 "policy": {
                   "type": "string",
                   "const": "chan_multi_pair",
@@ -1471,9 +1476,9 @@
                 },
                 "force_entry_order_type": {
                   "type": "string",
-                  "const": "market",
+                  "const": "disabled",
                   "enum": [
-                    "market"
+                    "disabled"
                   ]
                 },
                 "reject_force_entry_price": {
@@ -1485,6 +1490,7 @@
                 }
               },
               "required": [
+                "account_namespace",
                 "policy",
                 "pairs",
                 "allowed_sides",

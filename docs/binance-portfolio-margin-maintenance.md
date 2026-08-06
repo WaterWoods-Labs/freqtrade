@@ -227,6 +227,33 @@ Runtime recovery, position and order reconciliation, container rollback, configu
 and account safety remain governed exclusively by the
 [runtime Portfolio Margin runbook](https://github.com/WaterWoods-Labs/team-freqtrade-runtime/blob/main/docs/binance-portfolio-margin-runbook.md).
 
+## Chan live writer and reservation boundary
+
+The Chan multi-pair policy requires a stable, non-secret `account_namespace`. Every bot process
+that can write the same Portfolio Margin account on one host must use that exact namespace and the
+same `user_data_dir`. The adapter hashes the namespace before using it in the state filename, then
+uses one cross-process lock plus crash-persistent entry reservations to serialize the account
+snapshot, intent write, order submission, and reservation transition. Reservations contain no API
+credential, requested quantity, requested price, or raw exchange response.
+
+Code on one host cannot lock a manual Binance session or a writer on another host. The runtime
+gate must therefore dedicate one Portfolio Margin account or sub-account to this workload, permit
+exactly one active trading API key and one writer host, and prohibit manual entries and external
+order writers. A second host may be cold standby only; it must not start until the first writer is
+stopped and the shared account is reconciled. Treat a mismatched namespace as a second writer, not
+as a separate bot.
+
+The per-pair 100 USDT and aggregate 500 USDT values are conservative requested-entry and local
+reservation limits. They are not absolute fill-notional, mark-to-market exposure, fee, slippage,
+stop-loss, or maximum-loss guarantees. Chan market entries and RPC force-entry are disabled by the
+product; strategy entries must be limit orders. Price improvement on a short limit fill, fees, and
+subsequent market movement can still move realized or marked exposure beyond the requested value.
+
+Do not delete or edit an unknown-order intent or entry-reservation file merely to make startup
+continue. A corrupt, expired, or still-unobserved state is deliberately fail-closed and requires
+the account, exact client order id, positions, open orders, and trade database to be reconciled
+under the runtime runbook before an operator-approved recovery.
+
 ## Legacy combined-build boundary
 
 The immutable tags `xcoin-2026.07.30.1` and `xcoin-2026.07.31.1` are legacy

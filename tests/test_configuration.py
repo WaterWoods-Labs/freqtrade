@@ -684,6 +684,7 @@ def test_validate_portfolio_margin_risk_schema(default_conf) -> None:
 
 def test_validate_portfolio_margin_chan_risk_schema(default_conf) -> None:
     risk = {
+        "account_namespace": "chan-live-account",
         "policy": "chan_multi_pair",
         "pairs": {
             "BTC/USDT:USDT": 100,
@@ -695,7 +696,7 @@ def test_validate_portfolio_margin_chan_risk_schema(default_conf) -> None:
         "allowed_sides": ["long", "short"],
         "max_leverage": 1,
         "max_total_entry_notional": 500,
-        "force_entry_order_type": "market",
+        "force_entry_order_type": "disabled",
         "reject_force_entry_price": True,
     }
     conf = deepcopy(default_conf)
@@ -716,6 +717,8 @@ def test_validate_portfolio_margin_chan_risk_schema(default_conf) -> None:
         (
             {**risk, "policy": "unreviewed"},
             {**risk, "allowed_sides": ["long"]},
+            {**risk, "account_namespace": "../unsafe"},
+            {**risk, "force_entry_order_type": "market"},
             {**risk, "max_total_entry_notional": 500.01},
             {key: value for key, value in risk.items() if key != "max_total_entry_notional"},
         )

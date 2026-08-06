@@ -1169,6 +1169,7 @@ class RPC:
         max_total_notional = risk.get("max_total_entry_notional")
         if (
             risk.get("policy") != "chan_multi_pair"
+            or not isinstance(risk.get("account_namespace"), str)
             or not isinstance(pair_limits, dict)
             or set(pair_limits) != _PORTFOLIO_MARGIN_CHAN_PAIRS
             or any(
@@ -1183,6 +1184,8 @@ class RPC:
             or not isinstance(max_total_notional, (int, float))
             or not isfinite(max_total_notional)
             or not 0 < max_total_notional <= 500
+            or risk.get("force_entry_order_type") != "disabled"
+            or risk.get("reject_force_entry_price") is not True
         ):
             raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
         return pair_limits
@@ -1209,6 +1212,7 @@ class RPC:
             "reject_force_entry_price",
         }
         is_chan_policy = set(risk) == {
+            "account_namespace",
             "policy",
             "pairs",
             "allowed_sides",
@@ -1222,22 +1226,11 @@ class RPC:
             side_is_allowed = order_side == SignalDirection.LONG and risk.get("side") == "long"
             max_entry_notional = risk.get("max_entry_notional")
         elif is_chan_policy:
-            pair_limits = self._portfolio_margin_chan_force_entry_pair_limits(risk)
-            direction = (
-                "long"
-                if order_side == SignalDirection.LONG
-                else "short"
-                if order_side == SignalDirection.SHORT
-                else None
+            self._portfolio_margin_chan_force_entry_pair_limits(risk)
+            raise RPCException(
+                "Portfolio Margin Chan force-entry is disabled; only strategy-generated "
+                "limit entries may reach the exchange adapter."
             )
-            pair_is_allowed = pair in pair_limits
-            allowed_sides = risk.get("allowed_sides")
-            side_is_allowed = (
-                isinstance(allowed_sides, list)
-                and direction is not None
-                and direction in allowed_sides
-            )
-            max_entry_notional = pair_limits.get(pair) if pair_is_allowed else None
         else:
             raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
 

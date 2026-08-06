@@ -1079,6 +1079,14 @@ CONF_SCHEMA = {
                         },
                         {
                             "properties": {
+                                "account_namespace": {
+                                    "type": "string",
+                                    "pattern": r"^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$",
+                                    "description": (
+                                        "Non-secret stable account label shared by all local "
+                                        "writers; only its digest is used in runtime state paths."
+                                    ),
+                                },
                                 "policy": {
                                     "type": "string",
                                     "const": "chan_multi_pair",
@@ -1126,8 +1134,8 @@ CONF_SCHEMA = {
                                 },
                                 "force_entry_order_type": {
                                     "type": "string",
-                                    "const": "market",
-                                    "enum": ["market"],
+                                    "const": "disabled",
+                                    "enum": ["disabled"],
                                 },
                                 "reject_force_entry_price": {
                                     "type": "boolean",
@@ -1136,6 +1144,7 @@ CONF_SCHEMA = {
                                 },
                             },
                             "required": [
+                                "account_namespace",
                                 "policy",
                                 "pairs",
                                 "allowed_sides",

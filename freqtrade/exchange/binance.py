@@ -1,7 +1,9 @@
 """Binance exchange subclass"""
 
 import logging
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from math import floor, isclose, isfinite
@@ -28,6 +30,7 @@ from freqtrade.exceptions import (
 )
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.binance_order_intent import (
+    PortfolioEntryReservation,
     PortfolioOrderIntent,
     PortfolioOrderIntentStore,
     PortfolioOrderKind,
@@ -62,6 +65,7 @@ _PORTFOLIO_MARGIN_CHAN_PAIRS = frozenset(
 )
 _PORTFOLIO_MARGIN_CHAN_RISK_KEYS = frozenset(
     {
+        "account_namespace",
         "policy",
         "pairs",
         "allowed_sides",
@@ -71,6 +75,13 @@ _PORTFOLIO_MARGIN_CHAN_RISK_KEYS = frozenset(
         "reject_force_entry_price",
     }
 )
+_PORTFOLIO_MARGIN_ACCOUNT_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$")
+
+
+@dataclass(frozen=True)
+class _PortfolioContainmentOutcome:
+    flattened: bool
+    exchange_evidence_seen: bool
 
 
 class Binance(Exchange):
@@ -167,8 +178,14 @@ class Binance(Exchange):
             if not config.get("dry_run", True):
                 intent_path = self._portfolio_order_intent_path(config)
                 allowed_pairs = set(exchange_config.get("pair_whitelist", []))
+                reservations_enabled = (
+                    isinstance(risk_config, dict)
+                    and risk_config.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+                )
                 self._portfolio_order_intent_store = PortfolioOrderIntentStore(
-                    intent_path, allowed_pairs
+                    intent_path,
+                    allowed_pairs,
+                    reservations_enabled=reservations_enabled,
                 )
                 self._portfolio_create_lock = self._portfolio_order_intent_store.operation_lock
                 pending_intents = self._portfolio_order_intent_store.intents
@@ -204,7 +221,7 @@ class Binance(Exchange):
 
     @staticmethod
     def _portfolio_order_intent_path(config: dict) -> Path | None:
-        """Return a credential-free, bot-specific path under the configured user-data dir."""
+        """Return a credential-free local state path under the configured user-data dir."""
         user_data_dir = Path(config.get("user_data_dir", ""))
         if not user_data_dir.is_absolute():
             if config.get("runmode") == RunMode.LIVE:
@@ -221,6 +238,26 @@ class Binance(Exchange):
                 "crash-persistent order intents. Trading remains stopped."
             )
 
+        exchange_config = config.get("exchange", {})
+        risk_config = exchange_config.get("portfolio_margin_risk")
+        if (
+            isinstance(risk_config, dict)
+            and risk_config.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+        ):
+            # Every process writing the same Portfolio Margin account must use the same
+            # non-secret namespace and shared user_data_dir. Only its digest reaches disk.
+            account_namespace = risk_config.get("account_namespace")
+            if not isinstance(account_namespace, str) or not account_namespace:
+                raise OperationalException(
+                    "Binance Portfolio Margin Chan live trading requires a non-secret account "
+                    "namespace for shared crash-persistent entry reservations."
+                )
+            namespace = sha256(
+                f"binance-portfolio-margin\0{account_namespace}".encode()
+            ).hexdigest()[:24]
+            return user_data_dir / f".portfolio-margin-account-state-{namespace}.json"
+
+        # Preserve the legacy Canary bot/database namespace and v1 file format.
         try:
             database_url = urlsplit(str(config.get("db_url", "")))
             database_port = f":{database_url.port}" if database_url.port is not None else ""
@@ -274,6 +311,23 @@ class Binance(Exchange):
             self._portfolio_unknown_order_latched = True
             raise
 
+    def _promote_portfolio_entry_reservation(self, client_order_id: str) -> None:
+        """Keep full pair capacity reserved after a confirmed Chan entry POST."""
+        store = self._portfolio_order_intent_store
+        if store is None:
+            self._portfolio_unknown_order_latched = True
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation storage is unavailable. "
+                "Trading remains stopped."
+            )
+        try:
+            store.promote_to_entry_reservation(client_order_id)
+        except OperationalException:
+            # The persisted submission intent remains authoritative if the atomic
+            # promotion fails after POST. Recovery will contain it on restart.
+            self._portfolio_unknown_order_latched = True
+            raise
+
     def _get_portfolio_create_lock(self) -> Any:
         """Return the live PAPI order lock, failing closed if it was not initialized."""
         portfolio_create_lock = self._portfolio_create_lock
@@ -324,8 +378,11 @@ class Binance(Exchange):
         pair_limits = risk.get("pairs")
         max_leverage = risk.get("max_leverage")
         max_total_notional = risk.get("max_total_entry_notional")
+        account_namespace = risk.get("account_namespace")
         return (
             risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+            and isinstance(account_namespace, str)
+            and _PORTFOLIO_MARGIN_ACCOUNT_NAMESPACE_PATTERN.fullmatch(account_namespace) is not None
             and isinstance(pair_limits, dict)
             and set(pair_limits) == _PORTFOLIO_MARGIN_CHAN_PAIRS
             and all(
@@ -344,7 +401,7 @@ class Binance(Exchange):
             and isinstance(max_total_notional, (int, float))
             and isfinite(max_total_notional)
             and 0 < max_total_notional <= 500
-            and risk.get("force_entry_order_type") == "market"
+            and risk.get("force_entry_order_type") == "disabled"
             and risk.get("reject_force_entry_price") is True
         )
 
@@ -423,6 +480,7 @@ class Binance(Exchange):
                 pair_whitelist = exchange_config.get("pair_whitelist", [])
                 if (
                     not Binance._portfolio_margin_chan_risk_policy_valid(risk_config)
+                    or config.get("force_entry_enable") is True
                     or not isinstance(pair_whitelist, list)
                     or len(pair_whitelist) != len(_PORTFOLIO_MARGIN_CHAN_PAIRS)
                     or set(pair_whitelist) != _PORTFOLIO_MARGIN_CHAN_PAIRS
@@ -431,8 +489,8 @@ class Binance(Exchange):
                         "Binance Portfolio Margin Chan risk policy must define exactly the "
                         "reviewed BTC, ETH, BNB, SOL, and SPY pairs, allow long and short, use "
                         "1x leverage, cap each pair at 100 USDT and total projected entry "
-                        "exposure at 500 USDT, require market force-entry, and reject an "
-                        "explicit force-entry price."
+                        "exposure at 500 USDT, define a non-secret account namespace, disable "
+                        "force-entry, and reject an explicit force-entry price."
                     )
             else:
                 raise OperationalException(
@@ -909,6 +967,7 @@ class Binance(Exchange):
         self,
         *,
         pair: str,
+        ordertype: str | None = None,
         side: BuySell,
         amount: float,
         rate: float,
@@ -964,6 +1023,7 @@ class Binance(Exchange):
         if (
             not self._portfolio_margin_chan_risk_policy_valid(risk)
             or common_invalid
+            or (ordertype is not None and ordertype != "limit")
             or isinstance(pair_max_notional, bool)
             or not isinstance(pair_max_notional, (int, float))
             or not isfinite(pair_max_notional)
@@ -971,12 +1031,12 @@ class Binance(Exchange):
         ):
             raise OperationalException(
                 "Binance Portfolio Margin Chan entry blocked by the configured pair, side, "
-                "1x leverage, or pair maximum-notional risk policy."
+                "limit-order-only, 1x leverage, or requested-notional risk policy."
             )
         if proposed_notional > float(pair_max_notional) + 1e-9:
             raise OperationalException(
                 "Binance Portfolio Margin Chan entry blocked by the configured pair, side, "
-                "1x leverage, or pair maximum-notional risk policy."
+                "limit-order-only, 1x leverage, or requested-notional risk policy."
             )
 
     @staticmethod
@@ -1046,12 +1106,17 @@ class Binance(Exchange):
             )
         return pair, notional
 
-    def _portfolio_position_entry_notional(
+    def _portfolio_position_entry_notional(  # noqa: C901
         self, position: dict[str, Any], pair_limits: dict[str, Any]
     ) -> tuple[str, float]:
         pair = position.get("symbol")
+        raw_contracts = position.get("contracts")
+        if raw_contracts in (None, ""):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found a missing position amount."
+            )
         try:
-            contracts = abs(float(position.get("contracts") or 0.0))
+            contracts = abs(float(raw_contracts))
         except (TypeError, ValueError) as e:
             raise OperationalException(
                 "Binance Portfolio Margin Chan exposure check found an invalid position amount."
@@ -1061,6 +1126,29 @@ class Binance(Exchange):
                 "Binance Portfolio Margin Chan exposure check found a non-finite position amount."
             )
         if contracts == 0:
+            info = position.get("info")
+            raw_notional = position.get("notional")
+            raw_position_amount = position.get("positionAmt")
+            if isinstance(info, dict):
+                if raw_notional in (None, ""):
+                    raw_notional = info.get("notional")
+                if raw_position_amount in (None, ""):
+                    raw_position_amount = info.get("positionAmt")
+            for raw_value in (raw_notional, raw_position_amount):
+                if raw_value in (None, ""):
+                    continue
+                try:
+                    evidence_value = abs(float(raw_value))
+                except (TypeError, ValueError) as e:
+                    raise OperationalException(
+                        "Binance Portfolio Margin Chan exposure check found invalid zero-position "
+                        "evidence."
+                    ) from e
+                if not isfinite(evidence_value) or evidence_value > 1e-12:
+                    raise OperationalException(
+                        "Binance Portfolio Margin Chan exposure check found non-zero exposure "
+                        "with zero contracts."
+                    )
             return "", 0.0
         if not isinstance(pair, str) or pair not in pair_limits:
             raise OperationalException(
@@ -1122,6 +1210,149 @@ class Binance(Exchange):
             )
         return notional
 
+    def _fetch_portfolio_entry_reservation_order(
+        self, reservation: PortfolioEntryReservation
+    ) -> dict[str, Any] | None:
+        """Fetch the exact reserved order once; absence keeps the reservation in place."""
+        params = self._portfolio_margin_params({"origClientOrderId": reservation.client_order_id})
+        try:
+            order = self._api.fetch_order(
+                reservation.client_order_id,
+                reservation.pair,
+                params=params,
+            )
+        except ccxt.OrderNotFound:
+            return None
+        except ccxt.BaseError as exc:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation could not query its exact "
+                "PAPI order. No new order was submitted and trading remains stopped."
+            ) from exc
+        if not self._portfolio_order_matches_intent(
+            order, reservation.pair, reservation.client_order_id
+        ) or not self._portfolio_order_response_confirmed(order):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation received mismatched or "
+                "incomplete exact-order evidence. Trading remains stopped."
+            )
+        return order
+
+    @staticmethod
+    def _portfolio_entry_reservation_order_state(order: dict[str, Any]) -> tuple[bool, float]:
+        status_value = order.get("status")
+        status = status_value.lower() if isinstance(status_value, str) else None
+        if status not in {
+            "open",
+            "closed",
+            "canceled",
+            "cancelled",
+            "expired",
+            "rejected",
+        }:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation found an unknown exact-order "
+                "status. Trading remains stopped."
+            )
+        raw_filled = order.get("filled")
+        if raw_filled in (None, ""):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation found missing fill evidence. "
+                "Trading remains stopped."
+            )
+        try:
+            filled = float(raw_filled)
+        except (TypeError, ValueError) as exc:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation found invalid fill evidence. "
+                "Trading remains stopped."
+            ) from exc
+        if not isfinite(filled) or filled < 0:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation found invalid fill evidence. "
+                "Trading remains stopped."
+            )
+        return status != "open", filled
+
+    def _portfolio_entry_reservation_release_window(
+        self, reservation: PortfolioEntryReservation
+    ) -> bool:
+        """Use the full bounded window before releasing a terminal, flat reservation."""
+        store = self._portfolio_order_intent_store
+        if store is None:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation storage is unavailable."
+            )
+        stable_clean_snapshots = 0
+        exposure_seen = reservation.exposure_seen
+        for attempt in range(self._portfolio_containment_attempts):
+            order = self._fetch_portfolio_entry_reservation_order(reservation)
+            terminal = False
+            filled = 0.0
+            if order is not None:
+                terminal, filled = self._portfolio_entry_reservation_order_state(order)
+
+            open_orders = self._portfolio_margin_list_response(
+                "reservation open-order",
+                lambda: self._api.fetch_open_orders(
+                    reservation.pair,
+                    params=self._portfolio_margin_params(),
+                ),
+            )
+            entry_order_visible = any(
+                not self._portfolio_order_is_reduce_only(item) for item in open_orders
+            )
+            active_positions = self._portfolio_active_position_snapshot(reservation.pair)
+            if active_positions and filled > 0 and not exposure_seen:
+                store.mark_reservation_exposure_seen(reservation.client_order_id)
+                exposure_seen = True
+
+            clean = (
+                order is not None
+                and terminal
+                and not entry_order_visible
+                and not active_positions
+                and (filled == 0 or exposure_seen)
+            )
+            stable_clean_snapshots = stable_clean_snapshots + 1 if clean else 0
+            if attempt + 1 < self._portfolio_containment_attempts:
+                sleep(self._portfolio_order_recovery_delay)
+
+        if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
+            store.remove_reservation(reservation.client_order_id)
+            return True
+        return False
+
+    def _reconcile_portfolio_entry_reservations(self) -> None:
+        """Refresh durable Chan reservations while the account-wide operation lock is held."""
+        store = self._portfolio_order_intent_store
+        if store is None:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry reservation storage is unavailable. "
+                "Trading remains stopped."
+            )
+        for reservation in store.reservations:
+            order = self._fetch_portfolio_entry_reservation_order(reservation)
+            if order is None:
+                # Exchange snapshots may lag a confirmed create response. Full configured
+                # pair capacity remains held locally until exact evidence appears.
+                continue
+            terminal, filled = self._portfolio_entry_reservation_order_state(order)
+            active_positions = self._portfolio_active_position_snapshot(reservation.pair)
+            if active_positions and filled > 0 and not reservation.exposure_seen:
+                store.mark_reservation_exposure_seen(reservation.client_order_id)
+                reservation = PortfolioEntryReservation(
+                    client_order_id=reservation.client_order_id,
+                    pair=reservation.pair,
+                    created_at=reservation.created_at,
+                    exposure_seen=True,
+                )
+            if active_positions or not terminal:
+                continue
+            if filled > 0 and not reservation.exposure_seen:
+                # A filled order whose position was never observed is not safe to forget.
+                continue
+            self._portfolio_entry_reservation_release_window(reservation)
+
     def _validate_portfolio_margin_chan_projected_exposure(
         self, pair: str, proposed_notional: float, client_order_id: str
     ) -> None:
@@ -1147,6 +1378,8 @@ class Binance(Exchange):
                 "Binance Portfolio Margin Chan exposure check found an invalid risk policy."
             )
 
+        self._reconcile_portfolio_entry_reservations()
+
         # Read orders before positions. If an entry fills between snapshots, its open remainder
         # and resulting position are both counted instead of allowing an understated exposure.
         open_orders = self._portfolio_margin_list_response(
@@ -1170,8 +1403,31 @@ class Binance(Exchange):
             if position_pair:
                 exposure_by_pair[position_pair] += notional
 
-        projected_pair = exposure_by_pair[pair] + proposed_notional
-        projected_total = sum(exposure_by_pair.values()) + proposed_notional
+        store = self._portfolio_order_intent_store
+        if store is None:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check cannot access durable entry "
+                "reservations. Trading remains stopped."
+            )
+        reservations = store.reservations
+        reserved_pairs = {reservation.pair for reservation in reservations}
+        if pair in reserved_pairs or exposure_by_pair[pair] > 1e-9:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry blocked because this pair already has "
+                "exchange exposure or a durable entry reservation; position adjustment is "
+                "disabled."
+            )
+
+        effective_exposure = {
+            configured_pair: max(
+                exposure_by_pair[configured_pair],
+                float(pair_limits[configured_pair]) if configured_pair in reserved_pairs else 0.0,
+            )
+            for configured_pair in pair_limits
+        }
+
+        projected_pair = effective_exposure[pair] + proposed_notional
+        projected_total = sum(effective_exposure.values()) + proposed_notional
         if (
             not isfinite(projected_pair)
             or projected_pair > float(pair_limits[pair]) + 1e-9
@@ -1439,7 +1695,9 @@ class Binance(Exchange):
         # recovery still needs the standard Freqtrade conversion exactly once.
         return order if conditional else self._order_contracts_to_amount(order)
 
-    def _portfolio_active_position_snapshot(self, pair: str) -> list[tuple[dict[str, Any], float]]:
+    def _portfolio_active_position_snapshot(  # noqa: C901
+        self, pair: str
+    ) -> list[tuple[dict[str, Any], float]]:
         """Return validated active PAPI positions for one pair's safety reconciliation."""
         positions = self.fetch_positions(pair)
         if not isinstance(positions, list) or any(
@@ -1455,8 +1713,13 @@ class Binance(Exchange):
                 # even when one symbol was requested. Containment owns only the
                 # uncertain order's pair and must never flatten another pair.
                 continue
+            raw_contracts = position.get("contracts")
+            if raw_contracts in (None, ""):
+                raise OperationalException(
+                    "Binance Portfolio Margin containment received a missing position amount."
+                )
             try:
-                contracts = abs(float(position.get("contracts") or 0.0))
+                contracts = abs(float(raw_contracts))
             except (TypeError, ValueError) as e:
                 raise OperationalException(
                     "Binance Portfolio Margin containment received an invalid position amount."
@@ -1465,6 +1728,30 @@ class Binance(Exchange):
                 raise OperationalException(
                     "Binance Portfolio Margin containment received a non-finite position amount."
                 )
+            if contracts == 0:
+                info = position.get("info")
+                raw_notional = position.get("notional")
+                raw_position_amount = position.get("positionAmt")
+                if isinstance(info, dict):
+                    if raw_notional in (None, ""):
+                        raw_notional = info.get("notional")
+                    if raw_position_amount in (None, ""):
+                        raw_position_amount = info.get("positionAmt")
+                for raw_value in (raw_notional, raw_position_amount):
+                    if raw_value in (None, ""):
+                        continue
+                    try:
+                        evidence_value = abs(float(raw_value))
+                    except (TypeError, ValueError) as exc:
+                        raise OperationalException(
+                            "Binance Portfolio Margin containment received invalid flat-position "
+                            "evidence."
+                        ) from exc
+                    if not isfinite(evidence_value) or evidence_value > 1e-12:
+                        raise OperationalException(
+                            "Binance Portfolio Margin containment received non-zero exposure "
+                            "with zero contracts."
+                        )
             if contracts and position_symbol != pair:
                 raise OperationalException(
                     "Binance Portfolio Margin containment received an active position "
@@ -1543,16 +1830,17 @@ class Binance(Exchange):
 
     def _contain_unknown_portfolio_order(  # noqa: C901
         self, pair: str, client_order_id: str
-    ) -> bool:
+    ) -> _PortfolioContainmentOutcome:
         """Cancel an unknown order and repeatedly contain late fills until stably clean."""
         if self._portfolio_margin_risk is None:
-            return False
+            return _PortfolioContainmentOutcome(False, False)
 
         flattened = False
         stable_clean_snapshots = 0
         last_error: Exception | None = None
         matching_order_visible = False
         active_position_visible = False
+        exchange_evidence_seen = False
 
         for attempt in range(self._portfolio_containment_attempts):
             snapshot_action = False
@@ -1573,6 +1861,7 @@ class Binance(Exchange):
                     if self._portfolio_order_matches_intent(order, pair, client_order_id)
                 ]
                 matching_order_visible = bool(matching_orders)
+                exchange_evidence_seen = exchange_evidence_seen or matching_order_visible
                 last_error = None
                 for order in matching_orders:
                     snapshot_action = True
@@ -1601,6 +1890,7 @@ class Binance(Exchange):
             try:
                 active_positions = self._portfolio_active_position_snapshot(pair)
                 active_position_visible = bool(active_positions)
+                exchange_evidence_seen = exchange_evidence_seen or active_position_visible
             except (FreqtradeException, ccxt.BaseError) as e:
                 last_error = e
 
@@ -1618,14 +1908,14 @@ class Binance(Exchange):
             clean_snapshot = order_snapshot_clean and active_positions == [] and not snapshot_action
             if clean_snapshot:
                 stable_clean_snapshots += 1
-                if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
-                    return flattened
             else:
                 stable_clean_snapshots = 0
 
             if attempt + 1 < self._portfolio_containment_attempts:
                 sleep(self._portfolio_order_recovery_delay)
 
+        if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
+            return _PortfolioContainmentOutcome(flattened, exchange_evidence_seen)
         if last_error is not None:
             raise OperationalException(
                 "Binance Portfolio Margin unknown-order containment could not obtain "
@@ -1734,9 +2024,13 @@ class Binance(Exchange):
             with self._get_portfolio_create_lock():
                 if self._portfolio_margin_risk is None:
                     self._cancel_persisted_regular_intent(intent.pair, intent.client_order_id)
+                    self._clear_portfolio_order_intent(intent.client_order_id)
                 else:
-                    self._contain_unknown_portfolio_order(intent.pair, intent.client_order_id)
-                self._clear_portfolio_order_intent(intent.client_order_id)
+                    containment = self._contain_unknown_portfolio_order(
+                        intent.pair, intent.client_order_id
+                    )
+                    if containment.exchange_evidence_seen:
+                        self._clear_portfolio_order_intent(intent.client_order_id)
 
         if store.intents:
             raise OperationalException(
@@ -1765,6 +2059,7 @@ class Binance(Exchange):
             )
         self._validate_portfolio_margin_entry_order(
             pair=pair,
+            ordertype=ordertype,
             side=side,
             amount=amount,
             rate=rate,
@@ -1790,12 +2085,23 @@ class Binance(Exchange):
                     "Binance Portfolio Margin has a latched unknown order state. "
                     "Reconcile the account before restarting."
                 )
+            store = self._portfolio_order_intent_store
+            if not reduceOnly and store is not None and store.intents:
+                # Another process may have persisted an intent after this instance was
+                # constructed. Always reload it under the cross-process operation lock before
+                # taking any exchange snapshot or generating a new submission.
+                self._portfolio_unknown_order_latched = True
+                raise OperationalException(
+                    "Binance Portfolio Margin found persisted order evidence from another "
+                    "process. No new order was submitted and trading remains stopped."
+                )
             client_order_id = self._new_portfolio_client_order_id()
-            if (
+            chan_entry = (
                 not reduceOnly
                 and self._portfolio_margin_risk is not None
                 and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
-            ):
+            )
+            if chan_entry:
                 self._validate_portfolio_margin_chan_projected_exposure(
                     pair, amount * rate, client_order_id
                 )
@@ -1852,7 +2158,10 @@ class Binance(Exchange):
                     submission_error = e
                 else:
                     if self._portfolio_order_response_confirmed(order):
-                        self._clear_portfolio_order_intent(client_order_id)
+                        if chan_entry:
+                            self._promote_portfolio_entry_reservation(client_order_id)
+                        else:
+                            self._clear_portfolio_order_intent(client_order_id)
                         return order
                     submission_error = OperationalException(
                         "Binance Portfolio Margin create response did not contain "
@@ -1866,31 +2175,37 @@ class Binance(Exchange):
                     )
                 except OperationalException as reconciliation_error:
                     try:
-                        flattened = self._contain_unknown_portfolio_order(pair, client_order_id)
+                        containment = self._contain_unknown_portfolio_order(pair, client_order_id)
                     except OperationalException as containment_error:
                         raise OperationalException(
                             "Binance Portfolio Margin order submission status is unknown; "
                             "the PAPI reconciliation query failed and emergency containment "
                             "could not complete. Trading remains stopped."
                         ) from containment_error
-                    if self._portfolio_margin_risk is not None:
+                    if (
+                        self._portfolio_margin_risk is not None
+                        and containment.exchange_evidence_seen
+                    ):
                         self._clear_portfolio_order_intent(client_order_id)
                     raise OperationalException(
                         "Binance Portfolio Margin order submission status is unknown and "
                         "the PAPI reconciliation query failed. "
                         + (
                             "Emergency containment flattened detected exposure. "
-                            if flattened
+                            if containment.flattened
                             else "No exposure was visible during bounded containment. "
                         )
                         + "Trading remains stopped."
                     ) from reconciliation_error
                 if recovered is not None:
-                    self._clear_portfolio_order_intent(client_order_id)
+                    if chan_entry:
+                        self._promote_portfolio_entry_reservation(client_order_id)
+                    else:
+                        self._clear_portfolio_order_intent(client_order_id)
                     self._portfolio_unknown_order_latched = was_unknown_latched
                     return recovered
-                flattened = self._contain_unknown_portfolio_order(pair, client_order_id)
-                if self._portfolio_margin_risk is not None:
+                containment = self._contain_unknown_portfolio_order(pair, client_order_id)
+                if self._portfolio_margin_risk is not None and containment.exchange_evidence_seen:
                     self._clear_portfolio_order_intent(client_order_id)
                 raise OperationalException(
                     "Binance Portfolio Margin order submission status is unknown. "
@@ -1898,7 +2213,7 @@ class Binance(Exchange):
                     "automatic retry is disabled. "
                     + (
                         "Emergency containment flattened detected exposure. "
-                        if flattened
+                        if containment.flattened
                         else "No exposure was visible during bounded containment. "
                     )
                     + "Inspect positions and open orders before restarting."
@@ -2652,6 +2967,29 @@ class Binance(Exchange):
                 "process. Restart once more so positions, orders, wallets, and the trade "
                 "database are validated from fresh snapshots."
             )
+
+        store = self._portfolio_order_intent_store
+        if (
+            store is not None
+            and self._portfolio_margin_risk is not None
+            and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+            and store.reservations
+        ):
+            with self._get_portfolio_create_lock():
+                self._reconcile_portfolio_entry_reservations()
+                reservations = store.reservations
+            database_pairs = {trade.pair for trade in open_trades if getattr(trade, "amount", 0)}
+            unowned_pairs = {
+                reservation.pair
+                for reservation in reservations
+                if reservation.pair not in database_pairs
+            }
+            if unowned_pairs:
+                raise OperationalException(
+                    "Binance Portfolio Margin Chan found durable entry reservations without "
+                    "matching open database trades. Trading remains stopped; reconcile the "
+                    "exact client orders, positions, and trade database before restarting."
+                )
 
         trades_by_pair: dict[str, Any] = {}
         conflicts: list[str] = []
