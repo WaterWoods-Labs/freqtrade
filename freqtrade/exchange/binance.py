@@ -943,12 +943,12 @@ class Binance(Exchange):
         )
         if "pair" in risk:
             expected_side: BuySell = "buy" if risk["side"] == "long" else "sell"
-            max_notional = float(risk["max_entry_notional"])
+            legacy_max_notional = float(risk["max_entry_notional"])
             if (
                 common_invalid
                 or pair != risk["pair"]
                 or side != expected_side
-                or proposed_notional > max_notional + 1e-9
+                or proposed_notional > legacy_max_notional + 1e-9
             ):
                 raise OperationalException(
                     "Binance Portfolio Margin entry blocked by the configured pair, long-only, "
@@ -959,21 +959,21 @@ class Binance(Exchange):
         pair_limits = risk.get("pairs")
         allowed_sides = risk.get("allowed_sides")
         direction = "long" if side == "buy" else "short" if side == "sell" else None
-        max_notional = pair_limits.get(pair) if isinstance(pair_limits, dict) else None
+        pair_max_notional = pair_limits.get(pair) if isinstance(pair_limits, dict) else None
         side_is_allowed = isinstance(allowed_sides, list) and direction in allowed_sides
         if (
             not self._portfolio_margin_chan_risk_policy_valid(risk)
             or common_invalid
-            or isinstance(max_notional, bool)
-            or not isinstance(max_notional, (int, float))
-            or not isfinite(max_notional)
+            or isinstance(pair_max_notional, bool)
+            or not isinstance(pair_max_notional, (int, float))
+            or not isfinite(pair_max_notional)
             or not side_is_allowed
         ):
             raise OperationalException(
                 "Binance Portfolio Margin Chan entry blocked by the configured pair, side, "
                 "1x leverage, or pair maximum-notional risk policy."
             )
-        if proposed_notional > float(max_notional) + 1e-9:
+        if proposed_notional > float(pair_max_notional) + 1e-9:
             raise OperationalException(
                 "Binance Portfolio Margin Chan entry blocked by the configured pair, side, "
                 "1x leverage, or pair maximum-notional risk policy."
@@ -1101,6 +1101,11 @@ class Binance(Exchange):
             raw_contract_size = position.get("contractSize")
             if raw_contract_size in (None, ""):
                 raw_contract_size = self.get_contract_size(pair)
+            if raw_mark_price is None or raw_contract_size is None:
+                raise OperationalException(
+                    "Binance Portfolio Margin Chan exposure check could not calculate position "
+                    "notional."
+                )
             try:
                 mark_price = float(raw_mark_price)
                 contract_size = float(raw_contract_size)
@@ -1129,6 +1134,8 @@ class Binance(Exchange):
             not self._portfolio_margin_chan_risk_policy_valid(risk)
             or not isinstance(pair_limits, dict)
             or pair not in pair_limits
+            or isinstance(max_total, bool)
+            or not isinstance(max_total, (int, float))
             or not isinstance(proposed_notional, (int, float))
             or isinstance(proposed_notional, bool)
             or not isfinite(proposed_notional)
