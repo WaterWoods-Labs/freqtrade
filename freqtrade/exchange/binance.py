@@ -46,7 +46,7 @@ class Binance(Exchange):
     _portfolio_order_recovery_attempts = 3
     _portfolio_order_recovery_delay = 1.0
     _portfolio_stop_order_recovery_attempts = 1
-    _portfolio_containment_attempts = 6
+    _portfolio_containment_attempts = 10
     _portfolio_containment_stable_snapshots = 3
     _portfolio_conditional_cleanup_attempts = 6
     _portfolio_conditional_cleanup_stable_snapshots = 3
@@ -995,7 +995,7 @@ class Binance(Exchange):
         return order if conditional else self._order_contracts_to_amount(order)
 
     def _portfolio_active_position_snapshot(self, pair: str) -> list[tuple[dict[str, Any], float]]:
-        """Return validated active PAPI positions for bounded safety reconciliation."""
+        """Return validated active PAPI positions for one pair's safety reconciliation."""
         positions = self.fetch_positions(pair)
         if not isinstance(positions, list) or any(
             not isinstance(position, dict) for position in positions
@@ -1004,6 +1004,12 @@ class Binance(Exchange):
 
         active_positions = []
         for position in positions:
+            position_symbol = position.get("symbol")
+            if position_symbol not in (None, "", pair):
+                # Some PAPI/CCXT combinations can return an account-wide snapshot
+                # even when one symbol was requested. Containment owns only the
+                # uncertain order's pair and must never flatten another pair.
+                continue
             try:
                 contracts = abs(float(position.get("contracts") or 0.0))
             except (TypeError, ValueError) as e:
@@ -1013,6 +1019,11 @@ class Binance(Exchange):
             if not isfinite(contracts):
                 raise OperationalException(
                     "Binance Portfolio Margin containment received a non-finite position amount."
+                )
+            if contracts and position_symbol != pair:
+                raise OperationalException(
+                    "Binance Portfolio Margin containment received an active position "
+                    "without the requested pair symbol."
                 )
             if contracts:
                 active_positions.append((position, contracts))
@@ -1077,7 +1088,7 @@ class Binance(Exchange):
     def _contain_unknown_portfolio_order(  # noqa: C901
         self, pair: str, client_order_id: str
     ) -> bool:
-        """Poll PAPI order/position state, cancel the unknown order, and flatten once."""
+        """Cancel an unknown order and repeatedly contain late fills until stably clean."""
         if self._portfolio_margin_risk is None:
             return False
 
@@ -1138,10 +1149,12 @@ class Binance(Exchange):
                 last_error = e
 
             order_snapshot_clean = matching_orders == [] and last_error is None
-            if active_positions and order_snapshot_clean and not flattened:
+            if active_positions and order_snapshot_clean:
                 # Only close after a fresh PAPI open-order snapshot proves that the
-                # potentially filling entry is no longer open. Never resubmit a close:
-                # subsequent position snapshots only confirm or fail closed.
+                # potentially filling entry is no longer open. Every later active
+                # position snapshot is fresh evidence of exposure: the original
+                # entry may have filled after an earlier emergency close. A repeated
+                # reduce-only market close cannot reverse or open a position.
                 self._flatten_portfolio_position(pair, active_positions)
                 flattened = True
                 snapshot_action = True

@@ -115,6 +115,73 @@ def portfolio_margin_live_api_mock():
     return configure_portfolio_algo_api_mock(api_mock)
 
 
+def portfolio_margin_position(
+    pair: str = "ETH/USDT:USDT",
+    *,
+    contracts: float = 0.025,
+    side: str = "long",
+) -> dict:
+    return {
+        "symbol": pair,
+        "contracts": contracts,
+        "side": side,
+        "leverage": 1,
+        "marginMode": "cross",
+        "collateral": 50,
+    }
+
+
+def unknown_entry_containment_exchange(
+    default_conf,
+    mocker,
+    position_snapshots: list[list[dict]],
+    *,
+    open_orders: list[dict] | None = None,
+    open_order_snapshots: list[list[dict]] | None = None,
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.fetch_order.side_effect = ccxt.OrderNotFound("not visible")
+    if open_order_snapshots is None:
+        api_mock.fetch_open_orders.return_value = list(open_orders or [])
+    else:
+        api_mock.fetch_open_orders.side_effect = open_order_snapshots
+    api_mock.fetch_positions.side_effect = position_snapshots
+    api_mock.create_order.side_effect = [
+        ccxt.RequestTimeout("entry status unknown"),
+        *[
+            {
+                "id": f"emergency-close-{index}",
+                "clientOrderId": f"ftpm-close-{index}",
+                "symbol": "ETH/USDT:USDT",
+                "status": "closed",
+                "info": {},
+            }
+            for index in range(10)
+        ],
+    ]
+    type(api_mock).has = PropertyMock(return_value={"setLeverage": False})
+    mocker.patch(f"{EXMS}.amount_to_precision", lambda s, x, y: y)
+    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_risk_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+    exchange._portfolio_order_recovery_attempts = 1
+    client_ids = iter(["ftpm-entry", *[f"ftpm-close-{index}" for index in range(10)]])
+    mocker.patch.object(
+        exchange,
+        "_new_portfolio_client_order_id",
+        side_effect=lambda: next(client_ids),
+    )
+    return exchange, api_mock
+
+
 @pytest.mark.parametrize(
     "side,order_type,time_in_force,expected",
     [
@@ -2347,6 +2414,169 @@ def test_binance_portfolio_margin_unknown_entry_cancel_fill_race_is_flattened(de
         "market",
         "sell",
     )
+    assert exchange.portfolio_margin_unknown_order_latched is True
+
+
+def test_binance_portfolio_margin_unknown_entry_reflattens_fill_after_first_close(
+    default_conf, mocker
+):
+    late_order = {
+        "id": "late-entry",
+        "clientOrderId": "ftpm-entry",
+        "symbol": "ETH/USDT:USDT",
+        "status": "open",
+        "info": {},
+    }
+    exchange, api_mock = unknown_entry_containment_exchange(
+        default_conf,
+        mocker,
+        [
+            [portfolio_margin_position()],
+            [],
+            [portfolio_margin_position()],
+            [],
+            [],
+            [],
+        ],
+        open_order_snapshots=[[], [late_order], [], [], [], []],
+    )
+
+    with pytest.raises(OperationalException, match="flattened detected exposure"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    close_calls = api_mock.create_order.call_args_list[1:]
+    assert len(close_calls) == 2
+    assert all(call.args[:3] == ("ETH/USDT:USDT", "market", "sell") for call in close_calls)
+    assert all(call.args[-1]["reduceOnly"] is True for call in close_calls)
+    api_mock.cancel_order.assert_called_once_with(
+        "late-entry",
+        "ETH/USDT:USDT",
+        params={
+            "papi": True,
+            "portfolioMargin": True,
+            "maxRetriesOnFailure": 0,
+        },
+    )
+    assert api_mock.fetch_open_orders.call_count == 6
+    assert api_mock.fetch_positions.call_count == 6
+    assert exchange.portfolio_margin_unknown_order_latched is True
+
+
+def test_binance_portfolio_margin_unknown_entry_reflattens_repeated_late_fills(
+    default_conf, mocker
+):
+    exchange, api_mock = unknown_entry_containment_exchange(
+        default_conf,
+        mocker,
+        [
+            [portfolio_margin_position()],
+            [],
+            [portfolio_margin_position()],
+            [],
+            [portfolio_margin_position()],
+            [],
+            [],
+            [],
+        ],
+    )
+
+    with pytest.raises(OperationalException, match="flattened detected exposure"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    close_calls = api_mock.create_order.call_args_list[1:]
+    assert len(close_calls) == 3
+    assert all(call.args[:3] == ("ETH/USDT:USDT", "market", "sell") for call in close_calls)
+    assert all(call.args[-1]["reduceOnly"] is True for call in close_calls)
+    assert api_mock.fetch_open_orders.call_count == 8
+    assert api_mock.fetch_positions.call_count == 8
+    assert exchange.portfolio_margin_unknown_order_latched is True
+
+
+def test_binance_portfolio_margin_unknown_entry_never_stable_fails_closed(default_conf, mocker):
+    exchange, api_mock = unknown_entry_containment_exchange(
+        default_conf,
+        mocker,
+        [[portfolio_margin_position()], []] * 5,
+    )
+
+    with pytest.raises(OperationalException, match="consecutive clean PAPI snapshots"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    assert api_mock.fetch_open_orders.call_count == exchange._portfolio_containment_attempts
+    assert api_mock.fetch_positions.call_count == exchange._portfolio_containment_attempts
+    assert len(api_mock.create_order.call_args_list[1:]) == 5
+    assert exchange.portfolio_margin_unknown_order_latched is True
+    previous_create_count = api_mock.create_order.call_count
+    with pytest.raises(OperationalException, match="latched unknown order"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+    assert api_mock.create_order.call_count == previous_create_count
+
+
+def test_binance_portfolio_margin_unknown_entry_does_not_flatten_other_pair(default_conf, mocker):
+    target_position = portfolio_margin_position()
+    other_position = portfolio_margin_position("BTC/USDT:USDT", contracts=0.001)
+    unrelated_order = {
+        "id": "btc-order",
+        "clientOrderId": "another-strategy",
+        "symbol": "BTC/USDT:USDT",
+        "status": "open",
+        "info": {},
+    }
+    exchange, api_mock = unknown_entry_containment_exchange(
+        default_conf,
+        mocker,
+        [
+            [target_position, other_position],
+            [other_position],
+            [other_position],
+            [other_position],
+        ],
+        open_orders=[unrelated_order],
+    )
+
+    with pytest.raises(OperationalException, match="flattened detected exposure"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="market",
+            side="buy",
+            amount=0.025,
+            rate=2000,
+            leverage=1,
+        )
+
+    close_calls = api_mock.create_order.call_args_list[1:]
+    assert len(close_calls) == 1
+    assert close_calls[0].args[:4] == ("ETH/USDT:USDT", "market", "sell", 0.025)
+    assert close_calls[0].args[-1]["reduceOnly"] is True
+    api_mock.cancel_order.assert_not_called()
     assert exchange.portfolio_margin_unknown_order_latched is True
 
 
