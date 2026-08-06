@@ -1359,41 +1359,143 @@
         "portfolio_margin_risk": {
           "description": "Optional fail-closed entry policy for the initial Binance Portfolio Margin adapter.",
           "type": "object",
-          "properties": {
-            "pair": {
-              "type": "string"
+          "oneOf": [
+            {
+              "properties": {
+                "pair": {
+                  "type": "string"
+                },
+                "side": {
+                  "type": "string",
+                  "const": "long"
+                },
+                "max_leverage": {
+                  "type": "number",
+                  "const": 1
+                },
+                "max_entry_notional": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 50
+                },
+                "force_entry_order_type": {
+                  "type": "string",
+                  "const": "market"
+                },
+                "reject_force_entry_price": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "required": [
+                "pair",
+                "side",
+                "max_leverage",
+                "max_entry_notional",
+                "force_entry_order_type",
+                "reject_force_entry_price"
+              ],
+              "additionalProperties": false
             },
-            "side": {
-              "type": "string",
-              "const": "long"
-            },
-            "max_leverage": {
-              "type": "number",
-              "const": 1
-            },
-            "max_entry_notional": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "maximum": 50
-            },
-            "force_entry_order_type": {
-              "type": "string",
-              "const": "market"
-            },
-            "reject_force_entry_price": {
-              "type": "boolean",
-              "const": true
+            {
+              "properties": {
+                "policy": {
+                  "type": "string",
+                  "const": "chan_multi_pair",
+                  "enum": [
+                    "chan_multi_pair"
+                  ]
+                },
+                "pairs": {
+                  "type": "object",
+                  "properties": {
+                    "BTC/USDT:USDT": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 100
+                    },
+                    "ETH/USDT:USDT": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 100
+                    },
+                    "BNB/USDT:USDT": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 100
+                    },
+                    "SOL/USDT:USDT": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 100
+                    },
+                    "SPY/USDT:USDT": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 100
+                    }
+                  },
+                  "required": [
+                    "BTC/USDT:USDT",
+                    "ETH/USDT:USDT",
+                    "BNB/USDT:USDT",
+                    "SOL/USDT:USDT",
+                    "SPY/USDT:USDT"
+                  ],
+                  "additionalProperties": false
+                },
+                "allowed_sides": {
+                  "type": "array",
+                  "const": [
+                    "long",
+                    "short"
+                  ],
+                  "enum": [
+                    [
+                      "long",
+                      "short"
+                    ]
+                  ]
+                },
+                "max_leverage": {
+                  "type": "number",
+                  "const": 1,
+                  "enum": [
+                    1
+                  ]
+                },
+                "max_total_entry_notional": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 500
+                },
+                "force_entry_order_type": {
+                  "type": "string",
+                  "const": "market",
+                  "enum": [
+                    "market"
+                  ]
+                },
+                "reject_force_entry_price": {
+                  "type": "boolean",
+                  "const": true,
+                  "enum": [
+                    true
+                  ]
+                }
+              },
+              "required": [
+                "policy",
+                "pairs",
+                "allowed_sides",
+                "max_leverage",
+                "max_total_entry_notional",
+                "force_entry_order_type",
+                "reject_force_entry_price"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "pair",
-            "side",
-            "max_leverage",
-            "max_entry_notional",
-            "force_entry_order_type",
-            "reject_force_entry_price"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       "required": [

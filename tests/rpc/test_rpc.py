@@ -1480,6 +1480,85 @@ def test_rpc_portfolio_margin_force_entry_is_fail_closed() -> None:
             rpc._rpc_force_entry(**values)
 
 
+def test_rpc_portfolio_margin_chan_force_entry_is_fail_closed() -> None:
+    pair_limits = {
+        "BTC/USDT:USDT": 100,
+        "ETH/USDT:USDT": 100,
+        "BNB/USDT:USDT": 100,
+        "SOL/USDT:USDT": 100,
+        "SPY/USDT:USDT": 100,
+    }
+    risk = {
+        "policy": "chan_multi_pair",
+        "pairs": pair_limits,
+        "allowed_sides": ["long", "short"],
+        "max_leverage": 1,
+        "max_total_entry_notional": 500,
+        "force_entry_order_type": "market",
+        "reject_force_entry_price": True,
+    }
+    bot = SimpleNamespace(
+        config={},
+        exchange=SimpleNamespace(portfolio_margin_risk=risk),
+        strategy=SimpleNamespace(order_types={"entry": "market", "force_entry": "market"}),
+    )
+    rpc = RPC(bot)
+
+    for pair in pair_limits:
+        for direction in (SignalDirection.LONG, SignalDirection.SHORT):
+            rpc._portfolio_margin_force_entry_validations(
+                pair,
+                None,
+                None,
+                direction,
+                100,
+                1,
+            )
+
+    invalid_calls = (
+        ({"pair": "XRP/USDT:USDT"}, "reviewed pairs"),
+        ({"order_type": "limit"}, "order type"),
+        ({"price": 1.0}, "cannot accept an explicit price"),
+        ({"stake_amount": 100.01}, "stake exceeds"),
+        ({"leverage": 2.0}, "leverage must remain 1x"),
+    )
+    for overrides, message in invalid_calls:
+        values = {
+            "pair": "BTC/USDT:USDT",
+            "price": None,
+            "order_type": None,
+            "order_side": SignalDirection.SHORT,
+            "stake_amount": 100,
+            "leverage": 1,
+        }
+        values.update(overrides)
+        with pytest.raises(RPCException, match=message):
+            rpc._rpc_force_entry(**values)
+
+    risk.pop("max_total_entry_notional")
+    with pytest.raises(RPCException, match="risk policy is invalid"):
+        rpc._portfolio_margin_force_entry_validations(
+            "BTC/USDT:USDT",
+            None,
+            None,
+            SignalDirection.LONG,
+            100,
+            1,
+        )
+
+    risk["max_total_entry_notional"] = 500
+    risk["policy"] = "unreviewed"
+    with pytest.raises(RPCException, match="risk policy is invalid"):
+        rpc._portfolio_margin_force_entry_validations(
+            "BTC/USDT:USDT",
+            None,
+            None,
+            SignalDirection.LONG,
+            100,
+            1,
+        )
+
+
 @pytest.mark.parametrize(
     ("unknown_order_latched", "expected_state"),
     [(True, State.STOPPED), (False, State.RUNNING)],

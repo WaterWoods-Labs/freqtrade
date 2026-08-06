@@ -682,6 +682,51 @@ def test_validate_portfolio_margin_risk_schema(default_conf) -> None:
             validate_config_schema(conf)
 
 
+def test_validate_portfolio_margin_chan_risk_schema(default_conf) -> None:
+    risk = {
+        "policy": "chan_multi_pair",
+        "pairs": {
+            "BTC/USDT:USDT": 100,
+            "ETH/USDT:USDT": 100,
+            "BNB/USDT:USDT": 100,
+            "SOL/USDT:USDT": 100,
+            "SPY/USDT:USDT": 100,
+        },
+        "allowed_sides": ["long", "short"],
+        "max_leverage": 1,
+        "max_total_entry_notional": 500,
+        "force_entry_order_type": "market",
+        "reject_force_entry_price": True,
+    }
+    conf = deepcopy(default_conf)
+    conf["exchange"]["portfolio_margin_risk"] = risk
+    validate_config_schema(conf)
+
+    invalid_risks = []
+    invalid = deepcopy(risk)
+    invalid["pairs"].pop("SPY/USDT:USDT")
+    invalid_risks.append(invalid)
+    invalid = deepcopy(risk)
+    invalid["pairs"]["XRP/USDT:USDT"] = 100
+    invalid_risks.append(invalid)
+    invalid = deepcopy(risk)
+    invalid["pairs"]["BTC/USDT:USDT"] = 100.01
+    invalid_risks.append(invalid)
+    invalid_risks.extend(
+        (
+            {**risk, "policy": "unreviewed"},
+            {**risk, "allowed_sides": ["long"]},
+            {**risk, "max_total_entry_notional": 500.01},
+            {key: value for key, value in risk.items() if key != "max_total_entry_notional"},
+        )
+    )
+    for invalid_risk in invalid_risks:
+        conf = deepcopy(default_conf)
+        conf["exchange"]["portfolio_margin_risk"] = invalid_risk
+        with pytest.raises(ConfigurationError):
+            validate_config_schema(conf)
+
+
 @pytest.mark.parametrize("fiat", ["EUR", "USD", "", None])
 def test_validate_fiat_currency_options(default_conf, fiat) -> None:
     # Validate via our validator - we allow setting defaults!

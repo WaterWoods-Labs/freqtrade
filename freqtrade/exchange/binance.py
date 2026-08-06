@@ -42,6 +42,29 @@ from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
 logger = logging.getLogger(__name__)
 
 
+_PORTFOLIO_MARGIN_CHAN_POLICY = "chan_multi_pair"
+_PORTFOLIO_MARGIN_CHAN_PAIRS = frozenset(
+    {
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT",
+        "BNB/USDT:USDT",
+        "SOL/USDT:USDT",
+        "SPY/USDT:USDT",
+    }
+)
+_PORTFOLIO_MARGIN_CHAN_RISK_KEYS = frozenset(
+    {
+        "policy",
+        "pairs",
+        "allowed_sides",
+        "max_leverage",
+        "max_total_entry_notional",
+        "force_entry_order_type",
+        "reject_force_entry_price",
+    }
+)
+
+
 class Binance(Exchange):
     _portfolio_order_recovery_attempts = 3
     _portfolio_order_recovery_delay = 1.0
@@ -194,6 +217,37 @@ class Binance(Exchange):
                     return True
         return False
 
+    @staticmethod
+    def _portfolio_margin_chan_risk_policy_valid(risk: Any) -> bool:
+        if not isinstance(risk, dict) or set(risk) != _PORTFOLIO_MARGIN_CHAN_RISK_KEYS:
+            return False
+        pair_limits = risk.get("pairs")
+        max_leverage = risk.get("max_leverage")
+        max_total_notional = risk.get("max_total_entry_notional")
+        return (
+            risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+            and isinstance(pair_limits, dict)
+            and set(pair_limits) == _PORTFOLIO_MARGIN_CHAN_PAIRS
+            and all(
+                not isinstance(limit, bool)
+                and isinstance(limit, (int, float))
+                and isfinite(limit)
+                and 0 < limit <= 100
+                for limit in pair_limits.values()
+            )
+            and risk.get("allowed_sides") == ["long", "short"]
+            and not isinstance(max_leverage, bool)
+            and isinstance(max_leverage, (int, float))
+            and isfinite(max_leverage)
+            and max_leverage == 1
+            and not isinstance(max_total_notional, bool)
+            and isinstance(max_total_notional, (int, float))
+            and isfinite(max_total_notional)
+            and 0 < max_total_notional <= 500
+            and risk.get("force_entry_order_type") == "market"
+            and risk.get("reject_force_entry_price") is True
+        )
+
     @property
     def _ccxt_config(self) -> dict:
         config = super()._ccxt_config
@@ -237,7 +291,7 @@ class Binance(Exchange):
         if risk_config is not None:
             if not isinstance(risk_config, dict):
                 raise OperationalException("exchange.portfolio_margin_risk must be an object.")
-            allowed_risk_keys = {
+            legacy_risk_keys = {
                 "pair",
                 "side",
                 "max_leverage",
@@ -245,29 +299,45 @@ class Binance(Exchange):
                 "force_entry_order_type",
                 "reject_force_entry_price",
             }
-            if set(risk_config) != allowed_risk_keys:
+            risk_keys = set(risk_config)
+            if risk_keys == legacy_risk_keys:
+                risk_notional = risk_config.get("max_entry_notional")
+                if (
+                    risk_config.get("pair") not in exchange_config.get("pair_whitelist", [])
+                    or risk_config.get("side") != "long"
+                    or isinstance(risk_config.get("max_leverage"), bool)
+                    or risk_config.get("max_leverage") != 1
+                    or isinstance(risk_notional, bool)
+                    or not isinstance(risk_notional, (int, float))
+                    or not isfinite(risk_notional)
+                    or not 0 < risk_notional <= 50
+                    or risk_config.get("force_entry_order_type") != "market"
+                    or risk_config.get("reject_force_entry_price") is not True
+                ):
+                    raise OperationalException(
+                        "Binance Portfolio Margin risk policy must select a whitelisted long-only "
+                        "pair, 1x leverage, at most 50 USDT entry notional, market force-entry, "
+                        "and explicit-price rejection."
+                    )
+            elif risk_keys == _PORTFOLIO_MARGIN_CHAN_RISK_KEYS:
+                pair_whitelist = exchange_config.get("pair_whitelist", [])
+                if (
+                    not Binance._portfolio_margin_chan_risk_policy_valid(risk_config)
+                    or not isinstance(pair_whitelist, list)
+                    or len(pair_whitelist) != len(_PORTFOLIO_MARGIN_CHAN_PAIRS)
+                    or set(pair_whitelist) != _PORTFOLIO_MARGIN_CHAN_PAIRS
+                ):
+                    raise OperationalException(
+                        "Binance Portfolio Margin Chan risk policy must define exactly the "
+                        "reviewed BTC, ETH, BNB, SOL, and SPY pairs, allow long and short, use "
+                        "1x leverage, cap each pair at 100 USDT and total projected entry "
+                        "exposure at 500 USDT, require market force-entry, and reject an "
+                        "explicit force-entry price."
+                    )
+            else:
                 raise OperationalException(
-                    "Binance Portfolio Margin risk policy must define exactly pair, side, "
-                    "max_leverage, max_entry_notional, force_entry_order_type, and "
-                    "reject_force_entry_price."
-                )
-            risk_notional = risk_config.get("max_entry_notional")
-            if (
-                risk_config.get("pair") not in exchange_config.get("pair_whitelist", [])
-                or risk_config.get("side") != "long"
-                or isinstance(risk_config.get("max_leverage"), bool)
-                or risk_config.get("max_leverage") != 1
-                or isinstance(risk_notional, bool)
-                or not isinstance(risk_notional, (int, float))
-                or not isfinite(risk_notional)
-                or not 0 < risk_notional <= 50
-                or risk_config.get("force_entry_order_type") != "market"
-                or risk_config.get("reject_force_entry_price") is not True
-            ):
-                raise OperationalException(
-                    "Binance Portfolio Margin risk policy must select a whitelisted long-only "
-                    "pair, 1x leverage, at most 50 USDT entry notional, market force-entry, "
-                    "and explicit-price rejection."
+                    "Binance Portfolio Margin risk policy must exactly match the legacy Canary "
+                    "or reviewed Chan policy schema."
                 )
         option_sets = [options]
         for config_key in ("ccxt_sync_config", "ccxt_async_config"):
@@ -748,27 +818,262 @@ class Binance(Exchange):
         risk = self._portfolio_margin_risk
         if not self._portfolio_margin or risk is None or reduce_only:
             return
-        expected_side: BuySell = "buy" if risk["side"] == "long" else "sell"
-        max_notional = float(risk["max_entry_notional"])
-        if (
-            pair != risk["pair"]
-            or side != expected_side
-            or not isfinite(amount)
-            or amount <= 0
-            or not isfinite(rate)
-            or rate <= 0
+
+        proposed_notional = amount * rate
+        configured_leverage = risk.get("max_leverage")
+        leverage_invalid = (
+            isinstance(configured_leverage, bool)
+            or not isinstance(configured_leverage, (int, float))
+            or not isfinite(configured_leverage)
             or not isfinite(leverage)
             or not isclose(
                 leverage,
-                float(risk["max_leverage"]),
+                float(configured_leverage),
                 rel_tol=0.0,
                 abs_tol=1e-9,
             )
-            or amount * rate > max_notional + 1e-9
+        )
+        common_invalid = (
+            not isfinite(amount)
+            or amount <= 0
+            or not isfinite(rate)
+            or rate <= 0
+            or not isfinite(proposed_notional)
+            or leverage_invalid
+        )
+        if "pair" in risk:
+            expected_side: BuySell = "buy" if risk["side"] == "long" else "sell"
+            max_notional = float(risk["max_entry_notional"])
+            if (
+                common_invalid
+                or pair != risk["pair"]
+                or side != expected_side
+                or proposed_notional > max_notional + 1e-9
+            ):
+                raise OperationalException(
+                    "Binance Portfolio Margin entry blocked by the configured pair, long-only, "
+                    "1x leverage, or maximum-notional risk policy."
+                )
+            return
+
+        pair_limits = risk.get("pairs")
+        allowed_sides = risk.get("allowed_sides")
+        direction = "long" if side == "buy" else "short" if side == "sell" else None
+        max_notional = pair_limits.get(pair) if isinstance(pair_limits, dict) else None
+        side_is_allowed = isinstance(allowed_sides, list) and direction in allowed_sides
+        if (
+            not self._portfolio_margin_chan_risk_policy_valid(risk)
+            or common_invalid
+            or isinstance(max_notional, bool)
+            or not isinstance(max_notional, (int, float))
+            or not isfinite(max_notional)
+            or not side_is_allowed
         ):
             raise OperationalException(
-                "Binance Portfolio Margin entry blocked by the configured pair, long-only, "
-                "1x leverage, or maximum-notional risk policy."
+                "Binance Portfolio Margin Chan entry blocked by the configured pair, side, "
+                "1x leverage, or pair maximum-notional risk policy."
+            )
+        if proposed_notional > float(max_notional) + 1e-9:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry blocked by the configured pair, side, "
+                "1x leverage, or pair maximum-notional risk policy."
+            )
+
+    @staticmethod
+    def _portfolio_order_is_reduce_only(order: dict[str, Any]) -> bool:
+        info = order.get("info")
+        value = order.get("reduceOnly")
+        if value is None and isinstance(info, dict):
+            value = info.get("reduceOnly")
+        return value is True or (isinstance(value, str) and value.lower() == "true")
+
+    def _portfolio_open_order_entry_notional(
+        self, order: dict[str, Any], pair_limits: dict[str, Any]
+    ) -> tuple[str, float]:
+        pair = order.get("symbol")
+        if not isinstance(pair, str) or pair not in pair_limits:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an open entry order for "
+                "an unreviewed or missing pair."
+            )
+        info = order.get("info")
+        raw_side = order.get("side")
+        if raw_side in (None, "") and isinstance(info, dict):
+            raw_side = info.get("side")
+        order_side = raw_side.lower() if isinstance(raw_side, str) else None
+        if order_side not in ("buy", "sell"):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an open entry order with "
+                "an invalid or missing side."
+            )
+
+        remaining_value = order.get("remaining")
+        if remaining_value is None:
+            try:
+                remaining_value = float(order["amount"]) - float(order.get("filled") or 0.0)
+            except (KeyError, TypeError, ValueError) as e:
+                raise OperationalException(
+                    "Binance Portfolio Margin Chan exposure check found an open entry order "
+                    "with an invalid remaining amount."
+                ) from e
+        try:
+            remaining = float(remaining_value)
+            price = float(order.get("price") or 0.0)
+        except (TypeError, ValueError) as e:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an open entry order with "
+                "invalid amount or price metadata."
+            ) from e
+        if not isfinite(remaining) or remaining < 0 or not isfinite(price) or price <= 0:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an open entry order with "
+                "invalid amount or price metadata."
+            )
+        if remaining == 0:
+            return pair, 0.0
+
+        contract_size = self.get_contract_size(pair)
+        if contract_size is None or not isfinite(contract_size) or contract_size <= 0:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check could not determine the open "
+                "entry order contract size."
+            )
+        notional = remaining * contract_size * price
+        if not isfinite(notional) or notional <= 0:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check calculated an invalid open-entry "
+                "notional."
+            )
+        return pair, notional
+
+    def _portfolio_position_entry_notional(
+        self, position: dict[str, Any], pair_limits: dict[str, Any]
+    ) -> tuple[str, float]:
+        pair = position.get("symbol")
+        try:
+            contracts = abs(float(position.get("contracts") or 0.0))
+        except (TypeError, ValueError) as e:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an invalid position amount."
+            ) from e
+        if not isfinite(contracts):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found a non-finite position amount."
+            )
+        if contracts == 0:
+            return "", 0.0
+        if not isinstance(pair, str) or pair not in pair_limits:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an active position for an "
+                "unreviewed or missing pair."
+            )
+
+        info = position.get("info")
+        raw_side = position.get("side")
+        if raw_side in (None, "") and isinstance(info, dict):
+            raw_side = info.get("side")
+        position_side = raw_side.lower() if isinstance(raw_side, str) else None
+        if position_side not in ("long", "short"):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an active position with an "
+                "invalid or missing side."
+            )
+
+        return pair, self._portfolio_position_notional_value(position, pair, contracts)
+
+    def _portfolio_position_notional_value(
+        self, position: dict[str, Any], pair: str, contracts: float
+    ) -> float:
+        info = position.get("info")
+        raw_notional = position.get("notional")
+        if raw_notional in (None, "") and isinstance(info, dict):
+            raw_notional = info.get("notional")
+        try:
+            notional = abs(float(raw_notional)) if raw_notional not in (None, "") else 0.0
+        except (TypeError, ValueError) as e:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found invalid position notional."
+            ) from e
+        if notional == 0:
+            raw_mark_price = position.get("markPrice")
+            if raw_mark_price in (None, "") and isinstance(info, dict):
+                raw_mark_price = info.get("markPrice")
+            raw_contract_size = position.get("contractSize")
+            if raw_contract_size in (None, ""):
+                raw_contract_size = self.get_contract_size(pair)
+            try:
+                mark_price = float(raw_mark_price)
+                contract_size = float(raw_contract_size)
+            except (TypeError, ValueError) as e:
+                raise OperationalException(
+                    "Binance Portfolio Margin Chan exposure check could not calculate position "
+                    "notional."
+                ) from e
+            notional = contracts * contract_size * mark_price
+        if not isfinite(notional) or notional <= 0:
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check calculated an invalid position "
+                "notional."
+            )
+        return notional
+
+    def _validate_portfolio_margin_chan_projected_exposure(
+        self, pair: str, proposed_notional: float, client_order_id: str
+    ) -> None:
+        risk = self._portfolio_margin_risk
+        if risk is None or "pair" in risk:
+            return
+        pair_limits = risk.get("pairs")
+        max_total = risk.get("max_total_entry_notional")
+        if (
+            not self._portfolio_margin_chan_risk_policy_valid(risk)
+            or not isinstance(pair_limits, dict)
+            or pair not in pair_limits
+            or not isinstance(proposed_notional, (int, float))
+            or isinstance(proposed_notional, bool)
+            or not isfinite(proposed_notional)
+            or proposed_notional <= 0
+            or not isinstance(client_order_id, str)
+            or not client_order_id
+        ):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan exposure check found an invalid risk policy."
+            )
+
+        # Read orders before positions. If an entry fills between snapshots, its open remainder
+        # and resulting position are both counted instead of allowing an understated exposure.
+        open_orders = self._portfolio_margin_list_response(
+            "USD-M open-order exposure",
+            lambda: self._api.fetch_open_orders(params=self._portfolio_margin_params()),
+        )
+        positions = self._fetch_portfolio_positions_once()
+        exposure_by_pair = {configured_pair: 0.0 for configured_pair in pair_limits}
+        for order in open_orders:
+            if self._portfolio_chan_order_matches_client_id(order, client_order_id):
+                raise OperationalException(
+                    "Binance Portfolio Margin Chan entry blocked because the generated client "
+                    "order id already belongs to an open order."
+                )
+            if self._portfolio_order_is_reduce_only(order):
+                continue
+            order_pair, notional = self._portfolio_open_order_entry_notional(order, pair_limits)
+            exposure_by_pair[order_pair] += notional
+        for position in positions:
+            position_pair, notional = self._portfolio_position_entry_notional(position, pair_limits)
+            if position_pair:
+                exposure_by_pair[position_pair] += notional
+
+        projected_pair = exposure_by_pair[pair] + proposed_notional
+        projected_total = sum(exposure_by_pair.values()) + proposed_notional
+        if (
+            not isfinite(projected_pair)
+            or projected_pair > float(pair_limits[pair]) + 1e-9
+            or not isfinite(projected_total)
+            or projected_total > float(max_total) + 1e-9
+        ):
+            raise OperationalException(
+                "Binance Portfolio Margin Chan entry blocked because projected pair or total "
+                "entry exposure exceeds the configured risk limit."
             )
 
     def validate_config(self, config) -> None:
@@ -931,6 +1236,17 @@ class Binance(Exchange):
         )
         return (
             order.get("clientOrderId") == client_order_id or strategy_client_id == client_order_id
+        )
+
+    @staticmethod
+    def _portfolio_chan_order_matches_client_id(order: Any, client_order_id: str) -> bool:
+        if Binance._portfolio_order_matches_client_id(order, client_order_id):
+            return True
+        info = order.get("info") if isinstance(order, dict) else None
+        return isinstance(info, dict) and client_order_id in (
+            info.get("clientOrderId"),
+            info.get("origClientOrderId"),
+            info.get("newClientOrderId"),
         )
 
     @staticmethod
@@ -1236,6 +1552,14 @@ class Binance(Exchange):
                     "Reconcile the account before restarting."
                 )
             client_order_id = self._new_portfolio_client_order_id()
+            if (
+                not reduceOnly
+                and self._portfolio_margin_risk is not None
+                and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+            ):
+                self._validate_portfolio_margin_chan_projected_exposure(
+                    pair, amount * rate, client_order_id
+                )
             self._portfolio_active_client_order_id = client_order_id
             was_unknown_latched = self._portfolio_unknown_order_latched
             try:
