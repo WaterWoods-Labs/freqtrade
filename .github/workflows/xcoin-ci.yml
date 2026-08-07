@@ -37,8 +37,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags origin \
-            refs/heads/develop:refs/remotes/origin/develop
+          # `fetch-depth: 0` above already fetched every branch, including develop, using the
+          # checkout action's own credentials. Re-fetching here failed on Dependabot pull
+          # requests, which run under a separate secret context and cannot authenticate after
+          # `persist-credentials: false` clears the checkout credentials. That failure surfaced
+          # as a boundary violation even though the boundary was intact, blocking security
+          # updates. Assert the ref instead of re-fetching it.
+          if ! git rev-parse --verify --quiet origin/develop >/dev/null; then
+            echo "::error title=XCoin product boundary check unavailable::origin/develop is missing; checkout must use fetch-depth: 0"
+            exit 1
+          fi
 
           if ! git diff --quiet origin/develop -- freqtrade/exchange/binance.py; then
             echo "::error title=XCoin product boundary violation::freqtrade/exchange/binance.py differs from origin/develop"
