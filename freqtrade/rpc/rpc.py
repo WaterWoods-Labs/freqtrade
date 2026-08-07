@@ -65,6 +65,16 @@ from freqtrade.wallets import PositionWallet, Wallet
 
 logger = logging.getLogger(__name__)
 
+_PORTFOLIO_MARGIN_CHAN_PAIRS = frozenset(
+    {
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT",
+        "BNB/USDT:USDT",
+        "SOL/USDT:USDT",
+        "SPY/USDT:USDT",
+    }
+)
+
 
 class RPCException(Exception):
     """
@@ -1153,6 +1163,33 @@ class RPC:
                 f"Wrong pair selected. Only pairs with stake-currency {stake_currency} allowed."
             )
 
+    @staticmethod
+    def _portfolio_margin_chan_force_entry_pair_limits(risk: dict) -> dict[str, Any]:
+        pair_limits = risk.get("pairs")
+        max_total_notional = risk.get("max_total_entry_notional")
+        if (
+            risk.get("policy") != "chan_multi_pair"
+            or not isinstance(risk.get("account_namespace"), str)
+            or not isinstance(pair_limits, dict)
+            or set(pair_limits) != _PORTFOLIO_MARGIN_CHAN_PAIRS
+            or any(
+                isinstance(limit, bool)
+                or not isinstance(limit, (int, float))
+                or not isfinite(limit)
+                or not 0 < limit <= 100
+                for limit in pair_limits.values()
+            )
+            or risk.get("allowed_sides") != ["long", "short"]
+            or isinstance(max_total_notional, bool)
+            or not isinstance(max_total_notional, (int, float))
+            or not isfinite(max_total_notional)
+            or not 0 < max_total_notional <= 500
+            or risk.get("force_entry_order_type") != "disabled"
+            or risk.get("reject_force_entry_price") is not True
+        ):
+            raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
+        return pair_limits
+
     def _portfolio_margin_force_entry_validations(
         self,
         pair: str,
@@ -1166,14 +1203,72 @@ class RPC:
         if not isinstance(risk, dict):
             return
 
-        expected_order_type = risk["force_entry_order_type"]
+        is_legacy_policy = set(risk) == {
+            "pair",
+            "side",
+            "max_leverage",
+            "max_entry_notional",
+            "force_entry_order_type",
+            "reject_force_entry_price",
+        }
+        is_chan_policy = set(risk) == {
+            "account_namespace",
+            "policy",
+            "pairs",
+            "allowed_sides",
+            "max_leverage",
+            "max_total_entry_notional",
+            "force_entry_order_type",
+            "reject_force_entry_price",
+        }
+        if is_legacy_policy:
+            pair_is_allowed = pair == risk.get("pair")
+            side_is_allowed = order_side == SignalDirection.LONG and risk.get("side") == "long"
+            max_entry_notional = risk.get("max_entry_notional")
+        elif is_chan_policy:
+            self._portfolio_margin_chan_force_entry_pair_limits(risk)
+            raise RPCException(
+                "Portfolio Margin Chan force-entry is disabled; only strategy-generated "
+                "limit entries may reach the exchange adapter."
+            )
+        else:
+            raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
+
+        expected_order_type = risk.get("force_entry_order_type")
+        max_leverage = risk.get("max_leverage")
+        if (
+            expected_order_type != "market"
+            or risk.get("reject_force_entry_price") is not True
+            or isinstance(max_leverage, bool)
+            or not isinstance(max_leverage, (int, float))
+            or not isfinite(max_leverage)
+            or max_leverage != 1
+        ):
+            raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
         strategy_order_type = self._freqtrade.strategy.order_types.get(
             "force_entry", self._freqtrade.strategy.order_types["entry"]
         )
-        if pair != risk["pair"]:
-            raise RPCException("Portfolio Margin force-entry is restricted to the reviewed pair.")
-        if order_side != SignalDirection.LONG:
-            raise RPCException("Portfolio Margin force-entry is long-only.")
+        if not pair_is_allowed:
+            message = (
+                "Portfolio Margin force-entry is restricted to the reviewed pair."
+                if is_legacy_policy
+                else "Portfolio Margin Chan force-entry is restricted to reviewed pairs."
+            )
+            raise RPCException(message)
+        if not side_is_allowed:
+            message = (
+                "Portfolio Margin force-entry is long-only."
+                if is_legacy_policy
+                else "Portfolio Margin Chan force-entry side is not allowed."
+            )
+            raise RPCException(message)
+        if (
+            isinstance(max_entry_notional, bool)
+            or not isinstance(max_entry_notional, (int, float))
+            or not isfinite(max_entry_notional)
+            or max_entry_notional <= 0
+        ):
+            raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
         if strategy_order_type != expected_order_type or (
             order_type is not None and order_type != expected_order_type
         ):
@@ -1188,14 +1283,14 @@ class RPC:
         if stake_amount is not None and (
             not isfinite(stake_amount)
             or stake_amount <= 0
-            or stake_amount > float(risk["max_entry_notional"])
+            or stake_amount > float(max_entry_notional)
         ):
             raise RPCException("Portfolio Margin force-entry stake exceeds the reviewed maximum.")
         if leverage is not None and (
             not isfinite(leverage)
             or not isclose(
                 leverage,
-                float(risk["max_leverage"]),
+                float(max_leverage),
                 rel_tol=0.0,
                 abs_tol=1e-9,
             )

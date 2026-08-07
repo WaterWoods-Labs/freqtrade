@@ -1047,27 +1047,115 @@ CONF_SCHEMA = {
                         "Portfolio Margin adapter."
                     ),
                     "type": "object",
-                    "properties": {
-                        "pair": {"type": "string"},
-                        "side": {"type": "string", "const": "long"},
-                        "max_leverage": {"type": "number", "const": 1},
-                        "max_entry_notional": {
-                            "type": "number",
-                            "exclusiveMinimum": 0,
-                            "maximum": 50,
+                    "oneOf": [
+                        {
+                            "properties": {
+                                "pair": {"type": "string"},
+                                "side": {"type": "string", "const": "long"},
+                                "max_leverage": {"type": "number", "const": 1},
+                                "max_entry_notional": {
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 50,
+                                },
+                                "force_entry_order_type": {
+                                    "type": "string",
+                                    "const": "market",
+                                },
+                                "reject_force_entry_price": {
+                                    "type": "boolean",
+                                    "const": True,
+                                },
+                            },
+                            "required": [
+                                "pair",
+                                "side",
+                                "max_leverage",
+                                "max_entry_notional",
+                                "force_entry_order_type",
+                                "reject_force_entry_price",
+                            ],
+                            "additionalProperties": False,
                         },
-                        "force_entry_order_type": {"type": "string", "const": "market"},
-                        "reject_force_entry_price": {"type": "boolean", "const": True},
-                    },
-                    "required": [
-                        "pair",
-                        "side",
-                        "max_leverage",
-                        "max_entry_notional",
-                        "force_entry_order_type",
-                        "reject_force_entry_price",
+                        {
+                            "properties": {
+                                "account_namespace": {
+                                    "type": "string",
+                                    "pattern": r"^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$",
+                                    "description": (
+                                        "Non-secret stable account label shared by all local "
+                                        "writers; only its digest is used in runtime state paths."
+                                    ),
+                                },
+                                "policy": {
+                                    "type": "string",
+                                    "const": "chan_multi_pair",
+                                    "enum": ["chan_multi_pair"],
+                                },
+                                "pairs": {
+                                    "type": "object",
+                                    "properties": {
+                                        pair: {
+                                            "type": "number",
+                                            "exclusiveMinimum": 0,
+                                            "maximum": 100,
+                                        }
+                                        for pair in (
+                                            "BTC/USDT:USDT",
+                                            "ETH/USDT:USDT",
+                                            "BNB/USDT:USDT",
+                                            "SOL/USDT:USDT",
+                                            "SPY/USDT:USDT",
+                                        )
+                                    },
+                                    "required": [
+                                        "BTC/USDT:USDT",
+                                        "ETH/USDT:USDT",
+                                        "BNB/USDT:USDT",
+                                        "SOL/USDT:USDT",
+                                        "SPY/USDT:USDT",
+                                    ],
+                                    "additionalProperties": False,
+                                },
+                                "allowed_sides": {
+                                    "type": "array",
+                                    "const": ["long", "short"],
+                                    "enum": [["long", "short"]],
+                                },
+                                "max_leverage": {
+                                    "type": "number",
+                                    "const": 1,
+                                    "enum": [1],
+                                },
+                                "max_total_entry_notional": {
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 500,
+                                },
+                                "force_entry_order_type": {
+                                    "type": "string",
+                                    "const": "disabled",
+                                    "enum": ["disabled"],
+                                },
+                                "reject_force_entry_price": {
+                                    "type": "boolean",
+                                    "const": True,
+                                    "enum": [True],
+                                },
+                            },
+                            "required": [
+                                "account_namespace",
+                                "policy",
+                                "pairs",
+                                "allowed_sides",
+                                "max_leverage",
+                                "max_total_entry_notional",
+                                "force_entry_order_type",
+                                "reject_force_entry_price",
+                            ],
+                            "additionalProperties": False,
+                        },
                     ],
-                    "additionalProperties": False,
                 },
             },
             "required": ["name"],
