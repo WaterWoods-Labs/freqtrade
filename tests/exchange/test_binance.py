@@ -3615,8 +3615,9 @@ def test_binance_portfolio_margin_corrupt_intent_file_fails_closed(default_conf,
     ("created_at", "exposure_seen"),
     [
         ("2000-01-01T00:00:00+00:00", False),
-        (datetime.now(UTC).isoformat(), "yes"),
+        (None, "yes"),
     ],
+    ids=["expired", "invalid-exposure-evidence"],
 )
 def test_binance_portfolio_margin_chan_expired_or_corrupt_reservation_fails_closed(
     default_conf, mocker, tmp_path, created_at, exposure_seen
@@ -3635,7 +3636,7 @@ def test_binance_portfolio_margin_chan_expired_or_corrupt_reservation_fails_clos
                     {
                         "client_order_id": "ftpm-invalid-reservation",
                         "pair": "ETH/USDT:USDT",
-                        "created_at": created_at,
+                        "created_at": created_at or datetime.now(UTC).isoformat(),
                         "exposure_seen": exposure_seen,
                     }
                 ],
