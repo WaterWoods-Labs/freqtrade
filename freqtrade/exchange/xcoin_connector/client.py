@@ -342,6 +342,6 @@ class XCoinClient:
             raise ccxt.OrderNotFound(msg)
         if code in {"60100", "60101", "60102", "60103", "60104", "60106"}:
             raise ccxt.InsufficientFunds(msg)
-        if code.startswith("5") or code.startswith("4") or code.startswith("601"):
+        if code.startswith(("5", "4", "601")):
             raise ccxt.InvalidOrder(msg)
         raise ccxt.ExchangeError(f"{code}: {msg}")
