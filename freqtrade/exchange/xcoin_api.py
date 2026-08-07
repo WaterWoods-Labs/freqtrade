@@ -81,13 +81,13 @@ def _num(value: Any, fallback: float = 0.0) -> float:
     return fallback if result is None else result
 
 
-def _str_num(value: float | int | str | None) -> str | None:
+def _str_num(value: float | str | None) -> str | None:
     if value is None:
         return None
     return str(value)
 
 
-def _str_positive_int(value: float | int | str | None, name: str) -> str:
+def _str_positive_int(value: float | str | None, name: str) -> str:
     if value is None:
         raise ccxt.BadRequest(f"{name} is required")
     parsed = float(value)
