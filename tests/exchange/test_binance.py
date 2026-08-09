@@ -1393,6 +1393,34 @@ def test_binance_portfolio_margin_unified_collateral_balance_mapping(default_con
     balances = exchange.get_balances()
     assert balances["USDT"]["free"] == 0.0
 
+    # Post-trade fee residue settles the UM wallet slightly negative; the shared pool
+    # covers it and the reported free balance is reduced by the residue.
+    api_mock.fetch_balance.return_value = {"USDT": {"free": -0.06538858, "used": 0.0}}
+    api_mock.papiGetBalance.return_value = [
+        {
+            "asset": "USDT",
+            "crossMarginFree": "2099.43174479",
+            "crossMarginLocked": "0",
+            "umWalletBalance": "-0.06538858",
+        }
+    ]
+    balances = exchange.get_balances()
+    assert balances["USDT"]["free"] == pytest.approx(2099.36635621)
+    assert balances["USDT"]["total"] == pytest.approx(2099.36635621)
+
+    # A negative UM wallet larger than the pool fails closed.
+    api_mock.papiGetBalance.return_value = [
+        {
+            "asset": "USDT",
+            "crossMarginFree": "10",
+            "crossMarginLocked": "0",
+            "umWalletBalance": "-20",
+        }
+    ]
+    api_mock.fetch_balance.return_value = {"USDT": {"free": -20.0, "used": 0.0}}
+    balances = exchange.get_balances()
+    assert balances["USDT"]["free"] == -20.0
+
 
 def test_binance_portfolio_margin_entry_risk_guard(default_conf, mocker):
     exchange = get_patched_exchange(
