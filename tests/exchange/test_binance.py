@@ -1337,6 +1337,63 @@ def test_binance_portfolio_margin_private_routes(default_conf, mocker):
     api_mock.fetch_trading_fees.assert_not_called()
 
 
+def test_binance_portfolio_margin_unified_collateral_balance_mapping(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_leverage_tiers.return_value = {}
+    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
+    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
+    api_mock.fetch_positions.return_value = []
+    api_mock.fetch_balance.return_value = {"USDT": {"free": 0.0, "used": 0.0}}
+    api_mock.papiGetBalance.return_value = [
+        {
+            "asset": "USDT",
+            "totalWalletBalance": "1099.43174479",
+            "crossMarginAsset": "1099.43174479",
+            "crossMarginFree": "1099.43174479",
+            "crossMarginLocked": "0",
+            "crossMarginBorrowed": "0",
+            "crossMarginInterest": "0",
+            "umWalletBalance": "0.0",
+            "cmWalletBalance": "0",
+            "negativeBalance": "0",
+        }
+    ]
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        api_mock,
+        exchange="binance",
+    )
+
+    balances = exchange.get_balances()
+    assert balances["USDT"]["free"] == 1099.43174479
+    assert balances["USDT"]["used"] == 0.0
+    assert balances["USDT"]["total"] == 1099.43174479
+
+    # A funded UM wallet keeps the CCXT mapping untouched and adds no extra request.
+    api_mock.fetch_balance.return_value = {"USDT": {"free": 60.0, "used": 0.0}}
+    api_mock.papiGetBalance.reset_mock()
+    balances = exchange.get_balances()
+    assert balances["USDT"]["free"] == 60.0
+    assert "total" not in balances["USDT"]
+    api_mock.papiGetBalance.assert_not_called()
+
+    # No fallback when the shared pool is empty as well.
+    api_mock.fetch_balance.return_value = {"USDT": {"free": 0.0, "used": 0.0}}
+    api_mock.papiGetBalance.return_value = [
+        {"asset": "USDT", "crossMarginFree": "0", "umWalletBalance": "0"}
+    ]
+    balances = exchange.get_balances()
+    assert balances["USDT"]["free"] == 0.0
+
+    # A malformed raw record fails closed and keeps the zero mapping.
+    api_mock.papiGetBalance.return_value = [
+        {"asset": "USDT", "crossMarginFree": "lots", "umWalletBalance": "0"}
+    ]
+    balances = exchange.get_balances()
+    assert balances["USDT"]["free"] == 0.0
+
+
 def test_binance_portfolio_margin_entry_risk_guard(default_conf, mocker):
     exchange = get_patched_exchange(
         mocker,

@@ -2498,7 +2498,58 @@ class Binance(Exchange):
             ) from cancellation_error
 
     def get_balances(self, params: dict | None = None):
-        return super().get_balances(self._portfolio_margin_params(params))
+        balances = super().get_balances(self._portfolio_margin_params(params))
+        if self._portfolio_margin:
+            self._map_unified_collateral_balance(balances)
+        return balances
+
+    def _map_unified_collateral_balance(self, balances: dict) -> None:
+        """Surface unified cross-margin collateral when the UM wallet is exactly zero.
+
+        CCXT's linear Portfolio Margin balance mapping takes USDT ``free`` from the raw
+        ``umWalletBalance``. Unified accounts that hold collateral only in the shared
+        cross-margin pool (for example unified-account sub-accounts, which have no
+        separately fundable UM wallet) therefore report a zero USDT balance while being
+        fully funded, and stake sizing fails closed. When the mapped USDT balance is
+        zero, re-read the raw PAPI balance and fall back to ``crossMarginFree`` /
+        ``crossMarginLocked`` / ``crossMarginAsset``. A nonzero UM wallet keeps CCXT's
+        mapping untouched and adds no extra request.
+        """
+        usdt = balances.get("USDT")
+        if not isinstance(usdt, dict) or usdt.get("free"):
+            return
+        try:
+            records = self._api.papiGetBalance({})
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not get balance due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+        if not isinstance(records, list):
+            return
+        for record in records:
+            if not isinstance(record, dict) or record.get("asset") != "USDT":
+                continue
+            raw_free = record.get("crossMarginFree")
+            if raw_free in (None, ""):
+                return
+            try:
+                free_value = float(raw_free)
+            except (TypeError, ValueError):
+                return
+            if free_value <= 0:
+                return
+            usdt["free"] = free_value
+            usdt["used"] = float(record.get("crossMarginLocked") or 0)
+            usdt["total"] = float(record.get("crossMarginAsset") or 0)
+            logger.info(
+                "Binance Portfolio Margin UM wallet is empty; reporting the unified "
+                "cross-margin collateral as the USDT balance."
+            )
+            return
 
     def _portfolio_position_params(self, params: dict | None = None) -> dict:
         """Validate and reduce PAPI positionRisk parameters to CCXT-safe values."""
