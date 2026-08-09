@@ -53,7 +53,7 @@ def portfolio_margin_risk_conf(default_conf, *, dry_run: bool = True):
         "pair": pair,
         "side": "long",
         "max_leverage": 1,
-        "max_entry_notional": 50,
+        "max_entry_notional": 100,
         "force_entry_order_type": "market",
         "reject_force_entry_price": True,
     }
@@ -1065,8 +1065,8 @@ def test_binance_portfolio_margin_rejects_unsupported_configs(default_conf, mock
         get_patched_exchange(mocker, conf, exchange="binance")
 
     conf = portfolio_margin_risk_conf(default_conf)
-    conf["exchange"]["portfolio_margin_risk"]["max_entry_notional"] = 51
-    with pytest.raises(OperationalException, match="at most 50 USDT"):
+    conf["exchange"]["portfolio_margin_risk"]["max_entry_notional"] = 101
+    with pytest.raises(OperationalException, match="at most 100 USDT"):
         get_patched_exchange(mocker, conf, exchange="binance")
 
     conf = portfolio_margin_risk_conf(default_conf)
@@ -1348,7 +1348,7 @@ def test_binance_portfolio_margin_entry_risk_guard(default_conf, mocker):
     exchange._validate_portfolio_margin_entry_order(
         pair=pair,
         side="buy",
-        amount=0.025,
+        amount=0.05,
         rate=2000,
         leverage=1,
         reduce_only=False,
@@ -1356,14 +1356,14 @@ def test_binance_portfolio_margin_entry_risk_guard(default_conf, mocker):
     for overrides in (
         {"pair": "XRP/USDT:USDT"},
         {"side": "sell"},
-        {"amount": 0.026},
+        {"amount": 0.0501},
         {"rate": 0},
         {"leverage": 2},
     ):
         values = {
             "pair": pair,
             "side": "buy",
-            "amount": 0.025,
+            "amount": 0.05,
             "rate": 2000,
             "leverage": 1,
             "reduce_only": False,
