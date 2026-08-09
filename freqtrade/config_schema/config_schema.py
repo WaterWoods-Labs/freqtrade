@@ -1056,7 +1056,7 @@ CONF_SCHEMA = {
                                 "max_entry_notional": {
                                     "type": "number",
                                     "exclusiveMinimum": 0,
-                                    "maximum": 50,
+                                    "maximum": 100,
                                 },
                                 "force_entry_order_type": {
                                     "type": "string",

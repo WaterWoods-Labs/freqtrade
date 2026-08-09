@@ -662,7 +662,7 @@ def test_validate_portfolio_margin_risk_schema(default_conf) -> None:
         "pair": "BTC/USDT:USDT",
         "side": "long",
         "max_leverage": 1,
-        "max_entry_notional": 50,
+        "max_entry_notional": 100,
         "force_entry_order_type": "market",
         "reject_force_entry_price": True,
     }
@@ -672,7 +672,7 @@ def test_validate_portfolio_margin_risk_schema(default_conf) -> None:
 
     invalid_risks = (
         {**risk, "max_leverage": True},
-        {**risk, "max_entry_notional": 51},
+        {**risk, "max_entry_notional": 101},
         {**risk, "unexpected": True},
     )
     for invalid_risk in invalid_risks:

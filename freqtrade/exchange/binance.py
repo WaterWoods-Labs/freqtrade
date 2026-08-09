@@ -467,13 +467,13 @@ class Binance(Exchange):
                     or isinstance(risk_notional, bool)
                     or not isinstance(risk_notional, (int, float))
                     or not isfinite(risk_notional)
-                    or not 0 < risk_notional <= 50
+                    or not 0 < risk_notional <= 100
                     or risk_config.get("force_entry_order_type") != "market"
                     or risk_config.get("reject_force_entry_price") is not True
                 ):
                     raise OperationalException(
                         "Binance Portfolio Margin risk policy must select a whitelisted long-only "
-                        "pair, 1x leverage, at most 50 USDT entry notional, market force-entry, "
+                        "pair, 1x leverage, at most 100 USDT entry notional, market force-entry, "
                         "and explicit-price rejection."
                     )
             elif risk_keys == _PORTFOLIO_MARGIN_CHAN_RISK_KEYS:
