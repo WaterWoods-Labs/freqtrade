@@ -1977,14 +1977,14 @@ class Binance(Exchange):
                             pass
                 else:
                     stable_absent_snapshots += 1
-                    if stable_absent_snapshots >= self._portfolio_containment_stable_snapshots:
-                        return
             except (FreqtradeException, ccxt.BaseError) as exc:
                 last_error = exc
                 stable_absent_snapshots = 0
             if attempt + 1 < self._portfolio_containment_attempts:
                 sleep(self._portfolio_order_recovery_delay)
 
+        if stable_absent_snapshots >= self._portfolio_containment_stable_snapshots:
+            return
         if last_error is not None:
             raise OperationalException(
                 "Binance Portfolio Margin could not reconcile its persisted regular order "
@@ -2006,10 +2006,12 @@ class Binance(Exchange):
         if store is None or not store.intents:
             return False
 
-        containment_intents = [
-            intent for intent in store.intents if intent.purpose == "containment"
+        risk_lowering_intents = [
+            intent
+            for intent in store.intents
+            if intent.purpose in ("containment", "risk_reduction")
         ]
-        for intent in containment_intents:
+        for intent in risk_lowering_intents:
             with self._get_portfolio_create_lock():
                 self._cancel_persisted_regular_intent(intent.pair, intent.client_order_id)
                 self._clear_portfolio_order_intent(intent.client_order_id)
@@ -2086,11 +2088,26 @@ class Binance(Exchange):
                     "Reconcile the account before restarting."
                 )
             store = self._portfolio_order_intent_store
-            if not reduceOnly and store is not None and store.intents:
+            try:
+                pending_intents = store.intents if store is not None else ()
+            except OperationalException:
+                self._portfolio_unknown_order_latched = True
+                raise
+            if pending_intents:
                 # Another process may have persisted an intent after this instance was
                 # constructed. Always reload it under the cross-process operation lock before
                 # taking any exchange snapshot or generating a new submission.
                 self._portfolio_unknown_order_latched = True
+                conditional_intent = next(
+                    (intent for intent in pending_intents if intent.order_kind == "conditional"),
+                    None,
+                )
+                if conditional_intent is not None:
+                    self._portfolio_unknown_conditional_client_order_id = (
+                        conditional_intent.client_order_id
+                    )
+                    self._portfolio_unknown_conditional_pair = conditional_intent.pair
+            if not reduceOnly and pending_intents:
                 raise OperationalException(
                     "Binance Portfolio Margin found persisted order evidence from another "
                     "process. No new order was submitted and trading remains stopped."
@@ -2108,28 +2125,14 @@ class Binance(Exchange):
             self._portfolio_active_client_order_id = client_order_id
             was_unknown_latched = self._portfolio_unknown_order_latched
             try:
-                intent_purpose: PortfolioOrderPurpose = "submission"
-                parent_client_order_id = None
-                store = self._portfolio_order_intent_store
-                if reduceOnly and was_unknown_latched and store is not None and store.intents:
-                    parent_intents = [
-                        intent
-                        for intent in store.intents
-                        if intent.purpose == "submission" and intent.pair == pair
-                    ]
-                    if len(parent_intents) != 1:
-                        raise OperationalException(
-                            "Binance Portfolio Margin could not bind a reduce-only order to "
-                            "exactly one pending intent for this pair. Trading remains stopped."
-                        )
-                    intent_purpose = "containment"
-                    parent_client_order_id = parent_intents[0].client_order_id
+                intent_purpose: PortfolioOrderPurpose = (
+                    "risk_reduction" if reduceOnly else "submission"
+                )
                 self._record_portfolio_order_intent(
                     pair=pair,
                     client_order_id=client_order_id,
                     order_kind="regular",
                     purpose=intent_purpose,
-                    parent_client_order_id=parent_client_order_id,
                 )
                 submission_error: Exception | None = None
                 try:
@@ -2174,6 +2177,13 @@ class Binance(Exchange):
                         pair, client_order_id, conditional=False
                     )
                 except OperationalException as reconciliation_error:
+                    if reduceOnly:
+                        raise OperationalException(
+                            "Binance Portfolio Margin reduce-only order submission status is "
+                            "unknown because exact PAPI reconciliation failed. The persisted "
+                            "risk-reduction intent was retained; no retry or additional "
+                            "containment order was submitted. Trading remains stopped."
+                        ) from reconciliation_error
                     try:
                         containment = self._contain_unknown_portfolio_order(pair, client_order_id)
                     except OperationalException as containment_error:
@@ -2204,6 +2214,14 @@ class Binance(Exchange):
                         self._clear_portfolio_order_intent(client_order_id)
                     self._portfolio_unknown_order_latched = was_unknown_latched
                     return recovered
+                if reduceOnly:
+                    raise OperationalException(
+                        "Binance Portfolio Margin reduce-only order submission status is unknown. "
+                        f"No PAPI order was visible for client order {client_order_id}; the "
+                        "persisted risk-reduction intent was retained and no retry or additional "
+                        "containment order was submitted. Restart to reconcile positions, orders, "
+                        "and the trade database."
+                    ) from submission_error
                 containment = self._contain_unknown_portfolio_order(pair, client_order_id)
                 if self._portfolio_margin_risk is not None and containment.exchange_evidence_seen:
                     self._clear_portfolio_order_intent(client_order_id)
