@@ -18,7 +18,7 @@ from freqtrade.exceptions import OperationalException
 
 
 PortfolioOrderKind = Literal["regular", "conditional"]
-PortfolioOrderPurpose = Literal["submission", "containment"]
+PortfolioOrderPurpose = Literal["submission", "containment", "risk_reduction"]
 
 _CLIENT_ORDER_ID_PATTERN = re.compile(r"^ftpm-[A-Za-z0-9_-]{1,31}$")
 _MAX_STATE_BYTES = 64 * 1024
@@ -111,6 +111,22 @@ class PortfolioOrderIntentStore:
                 raise OperationalException(
                     "Binance Portfolio Margin found an order intent from another operation. "
                     "No new order was submitted and trading remains stopped."
+                )
+            if intent.purpose in ("containment", "risk_reduction") and any(
+                item.purpose in ("containment", "risk_reduction")
+                for item in current_intents.values()
+            ):
+                raise OperationalException(
+                    "Binance Portfolio Margin found a pending risk-lowering order intent. "
+                    "No additional order was submitted and trading remains stopped."
+                )
+            if (
+                intent.purpose in ("containment", "risk_reduction")
+                and sum(item.purpose == "submission" for item in current_intents.values()) > 1
+            ):
+                raise OperationalException(
+                    "Binance Portfolio Margin found ambiguous pending submission intents. "
+                    "No risk-lowering order was submitted and trading remains stopped."
                 )
             new_intents = {**current_intents, intent.client_order_id: intent}
             self._validate_or_raise(new_intents, current_reservations)
@@ -351,6 +367,8 @@ class PortfolioOrderIntentStore:
         if len(client_ids) != len(intents):
             raise ValueError("duplicate client order id")
         conditional_count = 0
+        submission_count = 0
+        risk_lowering_count = 0
         for intent in intents:
             if not _CLIENT_ORDER_ID_PATTERN.fullmatch(intent.client_order_id):
                 raise ValueError("invalid client order id")
@@ -358,9 +376,10 @@ class PortfolioOrderIntentStore:
                 raise ValueError("intent pair is not configured")
             if intent.order_kind not in ("regular", "conditional"):
                 raise ValueError("invalid order kind")
-            if intent.purpose not in ("submission", "containment"):
+            if intent.purpose not in ("submission", "containment", "risk_reduction"):
                 raise ValueError("invalid intent purpose")
             if intent.purpose == "containment":
+                risk_lowering_count += 1
                 if (
                     intent.order_kind != "regular"
                     or intent.parent_client_order_id not in client_ids
@@ -374,12 +393,23 @@ class PortfolioOrderIntentStore:
                 )
                 if parent.pair != intent.pair or parent.purpose != "submission":
                     raise ValueError("invalid containment parent")
+            elif intent.purpose == "risk_reduction":
+                risk_lowering_count += 1
+                if intent.order_kind != "regular" or intent.parent_client_order_id is not None:
+                    raise ValueError("invalid risk-reduction intent")
             elif intent.parent_client_order_id is not None:
                 raise ValueError("unexpected parent client order id")
+            else:
+                submission_count += 1
             if intent.order_kind == "conditional":
                 conditional_count += 1
         if conditional_count > 1:
             raise ValueError("multiple pending conditional intents")
+        has_risk_reduction = any(intent.purpose == "risk_reduction" for intent in intents)
+        if has_risk_reduction and submission_count > 1:
+            raise ValueError("risk reduction has multiple pending submission intents")
+        if has_risk_reduction and risk_lowering_count > 1:
+            raise ValueError("multiple pending risk-lowering intents")
 
         if reservations and not self._reservations_enabled:
             raise ValueError("reservations disabled")
