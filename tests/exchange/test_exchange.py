@@ -4,7 +4,7 @@ import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from random import randint
-from unittest.mock import MagicMock, Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 
 import ccxt
 import pytest
@@ -12,6 +12,7 @@ from numpy import nan
 from pandas import DataFrame, to_datetime
 
 from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS
+from freqtrade.data.converter import ohlcv_to_dataframe
 from freqtrade.enums import CandleType, MarginMode, RunMode, TradingMode
 from freqtrade.exceptions import (
     ConfigurationError,
@@ -44,7 +45,6 @@ from freqtrade.util import dt_now, dt_ts, dt_utc
 from tests.conftest import (
     EXMS,
     generate_test_data_raw,
-    get_mock_coro,
     get_patched_exchange,
     log_has,
     log_has_re,
@@ -140,7 +140,7 @@ def ccxt_exceptionhandlers(
 async def async_ccxt_exception(
     mocker, default_conf, api_mock, fun, mock_ccxt_fun, retries=API_RETRY_COUNT + 1, **kwargs
 ):
-    with patch("freqtrade.exchange.common.asyncio.sleep", get_mock_coro(None)):
+    with patch("freqtrade.exchange.common.asyncio.sleep"):
         with pytest.raises(DDosProtection):
             api_mock.__dict__[mock_ccxt_fun] = MagicMock(side_effect=ccxt.DDoSProtection("Dooh"))
             exchange = get_patched_exchange(mocker, default_conf, api_mock)
@@ -609,20 +609,20 @@ def test__load_async_markets(default_conf, mocker, caplog):
     mocker.patch(f"{EXMS}.validate_stakecurrency")
     mocker.patch(f"{EXMS}.validate_pricing")
     exchange = Exchange(default_conf)
-    exchange._api_async.load_markets = get_mock_coro(None)
+    exchange._api_async.load_markets = AsyncMock(return_value=None)
     exchange._load_async_markets()
     assert exchange._api_async.load_markets.call_count == 1
     caplog.set_level(logging.DEBUG)
 
-    exchange._api_async.load_markets = get_mock_coro(side_effect=ccxt.BaseError("deadbeef"))
+    exchange._api_async.load_markets = AsyncMock(side_effect=ccxt.BaseError("deadbeef"))
     with pytest.raises(TemporaryError, match="deadbeef"):
         exchange._load_async_markets()
 
-    exchange._api_async.load_markets = get_mock_coro(side_effect=ccxt.DDoSProtection("deadbeef"))
+    exchange._api_async.load_markets = AsyncMock(side_effect=ccxt.DDoSProtection("deadbeef"))
     with pytest.raises(DDosProtection, match="deadbeef"):
         exchange._load_async_markets()
 
-    exchange._api_async.load_markets = get_mock_coro(side_effect=ccxt.OperationFailed("deadbeef"))
+    exchange._api_async.load_markets = AsyncMock(side_effect=ccxt.OperationFailed("deadbeef"))
     with pytest.raises(TemporaryError, match="deadbeef"):
         exchange._load_async_markets()
 
@@ -630,7 +630,7 @@ def test__load_async_markets(default_conf, mocker, caplog):
 def test__load_markets(default_conf, mocker, caplog):
     caplog.set_level(logging.INFO)
     api_mock = MagicMock()
-    api_mock.load_markets = get_mock_coro(side_effect=ccxt.BaseError("SomeError"))
+    api_mock.load_markets = AsyncMock(side_effect=ccxt.BaseError("SomeError"))
     mocker.patch(f"{EXMS}._init_ccxt", MagicMock(return_value=api_mock))
     mocker.patch(f"{EXMS}.validate_timeframes")
     mocker.patch(f"{EXMS}.validate_stakecurrency")
@@ -640,7 +640,7 @@ def test__load_markets(default_conf, mocker, caplog):
 
     expected_return = {"ETH/BTC": "available"}
     api_mock = MagicMock()
-    api_mock.load_markets = get_mock_coro()
+    api_mock.load_markets = AsyncMock(return_value=None)
     api_mock.markets = expected_return
     mocker.patch(f"{EXMS}._init_ccxt", MagicMock(return_value=api_mock))
     default_conf["exchange"]["pair_whitelist"] = ["ETH/BTC"]
@@ -656,7 +656,7 @@ def test_reload_markets(default_conf, mocker, caplog, time_machine):
     start_dt = dt_now()
     time_machine.move_to(start_dt, tick=False)
     api_mock = MagicMock()
-    api_mock.load_markets = get_mock_coro(return_value=initial_markets)
+    api_mock.load_markets = AsyncMock(return_value=initial_markets)
     api_mock.markets = initial_markets
     default_conf["exchange"]["markets_refresh_interval"] = 10
     exchange = get_patched_exchange(
@@ -673,7 +673,7 @@ def test_reload_markets(default_conf, mocker, caplog, time_machine):
     assert exchange.markets == initial_markets
     assert lam_spy.call_count == 0
 
-    api_mock.load_markets = get_mock_coro(return_value=updated_markets)
+    api_mock.load_markets = AsyncMock(return_value=updated_markets)
     # more than 10 minutes have passed, reload is executed
     time_machine.move_to(start_dt + timedelta(minutes=11), tick=False)
     api_mock.markets = updated_markets
@@ -690,7 +690,7 @@ def test_reload_markets(default_conf, mocker, caplog, time_machine):
 
     # Another reload should happen but it fails.
     time_machine.move_to(start_dt + timedelta(minutes=51), tick=False)
-    api_mock.load_markets = get_mock_coro(side_effect=ccxt.NetworkError("LoadError"))
+    api_mock.load_markets = AsyncMock(side_effect=ccxt.NetworkError("LoadError"))
 
     exchange.reload_markets(force=False)
     assert exchange.markets == updated_markets
@@ -708,7 +708,7 @@ def test_reload_markets_exception(default_conf, mocker, caplog):
     caplog.set_level(logging.DEBUG)
 
     api_mock = MagicMock()
-    api_mock.load_markets = get_mock_coro(side_effect=ccxt.NetworkError("LoadError"))
+    api_mock.load_markets = AsyncMock(side_effect=ccxt.NetworkError("LoadError"))
     default_conf["exchange"]["markets_refresh_interval"] = 10
     exchange = get_patched_exchange(
         mocker, default_conf, api_mock, exchange="binance", mock_markets=False
@@ -725,7 +725,7 @@ def test_reload_markets_exception(default_conf, mocker, caplog):
 def test_validate_stakecurrency(default_conf, stake_currency, mocker):
     default_conf["stake_currency"] = stake_currency
     api_mock = MagicMock()
-    api_mock.load_markets = get_mock_coro()
+    api_mock.load_markets = AsyncMock(return_value=None)
     api_mock.markets = {
         "ETH/BTC": {"quote": "BTC"},
         "LTC/BTC": {"quote": "BTC"},
@@ -741,7 +741,7 @@ def test_validate_stakecurrency(default_conf, stake_currency, mocker):
 def test_validate_stakecurrency_error(default_conf, mocker):
     default_conf["stake_currency"] = "XRP"
     api_mock = MagicMock()
-    api_mock.load_markets = get_mock_coro()
+    api_mock.load_markets = AsyncMock(return_value=None)
     api_mock.markets = {
         "ETH/BTC": {"quote": "BTC"},
         "LTC/BTC": {"quote": "BTC"},
@@ -757,7 +757,7 @@ def test_validate_stakecurrency_error(default_conf, mocker):
     ):
         Exchange(default_conf)
 
-    api_mock.load_markets = get_mock_coro(side_effect=ccxt.NetworkError("No connection."))
+    api_mock.load_markets = AsyncMock(side_effect=ccxt.NetworkError("No connection."))
     mocker.patch(f"{EXMS}._init_ccxt", MagicMock(return_value=api_mock))
 
     with pytest.raises(
@@ -2590,7 +2590,7 @@ def test_get_historic_ohlcv(default_conf, mocker, caplog, exchange_name, candle_
 
     caplog.clear()
 
-    exchange._async_get_candle_history = get_mock_coro(side_effect=TimeoutError())
+    exchange._async_get_candle_history = AsyncMock(side_effect=TimeoutError())
     with pytest.raises(TimeoutError):
         exchange.get_historic_ohlcv(pair, "5m", dt_ts(since), candle_type=candle_type)
     assert log_has_re(r"Async code raised an exception: .*", caplog)
@@ -2612,7 +2612,7 @@ async def test__async_get_historic_ohlcv(default_conf, mocker, caplog, exchange_
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
     mocker.patch.object(exchange, "verify_candle_type_support")
     # Monkey-patch async function
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
 
     pair = "ETH/USDT"
     respair, restf, _, res, _ = await exchange._async_get_historic_ohlcv(
@@ -2662,7 +2662,7 @@ def test_refresh_latest_ohlcv(mocker, default_conf_usdt, caplog, candle_type) ->
     caplog.set_level(logging.DEBUG)
     exchange = get_patched_exchange(mocker, default_conf_usdt)
     mocker.patch.object(exchange, "verify_candle_type_support")
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
 
     pairs = [("IOTA/USDT", "5m", candle_type), ("XRP/USDT", "5m", candle_type)]
     # empty dicts
@@ -2789,7 +2789,7 @@ def test_refresh_latest_trades(
     use_trades_conf["datadir"] = tmp_path
     use_trades_conf["orderflow"] = {"max_candles": 1500}
     exchange = get_patched_exchange(mocker, use_trades_conf)
-    exchange._api_async.fetch_trades = get_mock_coro(trades)
+    exchange._api_async.fetch_trades = AsyncMock(return_value=trades)
     exchange._ft_has["exchange_has_overrides"]["fetchTrades"] = True
 
     pairs = [("IOTA/USDT:USDT", "5m", candle_type), ("XRP/USDT:USDT", "5m", candle_type)]
@@ -2949,7 +2949,7 @@ def test_refresh_latest_ohlcv_cache(mocker, default_conf, candle_type, time_mach
     mocker.patch(f"{EXMS}.ohlcv_candle_limit", return_value=100)
     assert exchange._startup_candle_count == 0
 
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     pair1 = ("IOTA/ETH", "1h", candle_type)
     pair2 = ("XRP/ETH", "1h", candle_type)
     pairs = [pair1, pair2]
@@ -2998,7 +2998,7 @@ def test_refresh_latest_ohlcv_cache(mocker, default_conf, candle_type, time_mach
     new_startdate = (start + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
     # mocker.patch(f"{EXMS}.ohlcv_candle_limit", return_value=100)
     ohlcv = generate_test_data_raw("1h", 100, new_startdate)
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     res = exchange.refresh_latest_ohlcv(pairs)
     assert exchange._api_async.fetch_ohlcv.call_count == 2
     assert len(res) == 2
@@ -3023,7 +3023,7 @@ def test_refresh_latest_ohlcv_cache(mocker, default_conf, candle_type, time_mach
     # Move to distant future (so a 1 call would cause a hole in the data)
     time_machine.move_to(start + timedelta(hours=2000))
     ohlcv = generate_test_data_raw("1h", 100, start + timedelta(hours=1900))
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     res = exchange.refresh_latest_ohlcv(pairs)
 
     assert exchange._api_async.fetch_ohlcv.call_count == 2
@@ -3130,8 +3130,8 @@ def test_refresh_latest_ohlcv_funding_rate(mocker, default_conf_usdt, caplog) ->
 
     caplog.set_level(logging.DEBUG)
     exchange = get_patched_exchange(mocker, default_conf_usdt)
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
-    exchange._api_async.fetch_funding_rate_history = get_mock_coro(funding_data)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    exchange._api_async.fetch_funding_rate_history = AsyncMock(return_value=funding_data)
 
     pairs = [
         ("IOTA/USDT:USDT", "8h", CandleType.FUNDING_RATE),
@@ -3145,6 +3145,138 @@ def test_refresh_latest_ohlcv_funding_rate(mocker, default_conf_usdt, caplog) ->
     assert log_has_re(r"Wrong funding rate timeframe 8h for pair IOTA/USDT:USDT", caplog)
     assert not log_has_re(r"Wrong funding rate timeframe 8h for pair XRP/USDT:USDT", caplog)
     assert exchange._api_async.fetch_ohlcv.call_count == 0
+    # Funding rates carry a single value - plus "open" as backwards-compatible alias
+    for df in res.values():
+        assert list(df.columns) == ["date", "funding_rate", "open"]
+        assert (df["open"] == df["funding_rate"]).all()
+
+
+def test_refresh_latest_ohlcv_funding_rate_schema(mocker, default_conf_usdt, testdatadir) -> None:
+    """Live funding rate dataframes must be schema-identical to disk-loaded ones,
+    including after a cache merge - otherwise strategies break mid-session."""
+    from freqtrade.data.history import get_datahandler
+
+    ohlcv = generate_test_data_raw("1h", 24, "2025-01-02 12:00:00+00:00")
+    funding_data = [{"timestamp": x[0], "fundingRate": x[1]} for x in ohlcv]
+
+    exchange = get_patched_exchange(mocker, default_conf_usdt)
+    exchange._api_async.fetch_funding_rate_history = AsyncMock(return_value=funding_data)
+
+    pair_tf = ("XRP/USDT:USDT", "1h", CandleType.FUNDING_RATE)
+    first = exchange.refresh_latest_ohlcv([pair_tf], cache=True)[pair_tf]
+    # Second refresh goes through the concat/clean cache-merge path
+    second = exchange.refresh_latest_ohlcv([pair_tf], cache=True)[pair_tf]
+
+    on_disk = get_datahandler(testdatadir, "feather").ohlcv_load(
+        "XRP/USDT:USDT", "1h", CandleType.FUNDING_RATE, fill_missing=False
+    )
+    assert list(first.columns) == list(on_disk.columns) == ["date", "funding_rate", "open"]
+    assert list(second.columns) == list(on_disk.columns)
+    assert (second["open"] == second["funding_rate"]).all()
+
+
+async def test__fetch_funding_rate_history(default_conf, mocker):
+    """Funding rates are fetched into the columns they are stored in"""
+    api_mock = MagicMock()
+    api_mock.fetch_funding_rate_history = AsyncMock(
+        return_value=[
+            {"timestamp": 1630454400000, "fundingRate": -0.000008},
+            {"timestamp": 1630458000000, "fundingRate": -0.000004},
+        ]
+    )
+    exchange = get_patched_exchange(mocker, default_conf, api_mock)
+    res = await exchange._fetch_funding_rate_history("XRP/USDT:USDT", "1h", limit=2)
+    assert res == [[1630454400000, -0.000008], [1630458000000, -0.000004]]
+
+
+async def test__fetch_open_interest_history_missing_side(default_conf, mocker):
+
+    api_mock = MagicMock()
+    # kinda unrealistic, usually one column is None for all entries.
+    api_mock.fetch_open_interest_history = AsyncMock(
+        return_value=[
+            {
+                "timestamp": 1630454400000,
+                "openInterestAmount": 50114.633,
+                "openInterestValue": None,
+            },
+            {
+                "timestamp": 1630458000000,
+                "openInterestAmount": None,
+                "openInterestValue": 8502979793.293565,
+            },
+            {
+                "timestamp": 1630461600000,
+                "openInterestAmount": 50114.555,
+                "openInterestValue": 8502979793.12354,
+            },
+        ]
+    )
+    exchange = get_patched_exchange(mocker, default_conf, api_mock)
+    res = await exchange._fetch_open_interest_history("XRP/USDT:USDT", "1h", limit=2)
+    assert res == [
+        [1630454400000, 50114.633, None],
+        [1630458000000, None, 8502979793.293565],
+        [1630461600000, 50114.555, 8502979793.12354],
+    ]
+
+    # ... and reach the dataframe as NaN, without disturbing the dtype
+    df = ohlcv_to_dataframe(
+        res,
+        "1h",
+        "XRP/USDT:USDT",
+        fill_missing=False,
+        drop_incomplete=False,
+        candle_type=CandleType.OPEN_INTEREST,
+    )
+    assert list(df.columns) == ["date", "open_interest_amount", "open_interest_value"]
+    assert df["open_interest_amount"].dtype == "float64"
+    assert df["open_interest_value"].dtype == "float64"
+    assert df["open_interest_value"].isna().tolist() == [True, False, False]
+    assert df["open_interest_amount"].isna().tolist() == [False, True, False]
+
+
+def test_refresh_latest_ohlcv_open_interest(mocker, default_conf_usdt) -> None:
+    """Open interest goes through its own endpoint and keeps its own columns."""
+    ohlcv = generate_test_data_raw("1h", 24, "2025-01-02 12:00:00+00:00")
+    oi_data = [
+        {"timestamp": x[0], "openInterestAmount": x[1], "openInterestValue": x[4]} for x in ohlcv
+    ]
+
+    exchange = get_patched_exchange(mocker, default_conf_usdt)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    exchange._api_async.fetch_open_interest_history = AsyncMock(return_value=oi_data)
+
+    pair_tf = ("XRP/USDT:USDT", "1h", CandleType.OPEN_INTEREST)
+    res = exchange.refresh_latest_ohlcv([pair_tf], cache=True)
+
+    assert exchange._api_async.fetch_ohlcv.call_count == 0
+    df = res[pair_tf]
+    assert list(df.columns) == ["date", "open_interest_amount", "open_interest_value"]
+    # Unlike funding rates, open interest gets no "open" alias - it is a new candle type
+    assert "open" not in df.columns
+    # The last record is the still-updating period and is dropped as incomplete
+    assert len(df) == len(ohlcv) - 1
+
+    # Second refresh goes through the concat/clean cache-merge path
+    second = exchange.refresh_latest_ohlcv([pair_tf], cache=True)[pair_tf]
+    assert list(second.columns) == list(df.columns)
+    assert len(second) == len(df)
+
+
+@pytest.mark.parametrize("exchange_name", [e for e in EXCHANGES if e not in ["okx"]])
+def test_ohlcv_candle_limit_open_interest(default_conf, mocker, exchange_name):
+    default_conf["trading_mode"] = "futures"
+    default_conf["margin_mode"] = "isolated"
+    exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
+    expected = exchange._ft_has.get("open_interest_candle_limit", None)
+    limit = exchange.ohlcv_candle_limit("1h", CandleType.OPEN_INTEREST)
+    if expected is None:
+        assert limit == exchange.ohlcv_candle_limit("1h", CandleType.FUTURES)
+    else:
+        assert limit == expected
+        # The lower limit must not leak into regular candle downloads
+        assert exchange.ohlcv_candle_limit("1h", CandleType.FUTURES) != limit
 
 
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
@@ -3163,7 +3295,7 @@ async def test__async_get_candle_history(default_conf, mocker, caplog, exchange_
     caplog.set_level(logging.DEBUG)
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
     # Monkey-patch async function
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
 
     pair = "ETH/BTC"
     res = await exchange._async_get_candle_history(pair, "5m", CandleType.SPOT)
@@ -3256,7 +3388,7 @@ async def test__async_kucoin_get_candle_history(default_conf, mocker, caplog):
 
     msg = r"_async_get_candle_history\(\) returned exception: .*"
     msg2 = r"Applying DDosProtection backoff delay: .*"
-    with patch("freqtrade.exchange.common.asyncio.sleep", get_mock_coro(None)):
+    with patch("freqtrade.exchange.common.asyncio.sleep"):
         for _ in range(3):
             with pytest.raises(DDosProtection, match=r"429 Too Many Requests"):
                 await exchange._async_get_candle_history(
@@ -3279,7 +3411,7 @@ async def test__async_get_candle_history_empty(default_conf, mocker, caplog):
     caplog.set_level(logging.DEBUG)
     exchange = get_patched_exchange(mocker, default_conf)
     # Monkey-patch async function
-    exchange._api_async.fetch_ohlcv = get_mock_coro([])
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=[])
 
     exchange = Exchange(default_conf)
     pair = "ETH/BTC"
@@ -3686,7 +3818,7 @@ async def test___async_get_candle_history_sort(default_conf, mocker, exchange_na
         [1527830400000, 0.07649, 0.07651, 0.07649, 0.07651, 2.5734867],
     ]
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     sort_mock = mocker.patch("freqtrade.exchange.exchange.sorted", MagicMock(side_effect=sort_data))
     # Test the OHLCV data sort
     res = await exchange._async_get_candle_history(
@@ -3723,7 +3855,7 @@ async def test___async_get_candle_history_sort(default_conf, mocker, exchange_na
         [1527830100000, 0.076695, 0.07671, 0.07624171, 0.07671, 1.80689244],
         [1527830400000, 0.07671, 0.07674399, 0.07629216, 0.07655213, 2.31452783],
     ]
-    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     # Reset sort mock
     sort_mock = mocker.patch("freqtrade.exchange.sorted", MagicMock(side_effect=sort_data))
     # Test the OHLCV data sort
@@ -3757,7 +3889,7 @@ async def test__async_fetch_trades(
     caplog.set_level(logging.DEBUG)
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
     # Monkey-patch async function
-    exchange._api_async.fetch_trades = get_mock_coro(fetch_trades_result)
+    exchange._api_async.fetch_trades = AsyncMock(return_value=fetch_trades_result)
 
     pair = "ETH/BTC"
     res, pagid = await exchange._async_fetch_trades(pair, since=None, params=None)
@@ -3832,8 +3964,8 @@ async def test__async_fetch_trades_contract_size(
     default_conf["trading_mode"] = "futures"
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
     # Monkey-patch async function
-    exchange._api_async.fetch_trades = get_mock_coro(
-        [
+    exchange._api_async.fetch_trades = AsyncMock(
+        return_value=[
             {
                 "info": {
                     "a": 126181333,
@@ -4016,8 +4148,8 @@ def test_get_historic_trades(default_conf, mocker, caplog, exchange_name, trades
 
     pair = "ETH/BTC"
 
-    exchange._async_get_trade_history_id = get_mock_coro((pair, trades_history))
-    exchange._async_get_trade_history_time = get_mock_coro((pair, trades_history))
+    exchange._async_get_trade_history_id = AsyncMock(return_value=(pair, trades_history))
+    exchange._async_get_trade_history_time = AsyncMock(return_value=(pair, trades_history))
     ret = exchange.get_historic_trades(
         pair, since=trades_history[0][0], until=trades_history[-1][0]
     )
@@ -5769,8 +5901,8 @@ def test__fetch_and_calculate_funding_fees(
         "gate": funding_rate_history_octohourly,
     }[exchange][rate_start:rate_end]
     api_mock = MagicMock()
-    api_mock.fetch_funding_rate_history = get_mock_coro(return_value=funding_rate_history)
-    api_mock.fetch_ohlcv = get_mock_coro(return_value=mark_ohlcv)
+    api_mock.fetch_funding_rate_history = AsyncMock(return_value=funding_rate_history)
+    api_mock.fetch_ohlcv = AsyncMock(return_value=mark_ohlcv)
     type(api_mock).has = PropertyMock(
         return_value={
             "fetchFundingRateHistory": True,
@@ -5817,10 +5949,8 @@ def test__fetch_and_calculate_funding_fees_datetime_called(
     expected_fees,
 ):
     api_mock = MagicMock()
-    api_mock.fetch_ohlcv = get_mock_coro(return_value=mark_ohlcv)
-    api_mock.fetch_funding_rate_history = get_mock_coro(
-        return_value=funding_rate_history_octohourly
-    )
+    api_mock.fetch_ohlcv = AsyncMock(return_value=mark_ohlcv)
+    api_mock.fetch_funding_rate_history = AsyncMock(return_value=funding_rate_history_octohourly)
     type(api_mock).has = PropertyMock(
         return_value={
             "fetchFundingRateHistory": True,
@@ -6927,6 +7057,7 @@ def test_verify_candle_type_support(default_conf, mocker):
             "fetchFundingRateHistory": True,
             "fetchIndexOHLCV": True,
             "fetchMarkOHLCV": True,
+            "fetchOpenInterestHistory": True,
             "fetchPremiumIndexOHLCV": False,
         }
     )
@@ -6936,6 +7067,7 @@ def test_verify_candle_type_support(default_conf, mocker):
     exchange.verify_candle_type_support("futures")
     exchange.verify_candle_type_support(CandleType.FUTURES)
     exchange.verify_candle_type_support(CandleType.FUNDING_RATE)
+    exchange.verify_candle_type_support(CandleType.OPEN_INTEREST)
     exchange.verify_candle_type_support(CandleType.SPOT)
     exchange.verify_candle_type_support(CandleType.MARK)
 
@@ -6952,11 +7084,13 @@ def test_verify_candle_type_support(default_conf, mocker):
             "fetchFundingRateHistory": False,
             "fetchIndexOHLCV": False,
             "fetchMarkOHLCV": False,
+            "fetchOpenInterestHistory": False,
             "fetchPremiumIndexOHLCV": True,
         }
     )
     for candle_type in [
         CandleType.FUNDING_RATE,
+        CandleType.OPEN_INTEREST,
         CandleType.INDEX,
         CandleType.MARK,
     ]:
