@@ -32,7 +32,7 @@ def start_list_exchanges(args: dict[str, Any]) -> None:
     else:
         if args["list_exchanges_all"]:
             title = (
-                f"All exchanges supported by the ccxt library "
+                f"All ccxt exchanges and native Freqtrade adapters "
                 f"({len(available_exchanges)} exchanges):"
             )
         else:

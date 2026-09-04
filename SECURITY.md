@@ -6,7 +6,7 @@ WaterWoods security fixes are maintained and released independently for each pro
 
 | Product | Supported branch | Immutable releases |
 | --- | --- | --- |
-| XCoin | `xcoin` | `xcoin-YYYY.MM.DD.N` |
+| UMX | `umx` | `umx-YYYY.MM.DD.N` |
 | Binance Portfolio Margin | `binance-portfolio-margin` | `binance-portfolio-margin-YYYY.MM.DD.N` |
 
 The `develop` and `stable` branches are clean upstream mirrors and do not contain either

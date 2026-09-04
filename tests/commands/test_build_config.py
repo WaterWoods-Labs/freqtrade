@@ -115,6 +115,24 @@ def test_ask_user_config(mocker):
     answers = ask_user_config()
     assert isinstance(answers, dict)
     assert prompt_mock.call_count == 1
+    questions = prompt_mock.call_args.args[0]
+    exchange_question = next(
+        question
+        for question in questions
+        if question["name"] == "exchange_name" and question["type"] == "select"
+    )
+    assert "umx" in exchange_question["choices"]
+    futures_question = next(
+        question for question in questions if question["name"] == "trading_mode"
+    )
+    assert futures_question["when"]({"exchange_name": "umx"}) is True
+    custom_exchange_question = next(
+        question
+        for question in questions
+        if question["name"] == "exchange_name" and question["type"] == "autocomplete"
+    )
+    assert "umx" in custom_exchange_question["choices"]
+    assert "available to Freqtrade" in custom_exchange_question["message"]
 
     prompt_mock = mocker.patch("freqtrade.configuration.deploy_config.prompt", return_value={})
 

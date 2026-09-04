@@ -43,18 +43,34 @@ def _extend_validator(validator_class):
 FreqtradeValidator = _extend_validator(Draft4Validator)
 
 
-def _validate_xcoin_only_exchange_options(conf: dict[str, Any]) -> None:
-    """Reject account-routing settings that do not belong in the XCoin-only product."""
+def _validate_umx_only_exchange_options(conf: dict[str, Any]) -> None:
+    """Reject removed product selectors and options before schema validation."""
     exchange_config = conf.get("exchange")
     if not isinstance(exchange_config, dict):
         return
 
+    exchange_name = str(exchange_config.get("name") or "").lower()
+    if exchange_name == "xcoin":
+        raise ConfigurationError(
+            "Exchange `xcoin` was removed after the UMX rebrand; set `exchange.name` to `umx`."
+        )
+
+    removed_xcoin_options = sorted(
+        key for key in exchange_config if str(key).lower().startswith("xcoin_")
+    )
+    if removed_xcoin_options:
+        joined = ", ".join(f"`exchange.{key}`" for key in removed_xcoin_options)
+        raise ConfigurationError(
+            f"Removed XCoin configuration option(s): {joined}. Use the corresponding `umx_*` "
+            "option(s) with `exchange.name=umx`."
+        )
+
     # Intentionally built by string join so the literal PAPI marker never appears in
-    # this checkout; the XCoin boundary grep would otherwise flag it. See xcoin-ci.yml.
+    # this checkout; the UMX boundary grep would otherwise flag it. See umx-ci.yml.
     removed_risk_key = "_".join(("portfolio", "margin", "risk"))  # noqa: FLY002
     if removed_risk_key in exchange_config:
         raise ConfigurationError(
-            "XCoin-only product does not support exchange account-routing extensions."
+            "UMX-only product does not support exchange account-routing extensions."
         )
 
     removed_account_mode = "".join(("portfolio", "Margin"))  # noqa: FLY002 -- see above
@@ -65,7 +81,7 @@ def _validate_xcoin_only_exchange_options(conf: dict[str, Any]) -> None:
         options = ccxt_config.get("options")
         if isinstance(options, dict) and options.get(removed_account_mode) is True:
             raise ConfigurationError(
-                "XCoin-only product does not support exchange account-routing extensions."
+                "UMX-only product does not support exchange account-routing extensions."
             )
 
 
@@ -75,7 +91,7 @@ def validate_config_schema(conf: dict[str, Any], preliminary: bool = False) -> d
     :param conf: Config in JSON format
     :return: Returns the config if valid, otherwise throw an exception
     """
-    _validate_xcoin_only_exchange_options(conf)
+    _validate_umx_only_exchange_options(conf)
     conf_schema = deepcopy(CONF_SCHEMA)
     if conf.get("runmode", RunMode.OTHER) in (RunMode.DRY_RUN, RunMode.LIVE):
         conf_schema["required"] = SCHEMA_TRADE_REQUIRED

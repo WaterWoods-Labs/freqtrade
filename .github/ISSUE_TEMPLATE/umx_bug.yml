@@ -1,19 +1,19 @@
-name: XCoin bug
-description: Report a reproducible problem in the WaterWoods XCoin integration.
-title: "[XCoin Bug]: "
+name: UMX bug
+description: Report a reproducible problem in the WaterWoods UMX integration.
+title: "[UMX Bug]: "
 body:
   - type: markdown
     attributes:
       value: |
-        Use this form only for XCoin-specific behavior. General Freqtrade problems belong in the official Freqtrade repository. Never paste credentials, account identifiers, private orders, or unredacted live logs.
+        Use this form only for UMX-specific behavior. General Freqtrade problems belong in the official Freqtrade repository. Never paste credentials, account identifiers, private orders, or unredacted live logs.
   - type: checkboxes
     id: routing
     attributes:
       label: Routing and safety
       options:
-        - label: The problem is specific to XCoin or the WaterWoods integration.
+        - label: The problem is specific to UMX or the WaterWoods integration.
           required: true
-        - label: I reproduced it on an immutable XCoin release or the current `xcoin` branch.
+        - label: I reproduced it on an immutable UMX release or the current `umx` branch.
           required: true
         - label: I removed credentials, account identifiers, private order data, and other secrets.
           required: true
@@ -42,8 +42,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: XCoin release or commit
-      description: Provide the `xcoin-YYYY.MM.DD.N` tag, immutable image digest, or commit SHA.
+      label: UMX release or commit
+      description: Provide the `umx-YYYY.MM.DD.N` tag, immutable image digest, or commit SHA.
     validations:
       required: true
   - type: textarea

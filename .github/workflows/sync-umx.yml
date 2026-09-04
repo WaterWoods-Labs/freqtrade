@@ -1,4 +1,4 @@
-name: Prepare XCoin upstream sync
+name: Prepare UMX upstream sync
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: sync-xcoin-upstream
+  group: sync-umx-upstream
   cancel-in-progress: false
 
 permissions:
@@ -38,18 +38,18 @@ jobs:
         run: |
           set -euo pipefail
           gh auth setup-git
-          git fetch --prune origin xcoin develop
+          git fetch --prune origin umx develop
 
-          if git merge-base --is-ancestor origin/develop origin/xcoin; then
+          if git merge-base --is-ancestor origin/develop origin/umx; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "xcoin already contains origin/develop"
+            echo "umx already contains origin/develop"
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -C sync/upstream-develop origin/xcoin
-          if ! git merge --no-ff origin/develop -m "Merge upstream develop into XCoin"; then
+          git switch -C sync/umx-upstream-develop origin/umx
+          if ! git merge --no-ff origin/develop -m "Merge upstream develop into UMX"; then
             allowed_conflict=".github/dependabot.yml"
             conflicts=()
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
@@ -59,22 +59,22 @@ jobs:
               git checkout --ours -- "$allowed_conflict"
               resolved_blob="$(git hash-object "$allowed_conflict")"
               if [[ "$resolved_blob" != "$expected_blob" ]]; then
-                echo "::error title=Dependabot conflict resolution failed::Resolved policy does not match the XCoin branch"
+                echo "::error title=Dependabot conflict resolution failed::Resolved policy does not match the UMX branch"
                 exit 1
               fi
               git add -- "$allowed_conflict"
               git commit --no-edit
-              echo "::notice title=Known Dependabot conflict resolved::Preserved the reviewed XCoin security-only policy"
+              echo "::notice title=Known Dependabot conflict resolved::Preserved the reviewed UMX security-only policy"
               {
                 echo "### Known upstream conflict resolved"
                 echo
-                echo "The only conflict was \`$allowed_conflict\`; the XCoin security-only policy was preserved."
+                echo "The only conflict was \`$allowed_conflict\`; the UMX security-only policy was preserved."
               } >> "$GITHUB_STEP_SUMMARY"
             else
               conflict_text="${conflicts[*]:-<none>}"
               echo "::error title=Unexpected upstream merge conflict::Only $allowed_conflict may be resolved automatically; found: $conflict_text"
               {
-                echo "## XCoin upstream synchronization blocked"
+                echo "## UMX upstream synchronization blocked"
                 echo
                 echo "Automatic conflict handling permits exactly one conflicted path: \`$allowed_conflict\`."
                 echo
@@ -91,8 +91,8 @@ jobs:
             fi
           fi
 
-          if ! git push --force-with-lease origin HEAD:refs/heads/sync/upstream-develop; then
-            echo "::error title=Synchronization branch push failed::Could not update sync/upstream-develop"
+          if ! git push --force-with-lease origin HEAD:refs/heads/sync/umx-upstream-develop; then
+            echo "::error title=Synchronization branch push failed::Could not update sync/umx-upstream-develop"
             exit 1
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -113,22 +113,22 @@ jobs:
           GH_TOKEN: ${{ steps.pull-request-token.outputs.token }}
         run: |
           number="$(gh pr list \
-            --base xcoin \
-            --head sync/upstream-develop \
+            --base umx \
+            --head sync/umx-upstream-develop \
             --state open \
             --json number \
             --jq '.[0].number // empty')"
 
           if [ -z "$number" ]; then
             gh pr create \
-              --base xcoin \
-              --head sync/upstream-develop \
-              --title "Merge upstream develop into XCoin" \
-              --body "Automated upstream synchronization. This pull request is never merged automatically and requires XCoin CI."
+              --base umx \
+              --head sync/umx-upstream-develop \
+              --title "Merge upstream develop into UMX" \
+              --body "Automated upstream synchronization. This pull request is never merged automatically and requires UMX CI."
           fi
 
-      - name: Dispatch the full XCoin validation
+      - name: Dispatch the full UMX validation
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run xcoin-ci.yml --ref sync/upstream-develop -f full=true
+        run: gh workflow run umx-ci.yml --ref sync/umx-upstream-develop -f full=true

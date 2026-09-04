@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this form only for the standalone Binance Portfolio Margin/PAPI product. XCoin problems belong in an XCoin form, and general Freqtrade problems belong in the official Freqtrade repository. Never paste credentials, account identifiers, private orders, raw account responses, or unredacted live logs.
+        Use this form only for the standalone Binance Portfolio Margin/PAPI product. UMX problems belong in a UMX form, and general Freqtrade problems belong in the official Freqtrade repository. Never paste credentials, account identifiers, private orders, raw account responses, or unredacted live logs.
   - type: checkboxes
     id: routing
     attributes:

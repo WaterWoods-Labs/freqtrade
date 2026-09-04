@@ -1,34 +1,29 @@
-"""XCoin exchange subclass using the native XCoin REST API."""
+"""UMX exchange subclass using the native UMX REST API."""
 
-import logging
 import os
-from datetime import datetime
 from math import isclose
 from typing import Any
 
 from freqtrade.constants import ExchangeConfig
 from freqtrade.enums import MarginMode, TradingMode
-from freqtrade.exceptions import ExchangeError, OperationalException
+from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
-from freqtrade.exchange.xcoin_api import XCoinAsync, XCoinSync
-from freqtrade.exchange.xcoin_connector import (
-    XCOIN_BUSINESS_LINEAR_PERPETUAL,
-    XCOIN_BUSINESS_SPOT,
-    XCOIN_DEFAULT_BASE_URL,
+from freqtrade.exchange.umx_api import UMXAsync, UMXSync
+from freqtrade.exchange.umx_connector import (
+    UMX_BUSINESS_LINEAR_PERPETUAL,
+    UMX_BUSINESS_SPOT,
+    UMX_DEFAULT_BASE_URL,
 )
 
 
-logger = logging.getLogger(__name__)
+class UMX(Exchange):
+    """UMX exchange class.
 
-
-class Xcoin(Exchange):
-    """XCoin exchange class.
-
-    XCoin is not provided by ccxt, so this subclass injects a small ccxt-like
+    UMX is not provided by ccxt, so this subclass injects a small ccxt-like
     REST wrapper while keeping Freqtrade's regular Exchange call path intact.
 
-    Supports spot trading and U-margined linear perpetuals (cross margin). XCoin
+    Supports spot trading and U-margined linear perpetuals (cross margin). UMX
     only offers coin-level cross leverage (no isolated mode), so the futures
     margin mode is fixed to ``CROSS``.
     """
@@ -39,11 +34,13 @@ class Xcoin(Exchange):
         "l2_limit_upper": 5000,
         "order_time_in_force": ["GTC", "IOC", "FOK"],
         "stoploss_on_exchange": False,
-        "tickers_have_bid_ask": True,
+        # The batch /ticker/mini payload has no bid/ask fields. Single-symbol fetch_ticker
+        # supplements these from depth, but pairlist filters consume the batch response.
+        "tickers_have_bid_ask": False,
         "tickers_have_price": True,
         "exchange_has_overrides": {
             "createMarketOrder": True,
-            "fetchMyTrades": False,
+            "fetchMyTrades": True,
             "fetchTrades": False,
         },
     }
@@ -52,16 +49,22 @@ class Xcoin(Exchange):
         "mark_ohlcv_price": "mark",
         "mark_ohlcv_timeframe": "1h",
         "funding_fee_timeframe": "1h",
+        # UMX totalEquity is account equity and already contains open-position UPL.
+        # Wallets subtracts that UPL before exposing Wallet.total to avoid double counting it.
+        "balance_includes_unrealized_pnl": True,
         "uses_leverage_tiers": False,
         "exchange_has_overrides": {
             "fetchMarkOHLCV": True,
             "fetchIndexOHLCV": True,
             "fetchPositions": True,
+            "fetchLeverage": True,
+            "fetchFundingRate": True,
             "setLeverage": True,
-            # XCoin has no per-symbol margin-mode switch (always cross) and exposes no
+            # UMX has no per-symbol margin-mode switch (always cross) and exposes no
             # leverage-tier endpoints usable by Freqtrade.
             "setMarginMode": False,
             "fetchFundingRateHistory": True,
+            "fetchFundingHistory": True,
             "fetchLeverageTiers": False,
             "fetchMarketLeverageTiers": False,
         },
@@ -74,31 +77,54 @@ class Xcoin(Exchange):
 
     def _init_ccxt(
         self, exchange_config: ExchangeConfig, sync: bool, ccxt_kwargs: dict[str, Any]
-    ) -> XCoinSync:
+    ) -> UMXSync:
+        removed_options = sorted(
+            key for key in exchange_config if str(key).lower().startswith("xcoin_")
+        )
+        if removed_options:
+            joined = ", ".join(f"exchange.{key}" for key in removed_options)
+            raise OperationalException(
+                f"Removed XCoin configuration option(s): {joined}. Use UMX configuration only."
+            )
+
         if self.trading_mode not in (TradingMode.SPOT, TradingMode.FUTURES):
             raise OperationalException(
-                "XCoin adapter supports spot and U-margined perpetual (futures) trading only."
+                "UMX adapter supports spot and U-margined perpetual (futures) trading only."
             )
         if self.trading_mode == TradingMode.FUTURES and self.margin_mode != MarginMode.CROSS:
             raise OperationalException(
-                "XCoin futures trading only supports cross margin mode. Set `margin_mode: cross`."
+                "UMX futures trading only supports cross margin mode. Set `margin_mode: cross`."
             )
 
-        live_enabled = exchange_config.get("xcoin_live_trading_enabled", False)
+        live_enabled = exchange_config.get("umx_live_trading_enabled", False)
         if not self._config.get("dry_run", True) and not live_enabled:
             raise OperationalException(
-                "XCoin live trading is disabled. Set "
-                "`exchange.xcoin_live_trading_enabled=true` explicitly after dry-run testing."
+                "UMX live trading is disabled. Set "
+                "`exchange.umx_live_trading_enabled=true` explicitly after dry-run testing."
             )
 
-        api_key = os.environ.get("FREQTRADE__EXCHANGE__KEY") or os.environ.get("XCOIN_API_KEY")
+        api_key = os.environ.get("FREQTRADE__EXCHANGE__KEY") or os.environ.get("UMX_API_KEY")
         api_secret = os.environ.get("FREQTRADE__EXCHANGE__SECRET") or os.environ.get(
-            "XCOIN_API_SECRET"
+            "UMX_API_SECRET"
         )
         if not self._config.get("dry_run", True) and (not api_key or not api_secret):
             raise OperationalException(
-                "XCoin live trading requires API credentials from environment variables "
+                "UMX live trading requires API credentials from environment variables "
                 "`FREQTRADE__EXCHANGE__KEY` and `FREQTRADE__EXCHANGE__SECRET`."
+            )
+
+        configured_base_urls = [
+            exchange_config.get("umx_base_url"),
+            exchange_config.get("base_url"),
+            ccxt_kwargs.get("base_url"),
+        ]
+        if any(
+            value and str(value).rstrip("/") != UMX_DEFAULT_BASE_URL
+            for value in configured_base_urls
+        ):
+            raise OperationalException(
+                f"UMX REST host is fixed to `{UMX_DEFAULT_BASE_URL}`; "
+                "custom base URLs are disabled."
             )
 
         sanitized_ccxt_kwargs = {
@@ -113,28 +139,29 @@ class Xcoin(Exchange):
                 "password",
                 "privateKey",
                 "private_key",
+                "base_url",
             }
         }
         business_type = (
-            XCOIN_BUSINESS_LINEAR_PERPETUAL
+            UMX_BUSINESS_LINEAR_PERPETUAL
             if self.trading_mode == TradingMode.FUTURES
-            else XCOIN_BUSINESS_SPOT
+            else UMX_BUSINESS_SPOT
         )
         wrapper_config = {
             "apiKey": api_key or "",
             "secret": api_secret or "",
             "accountName": exchange_config.get("account_name")
             or exchange_config.get("accountName")
-            or os.environ.get("XCOIN_ACCOUNT_NAME", ""),
-            "base_url": exchange_config.get("xcoin_base_url")
-            or exchange_config.get("base_url")
-            or XCOIN_DEFAULT_BASE_URL,
-            "timeout": exchange_config.get("xcoin_timeout", 10),
+            or os.environ.get("UMX_ACCOUNT_NAME", ""),
+            "base_url": UMX_DEFAULT_BASE_URL,
+            "timeout": exchange_config.get("umx_timeout", 10),
             "default_business_type": business_type,
+            # This is Freqtrade's history-download shard width, not UMX's settlement cadence.
+            "funding_fee_timeframe": self._ft_has["funding_fee_timeframe"],
         }
         wrapper_config.update(sanitized_ccxt_kwargs)
 
-        return XCoinSync(wrapper_config) if sync else XCoinAsync(wrapper_config)
+        return UMXSync(wrapper_config) if sync else UMXAsync(wrapper_config)
 
     def dry_run_liquidation_price(
         self,
@@ -149,7 +176,7 @@ class Xcoin(Exchange):
     ) -> float | None:
         """Approximate cross-margin liquidation price for dry-run / backtesting.
 
-        XCoin uses coin-level cross margin and exposes no leverage-tier table, so the
+        UMX uses coin-level cross margin and exposes no leverage-tier table, so the
         core ISOLATED formula does not apply. We approximate the liquidation price from
         the wallet balance available as margin and the maintenance-margin ratio derived
         from ``riskEngineRate``. Returns ``None`` when it cannot be computed safely; the
@@ -180,9 +207,9 @@ class Xcoin(Exchange):
         pair: str,
         notional_value: float,
     ) -> tuple[float, float | None]:
-        """Maintenance margin ratio from XCoin's ``riskEngineRate`` (no leverage tiers).
+        """Maintenance margin ratio from UMX's ``riskEngineRate`` (no leverage tiers).
 
-        Returns ``(mm_ratio, None)`` — XCoin has no per-tier maintenance amount.
+        Returns ``(mm_ratio, None)`` — UMX has no per-tier maintenance amount.
         """
         market = self.markets.get(pair, {})
         risk_rate = market.get("info", {}).get("riskEngineRate")
@@ -191,22 +218,6 @@ class Xcoin(Exchange):
                 f"Maintenance margin rate for {pair} is unavailable for {self.name}"
             )
         return (float(risk_rate), None)
-
-    def get_funding_fees(
-        self, pair: str, amount: float, is_short: bool, open_date: datetime
-    ) -> float:
-        """Calculate futures funding fees from funding-rate history.
-
-        XCoin exposes funding-rate history, but no settled funding-fee ledger
-        compatible with ccxt's ``fetch_funding_history``. Use the same
-        calculation path as other futures exchanges without that ledger.
-        """
-        if self.trading_mode == TradingMode.FUTURES:
-            try:
-                return self._fetch_and_calculate_funding_fees(pair, amount, is_short, open_date)
-            except ExchangeError:
-                logger.warning(f"Could not update funding fees for {pair}.")
-        return 0.0
 
     def validate_existing_positions(
         self, positions: dict[str, Any], open_trades: list[Any]
@@ -262,7 +273,7 @@ class Xcoin(Exchange):
         if conflicts:
             details = "; ".join(conflicts)
             raise OperationalException(
-                "XCoin trading blocked because live futures positions conflict with the "
+                "UMX trading blocked because live futures positions conflict with the "
                 f"trade database: {details}. Reconcile or close the conflicting positions "
                 "before starting or resuming the bot. Use a dedicated exchange account to prevent "
                 "untracked positions from being netted into new trades."

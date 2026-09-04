@@ -1,13 +1,13 @@
-name: XCoin feature request
-description: Propose an improvement specific to the WaterWoods XCoin integration.
-title: "[XCoin Feature]: "
+name: UMX feature request
+description: Propose an improvement specific to the WaterWoods UMX integration.
+title: "[UMX Feature]: "
 body:
   - type: checkboxes
     id: routing
     attributes:
       label: Scope
       options:
-        - label: This request is specific to XCoin and does not belong in official Freqtrade.
+        - label: This request is specific to UMX and does not belong in official Freqtrade.
           required: true
         - label: I searched existing WaterWoods issues and pull requests for the same request.
           required: true

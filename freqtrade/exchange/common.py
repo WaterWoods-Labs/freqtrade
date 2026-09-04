@@ -69,7 +69,7 @@ SUPPORTED_EXCHANGES = [
 ]
 
 NATIVE_EXCHANGES = [
-    "xcoin",
+    "umx",
 ]
 
 # either the main, or replacement methods (array) is required

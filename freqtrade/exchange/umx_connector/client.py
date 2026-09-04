@@ -1,8 +1,8 @@
-"""Low-level XCoin REST connector.
+"""Low-level UMX REST connector.
 
 This module intentionally stays free of Freqtrade exchange semantics. It owns
 HTTP transport, authentication, response validation, endpoint paths, and small
-request-shaping helpers. The ccxt-like response parsing lives in xcoin_api.py.
+request-shaping helpers. The ccxt-like response parsing lives in umx_api.py.
 """
 
 import hmac
@@ -15,23 +15,29 @@ from urllib.parse import urlencode
 import ccxt
 import requests
 
-from freqtrade.exchange.xcoin_connector.constants import (
-    XCOIN_BUSINESS_SPOT,
-    XCOIN_DEFAULT_BASE_URL,
+from freqtrade.exchange.umx_connector.constants import (
+    UMX_BUSINESS_SPOT,
+    UMX_DEFAULT_BASE_URL,
 )
 
 
-class XCoinClient:
-    """Thin XCoin REST client used by the Freqtrade exchange facade."""
+class UMXClient:
+    """Thin UMX REST client used by the Freqtrade exchange facade."""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
+        configured_base_url = config.get("base_url")
+        if configured_base_url and str(configured_base_url).rstrip("/") != UMX_DEFAULT_BASE_URL:
+            raise ccxt.BadRequest(
+                f"UMX REST host is fixed to `{UMX_DEFAULT_BASE_URL}`; "
+                "custom base URLs are disabled."
+            )
         self.api_key = config.get("apiKey") or ""
         self.api_secret = config.get("secret") or ""
         self.password = config.get("password") or ""
         self.uid = config.get("uid") or ""
         self.account_name = config.get("accountName") or config.get("account_name") or ""
-        self.base_url = (config.get("base_url") or XCOIN_DEFAULT_BASE_URL).rstrip("/")
+        self.base_url = UMX_DEFAULT_BASE_URL
         self.timeout = config.get("timeout", 10)
         self._http = requests.Session()
 
@@ -56,7 +62,7 @@ class XCoinClient:
         headers = {"Content-Type": "application/json"}
         if private:
             if not self.api_key or not self.api_secret:
-                raise ccxt.AuthenticationError("XCoin API credentials are required")
+                raise ccxt.AuthenticationError("UMX API credentials are required")
             timestamp = str(self.milliseconds())
             headers.update(
                 {
@@ -79,19 +85,23 @@ class XCoinClient:
             raise ccxt.NetworkError(str(e)) from e
 
         if response.status_code == 429:
-            raise ccxt.DDoSProtection(f"XCoin HTTP {response.status_code}: {response.text}")
+            raise ccxt.DDoSProtection(f"UMX HTTP {response.status_code}: {response.text}")
+        if response.status_code == 403 and self._is_waf_response(response):
+            raise ccxt.DDoSProtection(f"UMX WAF HTTP 403: {response.text}")
+        if response.status_code in {401, 403}:
+            raise ccxt.AuthenticationError(f"UMX HTTP {response.status_code}: {response.text}")
         if response.status_code >= 500:
-            raise ccxt.ExchangeNotAvailable(f"XCoin HTTP {response.status_code}")
+            raise ccxt.ExchangeNotAvailable(f"UMX HTTP {response.status_code}")
         if response.status_code != 200:
-            raise ccxt.ExchangeError(f"XCoin HTTP {response.status_code}: {response.text}")
+            raise ccxt.ExchangeError(f"UMX HTTP {response.status_code}: {response.text}")
         try:
             payload = response.json()
         except ValueError as e:
-            raise ccxt.ExchangeError("XCoin returned invalid JSON") from e
+            raise ccxt.ExchangeError("UMX returned invalid JSON") from e
         return self._handle_response(payload)
 
     def public_symbols(
-        self, params: dict[str, Any] | None = None, business_type: str = XCOIN_BUSINESS_SPOT
+        self, params: dict[str, Any] | None = None, business_type: str = UMX_BUSINESS_SPOT
     ) -> dict[str, Any]:
         return self.request(
             "GET",
@@ -103,7 +113,7 @@ class XCoinClient:
         self,
         symbol: str | None = None,
         params: dict[str, Any] | None = None,
-        business_type: str = XCOIN_BUSINESS_SPOT,
+        business_type: str = UMX_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         request_params = {"businessType": business_type, **(params or {})}
         if symbol:
@@ -114,7 +124,7 @@ class XCoinClient:
         self,
         symbol: str | None = None,
         params: dict[str, Any] | None = None,
-        business_type: str = XCOIN_BUSINESS_SPOT,
+        business_type: str = UMX_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         request_params = {"businessType": business_type, **(params or {})}
         if symbol:
@@ -126,7 +136,7 @@ class XCoinClient:
         symbol: str,
         limit: int | None = 100,
         params: dict[str, Any] | None = None,
-        business_type: str = XCOIN_BUSINESS_SPOT,
+        business_type: str = UMX_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         return self.request(
             "GET",
@@ -147,7 +157,7 @@ class XCoinClient:
         since: int | None = None,
         limit: int | None = None,
         params: dict[str, Any] | None = None,
-        business_type: str = XCOIN_BUSINESS_SPOT,
+        business_type: str = UMX_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         request_params = {
             "businessType": business_type,
@@ -168,7 +178,7 @@ class XCoinClient:
         since: int | None = None,
         limit: int | None = None,
         params: dict[str, Any] | None = None,
-        business_type: str = XCOIN_BUSINESS_SPOT,
+        business_type: str = UMX_BUSINESS_SPOT,
     ) -> dict[str, Any]:
         request_params = {
             "businessType": business_type,
@@ -261,7 +271,20 @@ class XCoinClient:
             private=True,
         )
 
+    def leverage(self, symbol: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            "/v1/trade/lever",
+            params=self.private_params({**(params or {}), "symbol": symbol}),
+            private=True,
+        )
+
     def place_order(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Submit one order exactly once.
+
+        This write is intentionally not retried: a timeout or throttling response does not
+        prove that UMX rejected the original order.
+        """
         return self.request(
             "POST",
             "/v2/trade/order",
@@ -293,6 +316,57 @@ class XCoinClient:
             private=True,
         )
 
+    def trade_history(
+        self,
+        *,
+        symbol: str | None = None,
+        business_type: str | None = None,
+        begin_time: int | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_params = dict(params or {})
+        if symbol:
+            request_params["symbol"] = symbol
+        if business_type:
+            request_params["businessType"] = business_type
+        if begin_time is not None:
+            request_params["beginTime"] = begin_time
+        if limit is not None:
+            request_params["limit"] = min(limit, 100)
+        return self.request(
+            "GET",
+            "/v2/history/trades",
+            params=self.private_params(request_params),
+            private=True,
+        )
+
+    def bills(
+        self,
+        *,
+        business_type: str,
+        action_type: str,
+        begin_time: int | None = None,
+        end_time: int | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_params = dict(params or {})
+        request_params["businessType"] = business_type
+        request_params["actionType"] = action_type
+        if begin_time is not None:
+            request_params["beginTime"] = begin_time
+        if end_time is not None:
+            request_params["endTime"] = end_time
+        if limit is not None:
+            request_params["limit"] = min(limit, 100)
+        return self.request(
+            "GET",
+            "/v1/history/bill",
+            params=self.private_params(request_params),
+            private=True,
+        )
+
     def private_params(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         result = dict(params or {})
         if self.account_name and "accountName" not in result:
@@ -313,12 +387,24 @@ class XCoinClient:
         clean = {k: v for k, v in data.items() if v is not None}
         return json.dumps(clean, separators=(",", ":"), ensure_ascii=False)
 
+    @staticmethod
+    def _is_waf_response(response: requests.Response) -> bool:
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", "")).lower()
+        text = str(getattr(response, "text", "")).lower()
+        return (
+            "text/html" in content_type
+            or "<html" in text
+            or "cloudflare" in text
+            or "access too frequent" in text
+            or "request blocked" in text
+        )
+
     def _handle_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         code = str(payload.get("code", "0"))
         if code == "0":
             return payload
-        msg = payload.get("msg") or payload.get("message") or "XCoin API error"
-        if code in {"10005", "10006", "11004", "14001"}:
+        msg = payload.get("msg") or payload.get("message") or "UMX API error"
+        if code in {"10005", "10006", "10008", "11004", "14001"}:
             raise ccxt.DDoSProtection(msg)
         if code in {
             "10101",
@@ -340,8 +426,10 @@ class XCoinClient:
             raise ccxt.AuthenticationError(msg)
         if code in {"40013", "20010"}:
             raise ccxt.OrderNotFound(msg)
-        if code in {"60100", "60101", "60102", "60103", "60104", "60106"}:
+        if code in {"60100", "60101", "60102", "60103", "60104", "60105", "60106"}:
             raise ccxt.InsufficientFunds(msg)
+        if code.startswith("2"):
+            raise ccxt.ExchangeNotAvailable(msg)
         if code.startswith(("5", "4", "601")):
             raise ccxt.InvalidOrder(msg)
         raise ccxt.ExchangeError(f"{code}: {msg}")

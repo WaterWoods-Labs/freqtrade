@@ -5,12 +5,12 @@
 Use this repository's issue forms for reproducible problems or feature requests that are specific
 to one of these independent products:
 
-- XCoin adapter, exchange behavior, or `xcoin-*` release pipeline;
+- UMX adapter, exchange behavior, or `umx-*` release pipeline;
 - Binance standard Portfolio Margin/PAPI adapter, safety behavior, or
   `binance-portfolio-margin-*` release pipeline.
 
-Select the issue form for the affected product. Do not report XCoin behavior through a Binance
-Portfolio Margin form or PAPI behavior through an XCoin form.
+Select the issue form for the affected product. Do not report UMX behavior through a Binance
+Portfolio Margin form or PAPI behavior through a UMX form.
 
 Include an immutable release tag, image digest, or commit SHA. Start from dry-run whenever the
 problem can be reproduced safely. Sanitize every configuration and log before attaching it.
