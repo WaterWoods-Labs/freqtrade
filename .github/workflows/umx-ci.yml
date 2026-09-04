@@ -1,12 +1,14 @@
-name: XCoin CI
+name: UMX CI
 
 on:
   pull_request:
     branches:
       - xcoin
+      - umx
   push:
     branches:
       - xcoin
+      - umx
   workflow_dispatch:
     inputs:
       full:
@@ -16,7 +18,7 @@ on:
         type: boolean
 
 concurrency:
-  group: xcoin-ci-${{ github.ref }}-${{ github.event_name }}
+  group: umx-ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -33,7 +35,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Enforce XCoin-only product boundary
+      - name: Enforce UMX-only product boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -44,15 +46,15 @@ jobs:
           # as a boundary violation even though the boundary was intact, blocking security
           # updates. Assert the ref instead of re-fetching it.
           if ! git rev-parse --verify --quiet origin/develop >/dev/null; then
-            echo "::error title=XCoin product boundary check unavailable::origin/develop is missing; checkout must use fetch-depth: 0"
+            echo "::error title=UMX product boundary check unavailable::origin/develop is missing; checkout must use fetch-depth: 0"
             exit 1
           fi
 
           if ! git diff --quiet origin/develop -- freqtrade/exchange/binance.py; then
-            echo "::error title=XCoin product boundary violation::freqtrade/exchange/binance.py differs from origin/develop"
+            echo "::error title=UMX product boundary violation::freqtrade/exchange/binance.py differs from origin/develop"
             git diff --stat origin/develop -- freqtrade/exchange/binance.py
             {
-              echo "## XCoin product boundary violation"
+              echo "## UMX product boundary violation"
               echo
               echo '`freqtrade/exchange/binance.py` must remain identical to `origin/develop`.'
             } >> "$GITHUB_STEP_SUMMARY"
@@ -61,10 +63,10 @@ jobs:
 
           forbidden_markers='portfolio_margin_risk|_portfolio_algo_request|_portfolio_margin_params|portfolio_margin_enabled|portfolio_margin_unknown_order_latched|cleanup_portfolio_margin_unknown_conditional_order|is_portfolio_margin_position_flat|papi(Get|Post|Delete)(Um|Cm|Margin)|Binance Portfolio Margin'
           if matches="$(git grep -n -E "$forbidden_markers" -- freqtrade tests build_helpers/schema.json)"; then
-            echo "::error title=XCoin product boundary violation::WaterWoods Binance PAPI markers were found"
+            echo "::error title=UMX product boundary violation::WaterWoods Binance PAPI markers were found"
             printf '%s\n' "$matches"
             {
-              echo "## XCoin product boundary violation"
+              echo "## UMX product boundary violation"
               echo
               echo "WaterWoods Binance PAPI markers were found:"
               echo '```text'
@@ -75,7 +77,7 @@ jobs:
           fi
 
           {
-            echo "### XCoin product boundary"
+            echo "### UMX product boundary"
             echo
             echo '- `freqtrade/exchange/binance.py` matches `origin/develop`.'
             echo '- No WaterWoods Binance PAPI markers were found.'
@@ -98,10 +100,10 @@ jobs:
       - name: Run pre-commit
         run: pre-commit run --all-files
 
-      - name: Run focused XCoin tests
+      - name: Run focused UMX tests
         run: |
           pytest -q \
-            tests/exchange/test_xcoin.py \
+            tests/exchange/test_umx.py \
             tests/freqtradebot/test_freqtradebot.py \
             tests/persistence/test_migrations.py \
             tests/persistence/test_persistence.py \
@@ -111,9 +113,10 @@ jobs:
     name: Full upstream compatibility
     if: >-
       ${{
-        (github.event_name == 'push' && github.ref == 'refs/heads/xcoin') ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/xcoin' || github.ref == 'refs/heads/umx')) ||
         (github.event_name == 'workflow_dispatch' && inputs.full) ||
-        (github.event_name == 'pull_request' && github.head_ref == 'sync/upstream-develop')
+        (github.event_name == 'pull_request' && github.head_ref == 'feature/umx-hard-cut') ||
+        (github.event_name == 'pull_request' && github.head_ref == 'sync/umx-upstream-develop')
       }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90

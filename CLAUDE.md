@@ -1,22 +1,22 @@
-# WaterWoods XCoin Claude Code instructions
+# WaterWoods UMX Claude Code instructions
 
 ## Source of truth
 
-- This repository's XCoin product integration branch is `xcoin`; it is not the official Freqtrade
+- This repository's UMX product integration branch is `umx`; it is not the official Freqtrade
   `develop` or `stable` mirror and not Binance Portfolio Margin.
-- Read `docs/xcoin-maintenance.md` before changing product code, synchronization workflows, CI,
+- Read `docs/umx-maintenance.md` before changing product code, synchronization workflows, CI,
   dependencies, branches, tags, releases, or images.
 - For generic Freqtrade behavior, consult the repository documentation and compare the current
   official upstream source. Recheck volatile GitHub facts instead of relying on saved notes.
 
 ## Product boundary
 
-- Put XCoin adapter and related core changes on a feature or fix branch created from
-  `origin/xcoin` and return them through a pull request to `xcoin`.
+- Put UMX adapter and related core changes on a feature or fix branch created from
+  `origin/umx` and return them through a pull request to `umx`.
 - Never add Binance Portfolio Margin/PAPI code, configuration, fixtures, workflow behavior, or
   image references to this product.
 - Treat `develop` and `stable` as read-only WaterWoods mirrors of official Freqtrade. Do not develop
-  on them or merge `binance-portfolio-margin` into `xcoin`.
+  on them or merge `binance-portfolio-margin` into `umx`.
 
 ## Working method
 
@@ -31,10 +31,10 @@
 
 ## Validation
 
-- Run `pytest tests/exchange/test_xcoin.py` for focused adapter changes.
+- Run `pytest tests/exchange/test_umx.py` for focused adapter changes.
 - Run the relevant broader tests and pre-commit checks when core, configuration, packaging, or
   workflow behavior changes.
-- Preserve the XCoin-only boundary enforced by `.github/workflows/xcoin-ci.yml` and require exact
+- Preserve the UMX-only boundary enforced by `.github/workflows/umx-ci.yml` and require exact
   target-SHA CI before any release decision.
 
 ## Secrets and runtime safety

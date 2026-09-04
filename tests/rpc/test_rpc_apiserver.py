@@ -2789,6 +2789,11 @@ def test_api_exchanges(botclient):
     response = rc.json()
     assert isinstance(response["exchanges"], list)
     assert len(response["exchanges"]) > 20
+    umx = next(x for x in response["exchanges"] if x["classname"] == "umx")
+    assert umx["name"] == "UMX"
+    assert umx["valid"] is True
+    assert umx["comment"] == "Native Freqtrade adapter (not provided by ccxt)."
+    assert {mode["trading_mode"] for mode in umx["trade_modes"]} == {"spot", "futures"}
     okx = next(x for x in response["exchanges"] if x["classname"] == "okx")
     assert okx == {
         "classname": "okx",

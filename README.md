@@ -1,19 +1,19 @@
 # ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade_poweredby.svg)
 
-[![XCoin CI](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/xcoin-ci.yml/badge.svg?branch=xcoin)](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/xcoin-ci.yml)
-[![Latest XCoin release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=xcoin-*&label=XCoin%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases?q=xcoin-&expanded=true)
+[![UMX CI](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/umx-ci.yml/badge.svg?branch=umx)](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/umx-ci.yml)
+[![Latest UMX release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=umx-*&label=UMX%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases?q=umx-&expanded=true)
 [![Binance Portfolio Margin CI](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/binance-portfolio-margin-ci.yml/badge.svg?branch=binance-portfolio-margin)](https://github.com/WaterWoods-Labs/freqtrade/actions/workflows/binance-portfolio-margin-ci.yml)
 [![Latest Binance Portfolio Margin release](https://img.shields.io/github/v/release/WaterWoods-Labs/freqtrade?filter=binance-portfolio-margin-*&label=Portfolio%20Margin%20release)](https://github.com/WaterWoods-Labs/freqtrade/releases?q=binance-portfolio-margin-&expanded=true)
 
 ## WaterWoods Freqtrade products
 
-This fork hosts two deliberately independent WaterWoods products. The default branch is `xcoin`;
-it is the repository landing page and the only long-lived XCoin integration branch. Binance
+This fork hosts two deliberately independent WaterWoods products. The default branch is `umx`;
+it is the repository landing page and the only long-lived UMX integration branch. Binance
 Portfolio Margin/PAPI source lives only on `binance-portfolio-margin`.
 
 | Product | Source branch | Supported integration | Releases and image |
 | --- | --- | --- | --- |
-| XCoin | [`xcoin`](https://github.com/WaterWoods-Labs/freqtrade/tree/xcoin) (default) | XCoin spot and USDT perpetual futures; futures use cross margin | [XCoin releases](https://github.com/WaterWoods-Labs/freqtrade/releases?q=xcoin-&expanded=true); `ghcr.io/waterwoods-labs/freqtrade-xcoin` |
+| UMX | [`umx`](https://github.com/WaterWoods-Labs/freqtrade/tree/umx) (default) | UMX spot and USDT perpetual futures; futures use cross margin | [UMX releases](https://github.com/WaterWoods-Labs/freqtrade/releases?q=umx-&expanded=true); `ghcr.io/waterwoods-labs/freqtrade-umx` |
 | Binance Portfolio Margin | [`binance-portfolio-margin`](https://github.com/WaterWoods-Labs/freqtrade/tree/binance-portfolio-margin) | Binance standard Portfolio Margin, USD-M, cross margin, one-way mode through PAPI | [Binance Portfolio Margin releases](https://github.com/WaterWoods-Labs/freqtrade/releases?q=binance-portfolio-margin-&expanded=true); `ghcr.io/waterwoods-labs/freqtrade-binance-portfolio-margin` |
 
 The products have independent CI, release tags, images, maintenance rules, and runtime credentials.
@@ -24,7 +24,7 @@ container tag.
 Repository branch roles are:
 
 - `develop` and `stable` are read-only, fast-forward mirrors of official Freqtrade.
-- `xcoin` accepts only XCoin changes; read [XCoin maintenance](docs/xcoin-maintenance.md).
+- `umx` accepts only UMX changes; read [UMX maintenance](docs/umx-maintenance.md).
 - `binance-portfolio-margin` accepts only Binance Portfolio Margin/PAPI changes; read its
   [product maintenance policy](https://github.com/WaterWoods-Labs/freqtrade/blob/binance-portfolio-margin/docs/binance-portfolio-margin-maintenance.md).
 

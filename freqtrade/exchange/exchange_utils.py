@@ -25,6 +25,7 @@ from freqtrade.exchange.common import (
     EXCHANGE_HAS_OPTIONAL_FUTURES,
     EXCHANGE_HAS_REQUIRED,
     MAP_EXCHANGE_CHILDCLASS,
+    NATIVE_EXCHANGES,
     SUPPORTED_EXCHANGES,
 )
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_minutes, timeframe_to_prev_date
@@ -48,10 +49,14 @@ def ccxt_exchanges(ccxt_module: CcxtModuleType | None = None) -> list[str]:
 
 def available_exchanges(ccxt_module: CcxtModuleType | None = None) -> list[str]:
     """
-    Return exchanges available to the bot, i.e. non-bad exchanges in the ccxt list
+    Return exchanges available to the bot: usable ccxt exchanges plus native adapters.
+
+    Native adapters are appended without passing through ccxt validation. This keeps ccxt's
+    capability, blacklist, and version semantics scoped to exchanges ccxt actually owns.
     """
     exchanges = ccxt_exchanges(ccxt_module)
-    return [x for x in exchanges if validate_exchange(x)[0]]
+    available_ccxt = [x for x in exchanges if validate_exchange(x)[0]]
+    return [*available_ccxt, *(x for x in NATIVE_EXCHANGES if x not in available_ccxt)]
 
 
 def _exchange_has_helper(ex_mod: ccxt.Exchange, required: dict[str, list[str]]) -> list[str]:
@@ -111,24 +116,38 @@ def _build_exchange_list_entry(
     exchange_name: str, exchangeClasses: dict[str, Any]
 ) -> ValidExchangesType:
     exchange_name = exchange_name.lower()
-    valid, comment, comment_fut, ex_mod = validate_exchange(exchange_name)
     mapped_exchange_name = MAP_EXCHANGE_CHILDCLASS.get(exchange_name, exchange_name).lower()
-    is_alias = getattr(ex_mod, "alias", False)
-    result: ValidExchangesType = {
-        "name": getattr(ex_mod, "name", exchange_name),
-        "classname": exchange_name,
-        "valid": valid,
-        "supported": mapped_exchange_name in SUPPORTED_EXCHANGES and not is_alias,
-        "comment": comment,
-        "comment_futures": comment_fut,
-        "dex": getattr(ex_mod, "dex", False),
-        "is_alias": is_alias,
-        "alias_for": inspect.getmro(ex_mod.__class__)[1]().id
-        if getattr(ex_mod, "alias", False)
-        else None,
-        "trade_modes": [{"trading_mode": "spot", "margin_mode": ""}],
-    }
-    if resolved := exchangeClasses.get(mapped_exchange_name):
+    resolved = exchangeClasses.get(mapped_exchange_name)
+    if exchange_name in NATIVE_EXCHANGES:
+        result: ValidExchangesType = {
+            "name": resolved["name"] if resolved else exchange_name,
+            "classname": exchange_name,
+            "valid": True,
+            # This flag means supported by upstream Freqtrade, not merely available locally.
+            "supported": False,
+            "comment": "Native Freqtrade adapter (not provided by ccxt).",
+            "comment_futures": "",
+            "dex": False,
+            "is_alias": False,
+            "alias_for": None,
+            "trade_modes": [{"trading_mode": "spot", "margin_mode": ""}],
+        }
+    else:
+        valid, comment, comment_fut, ex_mod = validate_exchange(exchange_name)
+        is_alias = getattr(ex_mod, "alias", False)
+        result = {
+            "name": getattr(ex_mod, "name", exchange_name),
+            "classname": exchange_name,
+            "valid": valid,
+            "supported": mapped_exchange_name in SUPPORTED_EXCHANGES and not is_alias,
+            "comment": comment,
+            "comment_futures": comment_fut,
+            "dex": getattr(ex_mod, "dex", False),
+            "is_alias": is_alias,
+            "alias_for": inspect.getmro(ex_mod.__class__)[1]().id if is_alias else None,
+            "trade_modes": [{"trading_mode": "spot", "margin_mode": ""}],
+        }
+    if resolved:
         supported_modes: list[TradeModeType] = [
             {"trading_mode": tm.value, "margin_mode": mm.value}
             for tm, mm in resolved["class"]._supported_trading_mode_margin_pairs
@@ -146,7 +165,8 @@ def list_available_exchanges(all_exchanges: bool) -> list[ValidExchangesType]:
     """
     :return: List of tuples with exchangename, valid, reason.
     """
-    exchanges = ccxt_exchanges() if all_exchanges else available_exchanges()
+    ccxt_candidates = ccxt_exchanges() if all_exchanges else available_exchanges()
+    exchanges = [*ccxt_candidates, *(x for x in NATIVE_EXCHANGES if x not in ccxt_candidates)]
     from freqtrade.resolvers.exchange_resolver import ExchangeResolver
 
     subclassed = {e["name"].lower(): e for e in ExchangeResolver.search_all_objects({}, False)}
@@ -342,7 +362,7 @@ def price_to_precision(
             precision = FtPrecise(price_precision)
             price_str = FtPrecise(price)
             missing = price_str % precision
-            if not missing == FtPrecise("0"):
+            if missing != FtPrecise("0"):
                 if rounding_mode == ROUND_UP:
                     res = price_str - missing + precision
                 elif rounding_mode == ROUND_DOWN:

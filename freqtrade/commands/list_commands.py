@@ -32,7 +32,7 @@ def start_list_exchanges(args: dict[str, Any]) -> None:
     else:
         if args["list_exchanges_all"]:
             title = (
-                f"All exchanges supported by the ccxt library "
+                f"All ccxt exchanges and native Freqtrade adapters "
                 f"({len(available_exchanges)} exchanges):"
             )
         else:
@@ -136,11 +136,11 @@ def _print_objs_tabular(objs: list, print_colorized: bool) -> None:
             )
     table = Table()
 
-    for header in objs_to_print[0].keys():
+    for header in objs_to_print[0]:
         table.add_column(header.capitalize(), justify="right")
 
     for row in objs_to_print:
-        table.add_row(*[row[header] for header in objs_to_print[0].keys()])
+        table.add_row(*[row[header] for header in objs_to_print[0]])
 
     console = get_rich_console(color_system="auto" if print_colorized else None)
     console.print(table)

@@ -69,7 +69,7 @@ SUPPORTED_EXCHANGES = [
 ]
 
 NATIVE_EXCHANGES = [
-    "xcoin",
+    "umx",
 ]
 
 # either the main, or replacement methods (array) is required
@@ -157,7 +157,7 @@ def retrier_async(f):
                 return await wrapper(*args, **kwargs)
             else:
                 logger.warning(msg + "Giving up.")
-                raise ex
+                raise
 
     return wrapper
 
@@ -199,7 +199,7 @@ def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):
                     return wrapper(*args, **kwargs)
                 else:
                     logger.warning(msg + "Giving up.")
-                    raise ex
+                    raise
 
         return cast(F, wrapper)
 

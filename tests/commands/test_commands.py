@@ -146,6 +146,7 @@ def test_list_exchanges(capsys):
     assert re.search(r".*Exchanges available for Freqtrade.*", captured.out)
     assert re.search(r".*binance.*", captured.out)
     assert re.search(r".*bybit.*", captured.out)
+    assert re.search(r".*umx.*", captured.out, re.IGNORECASE)
 
     # Test with --one-column
     args = [
@@ -157,6 +158,7 @@ def test_list_exchanges(capsys):
     captured = capsys.readouterr()
     assert re.search(r"^binance$", captured.out, re.MULTILINE)
     assert re.search(r"^bybit$", captured.out, re.MULTILINE)
+    assert re.search(r"^umx$", captured.out, re.MULTILINE)
     # An exchange not supporting futures
     assert re.search(r"^kraken$", captured.out, re.MULTILINE)
 
@@ -168,7 +170,7 @@ def test_list_exchanges(capsys):
 
     start_list_exchanges(get_args(args))
     captured = capsys.readouterr()
-    assert re.search(r"All exchanges supported by the ccxt library.*", captured.out)
+    assert re.search(r"All ccxt exchanges and native Freqtrade adapters.*", captured.out)
     assert re.search(r".*binance.*", captured.out)
     assert re.search(r".*bingx.*", captured.out)
     assert re.search(r".*bitmex.*", captured.out)

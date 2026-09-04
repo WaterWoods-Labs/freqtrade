@@ -7,7 +7,7 @@ body:
     attributes:
       label: Scope
       options:
-        - label: This request is specific to Binance Portfolio Margin/PAPI and does not belong in official Freqtrade or XCoin.
+        - label: This request is specific to Binance Portfolio Margin/PAPI and does not belong in official Freqtrade or UMX.
           required: true
         - label: I searched existing WaterWoods issues and pull requests for the same request.
           required: true

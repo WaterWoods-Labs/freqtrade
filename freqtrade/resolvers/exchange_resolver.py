@@ -8,6 +8,7 @@ from typing import Any
 
 import freqtrade.exchange as exchanges
 from freqtrade.constants import Config, ExchangeConfig
+from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import MAP_EXCHANGE_CHILDCLASS, Exchange
 from freqtrade.resolvers.iresolver import IResolver
 
@@ -36,9 +37,13 @@ class ExchangeResolver(IResolver):
         :param config: configuration dictionary
         """
         exchange_name: str = config["exchange"]["name"]
+        if exchange_name.lower() == "xcoin":
+            raise OperationalException(
+                "Exchange `xcoin` was removed after the UMX rebrand; set `exchange.name` to `umx`."
+            )
         # Map exchange name to avoid duplicate classes for identical exchanges
         exchange_name = MAP_EXCHANGE_CHILDCLASS.get(exchange_name, exchange_name)
-        exchange_name = exchange_name.title()
+        exchange_name = "UMX" if exchange_name.lower() == "umx" else exchange_name.title()
         exchange = None
         try:
             exchange = ExchangeResolver._load_exchange(

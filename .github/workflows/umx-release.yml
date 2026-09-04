@@ -1,12 +1,12 @@
-name: Publish XCoin image
+name: Publish UMX image
 
 on:
   push:
     tags:
-      - "xcoin-*"
+      - "umx-*"
 
 concurrency:
-  group: xcoin-release-${{ github.ref }}
+  group: umx-release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -17,7 +17,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/waterwoods-labs/freqtrade-xcoin
+  IMAGE_NAME: ghcr.io/waterwoods-labs/freqtrade-umx
 
 jobs:
   publish:
@@ -28,20 +28,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify release tag belongs to xcoin
+      - name: Verify release tag belongs to umx
         run: |
-          git fetch origin xcoin
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/xcoin
+          git fetch origin umx
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/umx
 
-      - name: Verify full XCoin CI passed for the release SHA
+      - name: Verify full UMX CI passed for the release SHA
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           run_id="$(
             gh api --method GET \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/xcoin-ci.yml/runs" \
-              -f branch=xcoin \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/umx-ci.yml/runs" \
+              -f branch=umx \
               -f event=push \
               -f head_sha="$GITHUB_SHA" \
               -f status=completed \
@@ -49,11 +49,11 @@ jobs:
               --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id // empty'
           )"
           if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
-            echo "::error title=Release blocked::No successful XCoin CI push run exists for $GITHUB_SHA"
+            echo "::error title=Release blocked::No successful UMX CI push run exists for $GITHUB_SHA"
             {
-              echo "## XCoin release blocked"
+              echo "## UMX release blocked"
               echo
-              echo "No successful XCoin CI push run was found for exact SHA \`$GITHUB_SHA\`."
+              echo "No successful UMX CI push run was found for exact SHA \`$GITHUB_SHA\`."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
@@ -66,19 +66,19 @@ jobs:
               --jq '[.jobs[] | select(.name == "Full upstream compatibility" and .conclusion == "success")][0].id // empty'
           )"
           if [[ ! "$full_job_id" =~ ^[0-9]+$ ]]; then
-            echo "::error title=Release blocked::XCoin CI run $run_id did not complete the full job successfully"
+            echo "::error title=Release blocked::UMX CI run $run_id did not complete the full job successfully"
             {
-              echo "## XCoin release blocked"
+              echo "## UMX release blocked"
               echo
-              echo "XCoin CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) did not contain a successful \`Full upstream compatibility\` job."
+              echo "UMX CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) did not contain a successful \`Full upstream compatibility\` job."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
           {
-            echo "### Exact-SHA XCoin CI gate"
+            echo "### Exact-SHA UMX CI gate"
             echo
-            echo "XCoin CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) passed its full job for \`$GITHUB_SHA\`."
+            echo "UMX CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) passed its full job for \`$GITHUB_SHA\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up QEMU
@@ -133,5 +133,5 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "### XCoin image" >> "$GITHUB_STEP_SUMMARY"
+          echo "### UMX image" >> "$GITHUB_STEP_SUMMARY"
           echo "\`${IMAGE_NAME}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
