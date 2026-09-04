@@ -3,11 +3,9 @@ name: UMX CI
 on:
   pull_request:
     branches:
-      - xcoin
       - umx
   push:
     branches:
-      - xcoin
       - umx
   workflow_dispatch:
     inputs:
@@ -113,9 +111,8 @@ jobs:
     name: Full upstream compatibility
     if: >-
       ${{
-        (github.event_name == 'push' && (github.ref == 'refs/heads/xcoin' || github.ref == 'refs/heads/umx')) ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/umx') ||
         (github.event_name == 'workflow_dispatch' && inputs.full) ||
-        (github.event_name == 'pull_request' && github.head_ref == 'feature/umx-hard-cut') ||
         (github.event_name == 'pull_request' && github.head_ref == 'sync/umx-upstream-develop')
       }}
     runs-on: ubuntu-24.04

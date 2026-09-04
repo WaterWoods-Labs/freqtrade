@@ -26,13 +26,10 @@ UMX CI enforces this boundary. The standard Binance adapter must remain aligned 
 
 Do not commit UMX changes to `develop` or `stable`. Do not force-push any long-lived branch.
 
-The renamed scheduled and release workflows assume that the protected `umx` branch exists and has
-become the repository default branch. Create and protect that branch, update required checks, and
-change the GitHub App name/installation documentation before enabling scheduled or release
-automation. During the first migration pull request, `UMX CI` temporarily listens to both `xcoin`
-and `umx` so its existing `required` job context can protect the legacy-base migration. Remove the
-legacy branch triggers in a follow-up commit only after the remote default branch and protection
-rules have moved to `umx`.
+The scheduled and release workflows require the protected `umx` branch to be the repository
+default. The first migration pull request temporarily made `UMX CI` listen to both the legacy and
+new branches so its existing `required` job context could protect the cutover. After the default
+branch and protection rules move to `umx`, CI must listen only to `umx`.
 
 ## Adapter contract
 
@@ -85,8 +82,11 @@ The UMX synchronization workflow may automatically resolve exactly one known con
 different conflict fails closed and requires manual review; automation must not choose a resolution
 for source, tests, workflows, or other policy files.
 
-The synchronization workflows authenticate through a dedicated GitHub App installed only on
-`WaterWoods-Labs/freqtrade`. The App is named `WaterWoods UMX Mirror Sync` and the installation
+The synchronization workflows authenticate through the existing organization-level mirror-sync
+GitHub App installation for `WaterWoods-Labs/freqtrade`. Do not infer or document a new display
+name from the repository credentials alone. Before renaming, creating, reinstalling, or revoking
+an App or installation, verify its current display name, App and installation IDs, repository
+scope, permissions, and an exact workflow run in the live organization settings. The installation
 grants only the repository permissions required by the synchronization:
 
 - Contents: read and write
