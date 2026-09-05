@@ -451,6 +451,69 @@ def test_order_dict(default_conf_usdt, mocker, runmode, caplog) -> None:
     assert not log_has_re(r".*stoploss_on_exchange .* dry-run", caplog)
 
 
+def test_validate_informative_candle_types(default_conf_usdt, mocker) -> None:
+
+    patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+
+    mocker.patch.object(
+        freqtrade.strategy,
+        "gather_informative_pairs",
+        return_value=[
+            ("XRP/USDT", "1h", CandleType.SPOT),
+            ("XRP/USDT:USDT", "1h", CandleType.OPEN_INTEREST),
+        ],
+    )
+    # Supported by the exchange - no complaints
+    mocker.patch(f"{EXMS}.check_candle_type_support", return_value=True)
+    freqtrade.validate_informative_candle_types()
+
+    mocker.patch(
+        f"{EXMS}.check_candle_type_support",
+        side_effect=lambda ct: ct != CandleType.OPEN_INTEREST,
+    )
+    with pytest.raises(
+        OperationalException,
+        match=r"requests informative data of type open_interest, which .* does not provide",
+    ):
+        freqtrade.validate_informative_candle_types()
+
+    # Each unsupported type is reported once, even across many pairs
+    mocker.patch.object(
+        freqtrade.strategy,
+        "gather_informative_pairs",
+        return_value=[
+            ("XRP/USDT:USDT", "1h", CandleType.OPEN_INTEREST),
+            ("BTC/USDT:USDT", "4h", CandleType.OPEN_INTEREST),
+            ("BTC/USDT:USDT", "1h", CandleType.FUNDING_RATE),
+        ],
+    )
+    mocker.patch(f"{EXMS}.check_candle_type_support", return_value=False)
+    with pytest.raises(
+        OperationalException, match=r"type funding_rate, open_interest, which .* does not provide"
+    ):
+        freqtrade.validate_informative_candle_types()
+
+
+def test_validate_informative_candle_types_on_init(default_conf_usdt, mocker) -> None:
+    """The check has to run during startup, not only when called directly."""
+    patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch(f"{EXMS}.get_fee", return_value=0.0025)
+    mocker.patch(
+        "freqtrade.strategy.interface.IStrategy.gather_informative_pairs",
+        return_value=[("XRP/USDT:USDT", "1h", CandleType.OPEN_INTEREST)],
+    )
+    mocker.patch(f"{EXMS}.check_candle_type_support", return_value=False)
+
+    with pytest.raises(
+        OperationalException,
+        match=r"requests informative data of type open_interest, which .* does not provide",
+    ):
+        FreqtradeBot(default_conf_usdt)
+
+
 def test_get_trade_stake_amount(default_conf_usdt, mocker) -> None:
     patch_RPCManager(mocker)
     patch_exchange(mocker)
@@ -5677,32 +5740,34 @@ def test_update_funding_fees(
     date_eight = dt_utc(2021, 9, 1, 8)
     date_sixteen = dt_utc(2021, 9, 1, 16)
     columns = ["date", "open", "high", "low", "close", "volume"]
+    # Funding rates are stored as date + funding_rate (see freqtrade/candle_columns.py)
+    funding_columns = ["date", "funding_rate"]
     # 16:00 entry is actually never used
     # But should be kept in the test to ensure we're filtering correctly.
     funding_rates = {
         "LTC/USDT": DataFrame(
             [
-                [date_midnight, 0.00032583, 0, 0, 0, 0],
-                [date_eight, 0.00024472, 0, 0, 0, 0],
-                [date_sixteen, 0.00024472, 0, 0, 0, 0],
+                [date_midnight, 0.00032583],
+                [date_eight, 0.00024472],
+                [date_sixteen, 0.00024472],
             ],
-            columns=columns,
+            columns=funding_columns,
         ),
         "ETH/USDT": DataFrame(
             [
-                [date_midnight, 0.0001, 0, 0, 0, 0],
-                [date_eight, 0.0001, 0, 0, 0, 0],
-                [date_sixteen, 0.0001, 0, 0, 0, 0],
+                [date_midnight, 0.0001],
+                [date_eight, 0.0001],
+                [date_sixteen, 0.0001],
             ],
-            columns=columns,
+            columns=funding_columns,
         ),
         "XRP/USDT": DataFrame(
             [
-                [date_midnight, 0.00049426, 0, 0, 0, 0],
-                [date_eight, 0.00032715, 0, 0, 0, 0],
-                [date_sixteen, 0.00032715, 0, 0, 0, 0],
+                [date_midnight, 0.00049426],
+                [date_eight, 0.00032715],
+                [date_sixteen, 0.00032715],
             ],
-            columns=columns,
+            columns=funding_columns,
         ),
     }
 
@@ -5780,7 +5845,7 @@ def test_update_funding_fees(
                 sum(
                     trade.amount
                     * mark_prices[trade.pair].iloc[1:2]["open"]
-                    * funding_rates[trade.pair].iloc[1:2]["open"]
+                    * funding_rates[trade.pair].iloc[1:2]["funding_rate"]
                     * multiple
                 )
             )
@@ -5794,7 +5859,7 @@ def test_update_funding_fees(
             sum(
                 trade.amount
                 * mark_prices[trade.pair].iloc[1:2]["open"]
-                * funding_rates[trade.pair].iloc[1:2]["open"]
+                * funding_rates[trade.pair].iloc[1:2]["funding_rate"]
                 * multiple
             )
         )
