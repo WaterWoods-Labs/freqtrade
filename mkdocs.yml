@@ -6,6 +6,9 @@ edit_uri: edit/develop/docs/
 use_directory_urls: True
 nav:
     - Home: index.md
+    - Binance Portfolio Margin:
+        - Adapter: binance-portfolio-margin-adapter.md
+        - Maintenance: binance-portfolio-margin-maintenance.md
     - Quickstart with Docker: docker_quickstart.md
     - Installation: installation.md
     - Freqtrade Basics: bot-basics.md

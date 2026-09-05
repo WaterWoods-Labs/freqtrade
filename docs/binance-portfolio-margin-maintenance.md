@@ -29,7 +29,7 @@ The product is based on official Freqtrade `develop`:
 
 Binance Portfolio Margin/PAPI adapter changes, their configuration schema, and any required core
 changes belong only on `binance-portfolio-margin`. They must not be developed or released from
-`xcoin`. Conversely, this product must not contain an XCoin adapter, connector, API client,
+`umx`. Conversely, this product must not contain a UMX or historical XCoin adapter, connector, API client,
 configuration, workflow, test fixture, runtime fallback, or image reference.
 
 The product boundary is enforced by
@@ -41,28 +41,16 @@ Run both checks whenever product routing or exchange resolution changes.
 Never merge one product branch into the other. If both products need the same upstream change,
 merge official `develop` independently into each product branch.
 
-## Common core hook rules
+## Adapter contract and core changes
 
-`Exchange.validate_existing_positions` is an exchange-neutral extension point. Its base
-implementation is intentionally a no-op. `FreqtradeBot` calls it:
+The [adapter contract](binance-portfolio-margin-adapter.md) owns supported modes, configuration,
+CCXT routing, entry policies, persistent order recovery, and reconciliation hook behavior.
+Keep that page consistent with code when changing these interfaces.
 
-1. during startup, after open-order recovery and a wallet refresh; and
-2. after a completed exit, only when no remaining open trade has a pending order.
-
-The base hook and bot call sites must not contain Binance- or XCoin-specific reconciliation logic.
-The Binance Portfolio Margin override belongs in `freqtrade/exchange/binance.py`. An
-exchange-specific implementation on another product branch remains owned by that branch.
-
-Changes to the hook contract require:
-
-- tests for the default no-op behavior and call ordering;
-- tests for partial exits and pending-order deferral;
-- Binance Portfolio Margin reconciliation tests;
-- proof that ordinary Binance behavior is unchanged; and
-- the complete upstream-compatible test suite when merged to the product branch.
-
-Do not move PAPI routing or account-wide reconciliation into generic `Exchange` or
-`FreqtradeBot` code merely to reduce the size of the Binance subclass.
+Keep the exchange-neutral hook and bot call sites generic; PAPI routing and account reconciliation
+belong in the Binance implementation. Hook changes require regression coverage for the default
+no-op, startup ordering, partial exits, pending-order deferral, PAPI reconciliation, and ordinary
+Binance behavior, followed by the complete compatibility suite.
 
 ## Upstream synchronization
 
@@ -81,12 +69,12 @@ The workflow:
 
 It never merges the pull request automatically. A conflict stops the workflow and requires manual
 review. Conflict resolution must preserve the product boundary and must not copy a resolution from
-`xcoin` without independently comparing it with official `develop`.
+`umx` without independently comparing it with official `develop`.
 
 GitHub runs scheduled workflows only from the repository default branch. While the default branch
-is `xcoin`, the same product synchronization workflow also exists there as repository-level
+is `umx`, the same product synchronization workflow also exists there as repository-level
 infrastructure. That copy explicitly operates on `binance-portfolio-margin` and does not make
-XCoin source depend on PAPI. Keep the default-branch and product-branch workflow copies aligned;
+UMX source depend on PAPI. Keep the default-branch and product-branch workflow copies aligned;
 change them through coordinated pull requests.
 
 Synchronization uses the repository's organization-owned GitHub App. The workflow may reference
@@ -138,7 +126,7 @@ The sole branch-protection status context is
 and accepts full validation only when it either passes or is intentionally skipped. On product
 pushes and synchronization pull requests, workflow conditions require the full job to run.
 
-Do not rename the aggregate job or reuse an XCoin status context. Update the branch ruleset and
+Do not rename the aggregate job or reuse another product's status context. Update the branch ruleset and
 this document in the same governed change if the context must ever change.
 
 ## Governance and CODEOWNER review
@@ -229,30 +217,12 @@ and account safety remain governed exclusively by the
 
 ## Chan live writer and reservation boundary
 
-The Chan multi-pair policy requires a stable, non-secret `account_namespace`. Every bot process
-that can write the same Portfolio Margin account on one host must use that exact namespace and the
-same `user_data_dir`. The adapter hashes the namespace before using it in the state filename, then
-uses one cross-process lock plus crash-persistent entry reservations to serialize the account
-snapshot, intent write, order submission, and reservation transition. Reservations contain no API
-credential, requested quantity, requested price, or raw exchange response.
-
-Code on one host cannot lock a manual Binance session or a writer on another host. The runtime
-gate must therefore dedicate one Portfolio Margin account or sub-account to this workload, permit
-exactly one active trading API key and one writer host, and prohibit manual entries and external
-order writers. A second host may be cold standby only; it must not start until the first writer is
-stopped and the shared account is reconciled. Treat a mismatched namespace as a second writer, not
-as a separate bot.
-
-The per-pair 100 USDT and aggregate 500 USDT values are conservative requested-entry and local
-reservation limits. They are not absolute fill-notional, mark-to-market exposure, fee, slippage,
-stop-loss, or maximum-loss guarantees. Chan market entries and RPC force-entry are disabled by the
-product; strategy entries must be limit orders. Price improvement on a short limit fill, fees, and
-subsequent market movement can still move realized or marked exposure beyond the requested value.
-
-Do not delete or edit an unknown-order intent or entry-reservation file merely to make startup
-continue. A corrupt, expired, or still-unobserved state is deliberately fail-closed and requires
-the account, exact client order id, positions, open orders, and trade database to be reconciled
-under the runtime runbook before an operator-approved recovery.
+The adapter's [order recovery](binance-portfolio-margin-adapter.md#order-recovery-and-reconciliation)
+and [entry policy constraints](binance-portfolio-margin-adapter.md#entry-policy-constraints) define
+the enforced behavior. Account ownership, one-writer deployment, strategy setup, acceptance, and
+recovery steps belong in the
+[shared runtime runbook](https://github.com/WaterWoods-Labs/team-freqtrade-runtime/blob/main/docs/binance-portfolio-margin-runbook.md).
+Do not duplicate operating procedures or account/test results in product documentation.
 
 ## Legacy combined-build boundary
 
