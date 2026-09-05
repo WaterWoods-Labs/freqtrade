@@ -35,6 +35,12 @@ USER ftuser
 RUN  pip install --user --no-cache-dir "numpy<3.0" \
   && pip install --user --no-cache-dir -r requirements-hyperopt.txt
 
+# Keep architecture-specific build inputs in their build stage, outside runtime layers.
+# Preserve the release-generated freqtrade_commit file and all other runtime inputs.
+FROM base AS runtime-source
+COPY --chown=ftuser:ftuser . /freqtrade/
+RUN rm -rf /freqtrade/build_helpers
+
 # Copy dependencies to runtime-image
 FROM base AS runtime-image
 
@@ -42,7 +48,7 @@ COPY --from=python-deps --chown=ftuser:ftuser /home/ftuser/.local /home/ftuser/.
 
 USER ftuser
 # Install and execute
-COPY --chown=ftuser:ftuser . /freqtrade/
+COPY --from=runtime-source --chown=ftuser:ftuser /freqtrade/ /freqtrade/
 
 RUN pip install -e . --user --no-cache-dir \
   && mkdir /freqtrade/user_data/ \

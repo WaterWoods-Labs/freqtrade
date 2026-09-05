@@ -41,6 +41,10 @@ from freqtrade.enums import (
 )
 from freqtrade.exceptions import ExchangeError, PricingError
 from freqtrade.exchange import Exchange, timeframe_to_minutes, timeframe_to_msecs
+from freqtrade.exchange.binance_portfolio_policy import (
+    _PORTFOLIO_MARGIN_CHAN_RISK_KEYS,
+    _portfolio_margin_chan_risk_policy_valid,
+)
 from freqtrade.exchange.exchange_utils import price_to_precision
 from freqtrade.ft_types import AnnotationType
 from freqtrade.loggers import bufferHandler
@@ -64,16 +68,6 @@ from freqtrade.wallets import PositionWallet, Wallet
 
 
 logger = logging.getLogger(__name__)
-
-_PORTFOLIO_MARGIN_CHAN_PAIRS = frozenset(
-    {
-        "BTC/USDT:USDT",
-        "ETH/USDT:USDT",
-        "BNB/USDT:USDT",
-        "SOL/USDT:USDT",
-        "SPY/USDT:USDT",
-    }
-)
 
 
 class RPCException(Exception):
@@ -1163,30 +1157,9 @@ class RPC:
 
     @staticmethod
     def _portfolio_margin_chan_force_entry_pair_limits(risk: dict) -> dict[str, Any]:
-        pair_limits = risk.get("pairs")
-        max_total_notional = risk.get("max_total_entry_notional")
-        if (
-            risk.get("policy") != "chan_multi_pair"
-            or not isinstance(risk.get("account_namespace"), str)
-            or not isinstance(pair_limits, dict)
-            or set(pair_limits) != _PORTFOLIO_MARGIN_CHAN_PAIRS
-            or any(
-                isinstance(limit, bool)
-                or not isinstance(limit, (int, float))
-                or not isfinite(limit)
-                or not 0 < limit <= 100
-                for limit in pair_limits.values()
-            )
-            or risk.get("allowed_sides") != ["long", "short"]
-            or isinstance(max_total_notional, bool)
-            or not isinstance(max_total_notional, (int, float))
-            or not isfinite(max_total_notional)
-            or not 0 < max_total_notional <= 500
-            or risk.get("force_entry_order_type") != "disabled"
-            or risk.get("reject_force_entry_price") is not True
-        ):
+        if not _portfolio_margin_chan_risk_policy_valid(risk):
             raise RPCException("Portfolio Margin force-entry risk policy is invalid.")
-        return pair_limits
+        return risk["pairs"]
 
     def _portfolio_margin_force_entry_validations(
         self,
@@ -1209,16 +1182,7 @@ class RPC:
             "force_entry_order_type",
             "reject_force_entry_price",
         }
-        is_chan_policy = set(risk) == {
-            "account_namespace",
-            "policy",
-            "pairs",
-            "allowed_sides",
-            "max_leverage",
-            "max_total_entry_notional",
-            "force_entry_order_type",
-            "reject_force_entry_price",
-        }
+        is_chan_policy = set(risk) == _PORTFOLIO_MARGIN_CHAN_RISK_KEYS
         if is_legacy_policy:
             pair_is_allowed = pair == risk.get("pair")
             side_is_allowed = order_side == SignalDirection.LONG and risk.get("side") == "long"
@@ -1247,19 +1211,9 @@ class RPC:
             "force_entry", self._freqtrade.strategy.order_types["entry"]
         )
         if not pair_is_allowed:
-            message = (
-                "Portfolio Margin force-entry is restricted to the reviewed pair."
-                if is_legacy_policy
-                else "Portfolio Margin Chan force-entry is restricted to reviewed pairs."
-            )
-            raise RPCException(message)
+            raise RPCException("Portfolio Margin force-entry is restricted to the reviewed pair.")
         if not side_is_allowed:
-            message = (
-                "Portfolio Margin force-entry is long-only."
-                if is_legacy_policy
-                else "Portfolio Margin Chan force-entry side is not allowed."
-            )
-            raise RPCException(message)
+            raise RPCException("Portfolio Margin force-entry is long-only.")
         if (
             isinstance(max_entry_notional, bool)
             or not isinstance(max_entry_notional, (int, float))
