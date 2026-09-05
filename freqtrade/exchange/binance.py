@@ -772,7 +772,7 @@ class Binance(Exchange):
     ) -> Any:
         """Call one explicitly supported USD-M Algo endpoint through CCXT signing.
 
-        CCXT 4.5.67 parses Binance Algo orders but does not yet expose the
+        CCXT 4.5.76 parses Binance Algo orders but does not yet expose the
         Portfolio Margin ``um/algo`` routes. Keep this shim deliberately thin:
         CCXT still owns signing, time synchronization, HTTP handling, error
         mapping, and rate limiting, while this adapter fixes the private API
@@ -2278,7 +2278,7 @@ class Binance(Exchange):
         amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
         self._lev_prep(pair, leverage, side, accept_fail=True)
 
-        # CCXT 4.5.67 already knows the current Algo field schema for linear
+        # CCXT 4.5.76 already knows the current Algo field schema for linear
         # futures, but its Portfolio Margin route still builds the retired
         # ``strategy*`` schema. The call-local false values affect request
         # construction only; no request is sent until the fixed PAPI call below.

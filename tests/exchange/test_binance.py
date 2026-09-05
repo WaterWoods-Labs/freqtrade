@@ -1872,8 +1872,8 @@ def test_binance_portfolio_margin_preserves_open_position(default_conf, mocker):
 
 
 def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets):
-    """Exercise CCXT 4.5.67 and record the raw endpoint requests without network access."""
-    assert ccxt.__version__ == "4.5.67"
+    """Exercise CCXT 4.5.76 and record the raw endpoint requests without network access."""
+    assert ccxt.__version__ == "4.5.76"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     route_params = exchange._portfolio_margin_params({"subType": "linear"})
@@ -1985,8 +1985,8 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
 
 
 def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, markets):
-    """Use CCXT 4.5.67 signing with a fake transport for the full Algo lifecycle."""
-    assert ccxt.__version__ == "4.5.67"
+    """Use CCXT 4.5.76 signing with a fake transport for the full Algo lifecycle."""
+    assert ccxt.__version__ == "4.5.76"
     pair = "ETH/USDT:USDT"
     market = deepcopy(markets[pair])
     market["id"] = "ETHUSDT"
@@ -2133,7 +2133,7 @@ def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, mar
 
 
 def test_binance_portfolio_margin_ccxt_disables_transport_retry():
-    assert ccxt.__version__ == "4.5.67"
+    assert ccxt.__version__ == "4.5.76"
     api = ccxt.binance(
         {
             "enableRateLimit": False,
@@ -2168,7 +2168,7 @@ def test_binance_portfolio_margin_ccxt_disables_transport_retry():
 
 def test_binance_portfolio_margin_ccxt_market_loading_avoids_signed_sapi(default_conf, mocker):
     """Authenticated market loading must use only public linear-market metadata."""
-    assert ccxt.__version__ == "4.5.67"
+    assert ccxt.__version__ == "4.5.76"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     raw_ccxt_config = deep_merge_dicts(
