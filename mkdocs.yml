@@ -6,6 +6,8 @@ edit_uri: edit/develop/docs/
 use_directory_urls: True
 nav:
     - Home: index.md
+    - UMX Adapter: umx-adapter.md
+    - UMX Maintenance: umx-maintenance.md
     - Quickstart with Docker: docker_quickstart.md
     - Installation: installation.md
     - Freqtrade Basics: bot-basics.md

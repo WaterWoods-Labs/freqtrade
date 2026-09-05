@@ -217,20 +217,6 @@ class UMXSync:
         market_id = self.market_id(symbol)
         return market_id.split("-")[0]
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        data: dict[str, Any] | None = None,
-        private: bool = False,
-    ) -> dict[str, Any]:
-        return self.client.request(method, path, params=params, data=data, private=private)
-
-    def _private_params(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.client.private_params(params)
-
     def _parse_market(self, raw: dict[str, Any]) -> dict[str, Any]:
         business_type = raw.get("businessType")
         is_perp = business_type == UMX_BUSINESS_LINEAR_PERPETUAL
