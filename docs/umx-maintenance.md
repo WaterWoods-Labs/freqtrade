@@ -27,38 +27,15 @@ UMX CI enforces this boundary. The standard Binance adapter must remain aligned 
 Do not commit UMX changes to `develop` or `stable`. Do not force-push any long-lived branch.
 
 The scheduled and release workflows require the protected `umx` branch to be the repository
-default. The first migration pull request temporarily made `UMX CI` listen to both the legacy and
-new branches so its existing `required` job context could protect the cutover. After the default
-branch and protection rules move to `umx`, CI must listen only to `umx`.
+default. UMX CI targets only `umx`. The completed branch migration is recorded in
+[the product cutover](https://github.com/WaterWoods-Labs/freqtrade/pull/44) and
+[the CI cutover](https://github.com/WaterWoods-Labs/freqtrade/pull/45).
 
 ## Adapter contract
 
-- Use only `exchange.name=umx`; the removed `xcoin` selector and `xcoin_*` options fail explicitly.
-- UMX is registered as a native adapter and must remain discoverable through `list-exchanges`, the
-  web API exchange list, and `new-config` without being treated as a ccxt exchange.
-- UMX REST requests use only `https://api.umx.com/api`. Do not route credentials to a configurable
-  or legacy host.
-- Live trading requires `umx_live_trading_enabled=true` and environment-provided credentials.
-- Opening orders set leverage to 1x by symbol; every perpetual order is submitted only after a
-  symbol-scoped 1x readback. The adapter rejects requests to set any other leverage.
-- Spot orders always send `isLeverage=false`, because the UMX API otherwise defaults that switch to
-  leveraged spot. Perpetual orders omit this spot-only field and route through their contract symbol.
-- Futures `totalEquity` includes open-position unrealized PnL. The adapter declares that equity
-  contract so Freqtrade Wallets removes UPL once before using the balance total.
-- Batch `/ticker/mini` data has no bid/ask, so UMX does not advertise batch spread support and
-  never substitutes `lastPrice` for either side. Single-symbol ticker reads still obtain genuine
-  top-of-book values from the depth endpoint.
-- Settled funding comes from private account bills (`actionType=18`); public funding-rate history is
-  retained for dry-run calculations and must not assume a fixed settlement interval. Its one-hour
-  timeframe is only the Freqtrade download-shard grid, and each request is bounded to its own shard.
-- Current funding rates come from `/v1/market/fundingRate`; the adapter exposes each symbol's
-  documented `fundingTime` and dynamic, hour-based `fundingInterval` in the ccxt-shaped result.
-- The API wire fields (`businessType`, `accountName`, `role`, `lever`, and related payload names)
-  remain unchanged by the product rename.
-
-Review the current [UMX Coin API documentation](https://www.umx.com/zh-CN/docs/coin-apis/introduction/quick-start)
-before changing endpoint paths or response parsing. Treat the older PDF snapshot as historical
-evidence only when the current web documentation does not state the needed contract.
+The [UMX adapter guide](umx-adapter.md) is the maintained contract for capabilities,
+configuration, endpoint mapping, and trading behavior. Update that guide when the implementation
+changes; keep validation and release procedures here.
 
 ## Scheduled product workflow placement
 
@@ -122,6 +99,11 @@ job in that run. A successful run for another commit or a focused-only run does 
 release gate. Moving an existing release tag is prohibited and does not substitute for exact-SHA
 CI evidence.
 
+For local adapter changes, run `pytest tests/exchange/test_umx.py` and relevant static checks in
+the workspace's ephemeral Docker validation environment. Core changes also require their related
+regression tests. Keep software tests with their source; strategy research, account probes, and
+acceptance reports belong in the workspace's runtime-data and artifact directories.
+
 ## Releases
 
 Create an immutable annotated release tag matching `umx-YYYY.MM.DD.N` only after the `umx`
@@ -143,6 +125,6 @@ never `latest` or another mutable tag.
 The immutable tags `xcoin-2026.07.30.1` and `xcoin-2026.07.31.1`, and their
 `ghcr.io/waterwoods-labs/freqtrade-xcoin` images, are historical artifacts from before the hard
 cut. Retain those names for provenance; never retag them as UMX or use them for a new deployment.
-Keep the existing `xcoin-*` tag ruleset permanently for those immutable historical tags and add a
-separate `umx-*` ruleset for new releases. New UMX releases and images use only the `umx-*` and
+Keep the existing `xcoin-*` tag ruleset permanently for those immutable historical tags and the
+separate `umx-*` ruleset for current releases. New UMX releases and images use only the `umx-*` and
 `freqtrade-umx` names. PAPI releases use the independent product branch and image.
