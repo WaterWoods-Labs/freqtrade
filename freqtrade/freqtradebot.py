@@ -11,8 +11,6 @@ from threading import Lock
 from time import sleep
 from typing import Any
 
-from schedule import Scheduler
-
 from freqtrade import constants
 from freqtrade.configuration import remove_exchange_credentials, validate_config_consistency
 from freqtrade.constants import BuySell, Config, EntryExecuteMode, ExchangeConfig, LongShort
@@ -63,7 +61,7 @@ from freqtrade.rpc.rpc_types import (
 )
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
-from freqtrade.util import FtPrecise, MeasureTime, PeriodicCache, dt_from_ts, dt_now
+from freqtrade.util import FtPrecise, FtScheduler, MeasureTime, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.migrations import migrate_live_content
 from freqtrade.wallets import Wallets
 
@@ -155,7 +153,7 @@ class FreqtradeBot(LoggingMixin):
             self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
             LoggingMixin.__init__(self, logger, timeframe_secs)
 
-            self._schedule = Scheduler()
+            self._schedule = FtScheduler()
 
             if self.trading_mode == TradingMode.FUTURES:
 
@@ -172,6 +170,8 @@ class FreqtradeBot(LoggingMixin):
                         t = str(time(time_slot, minutes, 2))
                         self._schedule.every().day.at(t).do(update)
 
+            # schedule is in local time by default (!)
+            # Explicit timezones must be configured explicitly.
             self._schedule.every().day.at("00:02").do(self.exchange.ws_connection_reset)
             self._schedule.every().day.at("00:07").do(self.wallets.record_wallet_state)
 
@@ -2080,11 +2080,11 @@ class FreqtradeBot(LoggingMixin):
             filled_val: float = order.get("filled", 0.0) or 0.0
 
             if filled_val > 0:
-                filled_stake = filled_val * trade.open_rate
+                remaining_stake = (trade.amount + filled_val) * trade.open_rate
                 minstake = self.exchange.get_min_pair_stake_amount(
                     trade.pair, trade.open_rate, self.strategy.stoploss
                 )
-                if minstake and filled_stake < minstake:
+                if minstake and remaining_stake < minstake:
                     logger.warning(
                         f"Order {order_id} for {trade.pair} not cancelled, "
                         f"as the filled amount of {filled_val} would result in an unexitable trade."
