@@ -62,6 +62,12 @@ The Algo shim keeps CCXT signing, time synchronization, HTTP transport, error ha
 limits. It validates the supported methods and fields because the pinned CCXT implementation does
 not provide all required Portfolio Margin Algo methods. It is not a second HTTP/signing client.
 
+The reviewed dependency pin is CCXT 4.5.77. Its Binance changes adjust public futures bid/ask
+queries and their rate-limit weights; the PAPI routes and base signing/transport logic are unchanged
+from 4.5.76. Regression tests retain an exact version check alongside private order/Algo routing,
+retry suppression, public market loading, and single-symbol/bulk public quote checks. A later
+dependency upgrade requires reviewing and validating these contracts again.
+
 ## Order recovery and reconciliation
 
 Persistent order intents distinguish a failed request from an unknown exchange result. The adapter
@@ -104,7 +110,7 @@ are maintained with the shared runtime and workspace artifacts, not on this adap
 ## Sources
 
 - [Binance Portfolio Margin API](https://developers.binance.com/en/docs/products/derivatives-trading-portfolio-margin/general-info)
-- [CCXT Binance implementation](https://github.com/ccxt/ccxt/blob/v4.5.76/python/ccxt/binance.py)
+- [CCXT Binance implementation](https://github.com/ccxt/ccxt/blob/v4.5.77/python/ccxt/binance.py)
 - [Freqtrade exchange documentation](https://www.freqtrade.io/en/stable/exchanges/)
 - [Product source](https://github.com/WaterWoods-Labs/freqtrade/tree/binance-portfolio-margin/freqtrade/exchange)
 
