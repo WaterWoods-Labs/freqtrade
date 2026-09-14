@@ -5,7 +5,7 @@ from math import isclose
 from typing import Any
 
 from freqtrade.constants import ExchangeConfig
-from freqtrade.enums import MarginMode, TradingMode
+from freqtrade.enums import MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
@@ -28,11 +28,13 @@ class UMX(Exchange):
     margin mode is fixed to ``CROSS``.
     """
 
+    umx_maker_contract_version = 3
+
     _ft_has: FtHas = {
         "ohlcv_candle_limit": 1000,
         "l2_limit_range_required": False,
         "l2_limit_upper": 5000,
-        "order_time_in_force": ["GTC", "IOC", "FOK"],
+        "order_time_in_force": ["GTC", "IOC", "FOK", "PO"],
         "stoploss_on_exchange": False,
         # The batch /ticker/mini payload has no bid/ask fields. Single-symbol fetch_ticker
         # supplements these from depth, but pairlist filters consume the batch response.
@@ -46,6 +48,12 @@ class UMX(Exchange):
     }
 
     _ft_has_futures: FtHas = {
+        "stoploss_on_exchange": True,
+        "stoploss_order_types": {"market": "stop_market"},
+        "stoploss_query_requires_stop_flag": True,
+        "stoploss_algo_order_info_id": "triggeredOrderId",
+        "stop_price_type_field": "stopLossType",
+        "stop_price_type_value_mapping": {PriceType.LAST: "last_price"},
         "mark_ohlcv_price": "mark",
         "mark_ohlcv_timeframe": "1h",
         "funding_fee_timeframe": "1h",
@@ -74,6 +82,33 @@ class UMX(Exchange):
         (TradingMode.SPOT, MarginMode.NONE),
         (TradingMode.FUTURES, MarginMode.CROSS),
     ]
+
+    def _get_params(self, side, ordertype, leverage, reduceOnly, time_in_force="GTC"):
+        if time_in_force == "PO":
+            if ordertype != "limit":
+                raise OperationalException("UMX PO requires a limit order")
+            params = super()._get_params(side, ordertype, leverage, reduceOnly, "GTC")
+            params["postOnly"] = True
+            return params
+        return super()._get_params(side, ordertype, leverage, reduceOnly, time_in_force)
+
+    def _lev_prep(self, pair, leverage, side, accept_fail=False):
+        if self._config.get("exchange", {}).get("umx_leverage_readonly", False):
+            if leverage != 1:
+                raise OperationalException("UMX read-only leverage policy requires 1x")
+            if not self._config.get("dry_run", True):
+                value = self._api.fetch_leverage(pair)
+                if value.get("longLeverage") != 1 or value.get("shortLeverage") != 1:
+                    raise OperationalException("UMX existing symbol leverage must already be 1x")
+            return
+        return super()._lev_prep(pair, leverage, side, accept_fail)
+
+    def cancel_stoploss_order(self, order_id, pair, params=None):
+        if self._config.get("dry_run", True):
+            return super().cancel_stoploss_order(order_id, pair, params)
+        super().cancel_stoploss_order(order_id, pair, params)
+        # Resolve a trigger/cancel race to the actual execution order and filled amount.
+        return self.fetch_stoploss_order(order_id, pair, params)
 
     def _init_ccxt(
         self, exchange_config: ExchangeConfig, sync: bool, ccxt_kwargs: dict[str, Any]
@@ -155,11 +190,20 @@ class UMX(Exchange):
             or os.environ.get("UMX_ACCOUNT_NAME", ""),
             "base_url": UMX_DEFAULT_BASE_URL,
             "timeout": exchange_config.get("umx_timeout", 10),
+            "umx_public_request_interval": exchange_config.get("umx_public_request_interval", 0),
             "default_business_type": business_type,
             # This is Freqtrade's history-download shard width, not UMX's settlement cadence.
             "funding_fee_timeframe": self._ft_has["funding_fee_timeframe"],
         }
         wrapper_config.update(sanitized_ccxt_kwargs)
+        # These policy fields cannot be overridden through generic ccxt options.
+        wrapper_config["umx_order_read_only"] = exchange_config.get(
+            "umx_order_read_only", False
+        ) or (
+            self._config.get("strategy") == "UMXChanB1S1Maker"
+            and self._config.get("maker_live_approved") is not True
+        )
+        wrapper_config["umx_entry_stoploss"] = exchange_config.get("umx_entry_stoploss")
 
         return UMXSync(wrapper_config) if sync else UMXAsync(wrapper_config)
 

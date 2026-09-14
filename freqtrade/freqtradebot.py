@@ -2069,6 +2069,13 @@ class FreqtradeBot(LoggingMixin):
                 minstake = self.exchange.get_min_pair_stake_amount(
                     trade.pair, trade.open_rate, self.strategy.stoploss
                 )
+                if self.config.get("exchange", {}).get("name") == "umx":
+                    # A whole minimum contract is exitable. The entry safety reserve
+                    # must not keep the unfilled remainder working past its timeout.
+                    market = self.exchange.markets[trade.pair]
+                    lot_min = (market["limits"]["amount"]["min"] or 0) * market["contractSize"]
+                    if filled_val >= lot_min > 0:
+                        minstake = market["limits"]["cost"]["min"] or 0
                 if minstake and remaining_stake < minstake:
                     logger.warning(
                         f"Order {order_id} for {trade.pair} not cancelled, "

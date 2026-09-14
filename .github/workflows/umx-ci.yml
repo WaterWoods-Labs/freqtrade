@@ -102,6 +102,8 @@ jobs:
         run: |
           pytest -q \
             tests/exchange/test_umx.py \
+            tests/exchange/test_umx_maker.py \
+            tests/exchange/test_umx_stoploss.py \
             tests/freqtradebot/test_freqtradebot.py \
             tests/persistence/test_migrations.py \
             tests/persistence/test_persistence.py \
