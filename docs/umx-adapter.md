@@ -4,16 +4,32 @@ This guide describes the implemented UMX adapter contract. It translates UMX RES
 Freqtrade's native exchange interface; it is not a copy of the exchange's API manual.
 Branch, CI, and release procedures are in [UMX maintenance](umx-maintenance.md).
 
+Maker-specific options are opt-in: `exchange.umx_strict_ohlcv=true` retains a last candle
+only when its closing time has passed and disables missing-candle filling;
+`exchange.umx_leverage_readonly=true` checks that symbol leverage is already 1x without
+setting it; `exchange.umx_public_request_interval=0.2` spaces public GET starts across
+the synchronous/asynchronous clients in one process. Private requests bypass that public
+queue so account/exit operations do not sit behind warmup reads. This is not a shared
+IP-wide limiter across processes. A filled minimum whole contract permits cancellation
+of its unfilled remainder without applying the extra entry reserve. These changes do
+not by themselves guarantee timely signals or prove live fills. Version 3 also adds the
+position-bound stop transport described below; its live exchange acceptance is pending.
+`exchange.umx_entry_stoploss=-0.03` attaches a last-price market stop to every non-reduce-only
+PO perpetual entry. `exchange.umx_order_read_only=true` blocks every non-GET request before
+HTTP transport. Unapproved `UMXChanB1S1Maker` configurations force that read-only setting after
+generic client overrides; they may be deployed STOPPED without enabling account writes.
+
 ## Supported integration
 
 | Capability | Adapter behavior |
 | --- | --- |
 | Spot | `trading_mode=spot`; unleveraged orders, for example `BTC/USDT`. |
 | Linear perpetual futures | `trading_mode=futures`, `margin_mode=cross`; USDT settlement, for example `BTC/USDT:USDT`; 1x leverage only. |
-| Orders | Limit and market; limit time-in-force supports GTC, IOC, and FOK. Market orders use IOC. |
+| Orders | Limit and market; limit time-in-force supports GTC, IOC, FOK, and PO. PO maps to native `post_only` with GTC; market orders use IOC. |
+| Exchange stop candidate | Last-price TPSL market stops for existing net perpetual positions; software-tested, live acceptance pending. |
 | Market data | REST markets, tickers, order books, and candles; perpetual mark/index candles and funding rates. |
 | Account data | Balances, orders, fills, perpetual positions, leverage, and settled funding bills. |
-| Unsupported | Crypto options, securities, isolated margin, leveraged spot, exchange-hosted stoploss, and WebSocket subscriptions. |
+| Unsupported | Crypto options, securities, isolated margin, leveraged spot, spot stoploss, and WebSocket subscriptions. |
 
 Native UMX must remain discoverable through `list-exchanges`, the web API exchange list, and
 `new-config`. It is not registered as a ccxt-provided exchange. Documentation coverage and
@@ -71,6 +87,8 @@ supplies Freqtrade capabilities and mode-specific behavior.
 | Balances and positions | `GET /v1/account/balance`, `/v2/trade/positions` |
 | Create / cancel order | `POST /v2/trade/order`, `/v1/trade/cancelOrder` |
 | Query orders and fills | `GET /v2/trade/order/info`, `/v2/trade/openOrders`, `/v2/history/trades` |
+| Position-bound market stop | `POST /v2/trade/stopPosition` |
+| Query / cancel TPSL | `GET /v2/trade/openOrderComplex`, `/v2/history/orderComplexs`; `POST /v1/trade/cancelComplex` |
 | Set / read leverage | `POST` / `GET /v1/trade/lever` |
 | Current / historical funding rate | `GET /v1/market/fundingRate`, `/v1/market/fundingRate/history` |
 | Settled funding | `GET /v1/history/bill` with `actionType=18` |
@@ -97,6 +115,14 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
 - Dry-run liquidation prices use an approximation based on wallet collateral and `riskEngineRate`;
   unavailable inputs can produce `None`. This is simulation compatibility, not an exchange quote.
 - The REST connector submits an order once and does not automatically retry an uncertain write.
+- The Maker version 3 candidate supports last-price market stops on existing net perpetual
+  positions. It checks direction and quantity, adopts a matching owned TPSL after an uncertain
+  response, and reads back accepted parameters. A triggered TPSL resolves to its execution order;
+  trigger status alone never supplies a fill. Cancellation reads back the resulting state.
+  Spot, take-profit and limit-stop variants remain unsupported. This transport has software
+  coverage but no live TPSL acceptance. Attached entry stops are sent atomically with PO entries
+  when configured; adoption requires the actual position quantity and an equal or tighter trigger.
+  Venue activation during partial fills and remainder cancellation still require live evidence.
 
 ## Documentation sources
 

@@ -17,6 +17,7 @@ from freqtrade.exchange.umx_connector import (
     ccxt_symbol_to_umx,
     umx_symbol_to_ccxt,
 )
+from freqtrade.exchange.umx_stoploss import UMXStoploss
 from freqtrade.util.ft_precise import FtPrecise
 
 
@@ -108,7 +109,7 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
-class UMXSync:
+class UMXSync(UMXStoploss):
     """Small ccxt-compatible subset used by Freqtrade's Exchange base class."""
 
     id = "umx"
@@ -125,6 +126,7 @@ class UMXSync:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self.client = UMXClient(config)
+        self.entry_stoploss = config.get("umx_entry_stoploss")
         self.apiKey = self.client.api_key
         self.secret = self.client.api_secret
         self.password = self.client.password
@@ -569,16 +571,29 @@ class UMXSync:
             return {"currency": base, "cost": -base_fee, "rate": None}
         return None
 
+    @staticmethod
+    def _maker_order_type(order_type: str, params: dict[str, Any]) -> str:
+        order_type = order_type.lower()
+        if params.get("postOnly"):
+            if order_type not in {"limit", "post_only"}:
+                raise ccxt.InvalidOrder("UMX postOnly requires a limit order")
+            return "post_only"
+        return order_type
+
     def create_order(
         self,
         symbol: str,
-        order_type: str,
+        type: str,  # noqa: A002 -- CCXT-compatible keyword used by native stoploss calls.
         side: str,
         amount: float,
         price: float | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        order_type = order_type.lower()
+        params = params or {}
+        order_type = self._maker_order_type(type, params)
+        if order_type == "stop_market":
+            return self._create_stoploss(symbol, side, amount, params)
+        params = self._entry_protection(symbol, order_type, side, price, params)
         if order_type not in {"limit", "market", "post_only"}:
             raise ccxt.InvalidOrder("UMX adapter only supports limit/market/post_only orders")
         if order_type in {"limit", "post_only"} and price is None:
@@ -628,7 +643,6 @@ class UMXSync:
             if params.get("tpslOrder") is not None:
                 body["tpslOrder"] = params.get("tpslOrder")
 
-        if is_futures:
             leverage = self.fetch_leverage(symbol)
             actual_leverage = _first_present(
                 leverage.get("longLeverage"), leverage.get("shortLeverage")
@@ -664,6 +678,8 @@ class UMXSync:
     def cancel_order(
         self, order_id: str, symbol: str | None = None, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        if (params or {}).get("stop"):
+            return self._cancel_stoploss(order_id, symbol)
         request = {
             "orderFilter": "order",
             "orderId": order_id,
@@ -688,6 +704,8 @@ class UMXSync:
     def fetch_order(
         self, order_id: str, symbol: str | None = None, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        if (params or {}).get("stop"):
+            return self._fetch_stoploss(order_id, symbol)
         payload = self.client.order_info(
             {"orderId": order_id, "orderFilter": "order", **(params or {})}
         )

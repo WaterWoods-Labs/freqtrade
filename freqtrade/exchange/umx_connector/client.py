@@ -7,6 +7,7 @@ request-shaping helpers. The ccxt-like response parsing lives in umx_api.py.
 
 import hmac
 import json
+import threading
 import time
 from hashlib import sha256
 from typing import Any
@@ -24,6 +25,9 @@ from freqtrade.exchange.umx_connector.constants import (
 class UMXClient:
     """Thin UMX REST client used by the Freqtrade exchange facade."""
 
+    _public_lock = threading.Lock()
+    _public_next_request = 0.0
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         configured_base_url = config.get("base_url")
@@ -39,13 +43,27 @@ class UMXClient:
         self.account_name = config.get("accountName") or config.get("account_name") or ""
         self.base_url = UMX_DEFAULT_BASE_URL
         self.timeout = config.get("timeout", 10)
+        self.order_read_only = config.get("umx_order_read_only", False)
+        if not isinstance(self.order_read_only, bool):
+            raise ccxt.BadRequest("UMX read-only switch must be a boolean")
+        self.public_interval = float(config.get("umx_public_request_interval", 0))
+        if not 0 <= self.public_interval <= 5:
+            raise ccxt.BadRequest("UMX public request interval must be between 0 and 5 seconds")
         self._http = requests.Session()
+        # Match the bounded async-to-thread pool used for the 56-pair warmup.
+        self._http.mount(
+            "https://", requests.adapters.HTTPAdapter(pool_maxsize=32, pool_block=True)
+        )
 
     def milliseconds(self) -> int:
         return int(time.time() * 1000)
 
     def close(self) -> None:
         self._http.close()
+
+    def _check_write_allowed(self, method: str) -> None:
+        if self.order_read_only and method != "GET":
+            raise ccxt.PermissionDenied("UMX deployment is read-only; writes are disabled")
 
     def request(
         self,
@@ -57,6 +75,15 @@ class UMXClient:
         private: bool = False,
     ) -> dict[str, Any]:
         method = method.upper()
+        self._check_write_allowed(method)
+        # Shared by sync and async facades. Only public reads queue here: exits
+        # and cancellations must not wait behind the multi-pair candle warmup.
+        if not private and method == "GET" and self.public_interval:
+            with UMXClient._public_lock:
+                delay = UMXClient._public_next_request - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                UMXClient._public_next_request = time.monotonic() + self.public_interval
         query = self._query(params)
         body = self._body(data)
         headers = {"Content-Type": "application/json"}

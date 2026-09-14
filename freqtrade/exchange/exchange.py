@@ -2903,6 +2903,10 @@ class Exchange:
         cache: bool,
         drop_incomplete: bool,
     ) -> DataFrame:
+        # Thin UMX markets may omit the current, untraded candle. Keep the last
+        # returned candle when its own closing timestamp is already in the past.
+        if self._config.get("exchange", {}).get("umx_strict_ohlcv", False) and ticks:
+            drop_incomplete = ticks[-1][0] + timeframe_to_msecs(timeframe) > dt_ts()
         # keeping last candle time as last refreshed time of the pair
         if ticks and cache:
             idx = -2 if drop_incomplete and len(ticks) > 1 else -1
@@ -2913,7 +2917,10 @@ class Exchange:
             ticks,
             timeframe,
             pair=pair,
-            fill_missing=not has_cache,
+            fill_missing=(
+                not has_cache
+                and not self._config.get("exchange", {}).get("umx_strict_ohlcv", False)
+            ),
             drop_incomplete=drop_incomplete,
             candle_type=c_type,
         )
@@ -2926,7 +2933,9 @@ class Exchange:
                     concat([old, ohlcv_df], axis=0),
                     timeframe,
                     pair,
-                    fill_missing=True,
+                    fill_missing=not self._config.get("exchange", {}).get(
+                        "umx_strict_ohlcv", False
+                    ),
                     drop_incomplete=False,
                     candle_type=c_type,
                 )
