@@ -99,6 +99,9 @@ class UMXStoploss:
             raise ccxt.InvalidOrder("UMX stop-loss quantity exceeds the current position")
         qty = Decimal(str(amount)) * Decimal(str(self._contract_size(symbol)))
         # A prior timeout may have placed the protection. Adopt an exact owned match.
+        # Venue rows for attached (ftsa*) protections carry the entry side; independent
+        # (ftsl*) stops carry the exit side requested here.
+        entry_side = "buy" if side == "sell" else "sell"
         matches = []
         for row in self._stop_rows(symbol):
             info = self._stop_info(row)
@@ -108,7 +111,7 @@ class UMXStoploss:
                 accepted_stop = float(info.get("stopLoss", 0))
                 protective = accepted_stop >= stop if side == "sell" else 0 < accepted_stop <= stop
                 if (
-                    row.get("side") != side
+                    row.get("side") != (entry_side if attached else side)
                     or (not attached and info.get("tpslMode") != "partially_position")
                     or not math.isclose(float(row.get("qty", 0)), qty)
                     or (not protective if attached else not math.isclose(accepted_stop, stop))
@@ -180,10 +183,11 @@ class UMXStoploss:
     def _parse_stoploss(self, raw, symbol):
         info = self._stop_info(raw)
         state = raw.get("status")
-        if state not in {"live", "canceled", "fail", "slEffective"}:
+        if state not in {"live", "untrigger", "canceled", "fail", "slEffective"}:
             raise ccxt.ExchangeError("Unsupported UMX stop-order state")
         status = {
             "live": "open",
+            "untrigger": "open",
             "canceled": "canceled",
             "fail": "rejected",
             "slEffective": "closed",
@@ -195,6 +199,11 @@ class UMXStoploss:
             amount=amount,
             status=status,
         )
+        # Attached protections report the entry side; Freqtrade tracks the closing side.
+        if str(info.get("tpslClOrdId", "")).startswith("ftsa"):
+            if raw.get("side") not in {"buy", "sell"}:
+                raise ccxt.ExchangeError("Invalid UMX attached-stop entry side")
+            order["side"] = "sell" if raw["side"] == "buy" else "buy"
         order.update(
             stopLossPrice=float(info["stopLoss"]),
             stopPrice=float(info["stopLoss"]),
@@ -218,7 +227,7 @@ class UMXStoploss:
 
     def _cancel_stoploss(self, order_id, symbol):
         raw = self._find_stoploss(order_id, symbol)
-        if raw.get("status") == "live":
+        if raw.get("status") in {"live", "untrigger"}:
             self.client.request(
                 "POST",
                 "/v1/trade/cancelComplex",
