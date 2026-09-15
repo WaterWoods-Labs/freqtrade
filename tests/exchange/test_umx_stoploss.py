@@ -111,14 +111,186 @@ def test_entry_transports_attached_stop_in_the_same_request(stop_api, side, stop
 def test_attached_stop_is_adopted_without_duplicate_after_better_entry_fill(stop_api):
     create(stop_api)
     row = stop_api._test_rows[0]
+    # Attached protections report the entry side; this one protects a long entry.
+    row["side"] = "buy"
     row["tpslOrder"].update(tpslClOrdId="ftsafixture", stopLoss="1456")
     row["tpslOrder"].pop("tpslMode")
     stop_api.client.request.reset_mock()
-    assert create(stop_api)["id"] == "stop1"
+    adopted = create(stop_api)
+    assert adopted["id"] == "stop1"
+    assert adopted["side"] == "sell"  # Normalized to the closing side for Freqtrade.
+    assert adopted["info"]["side"] == "buy"  # Raw venue payload is preserved.
     assert all(c.args[0] == "GET" for c in stop_api.client.request.call_args_list)
     row["qty"] = "0.02"
     with pytest.raises(ccxt.InvalidOrder, match="Conflicting"):
         create(stop_api)
+
+
+# (position_side, entry_side, exit_side, stop) from sanitized attached TPSL observations.
+# Entry prices were 1569.2 (long) and 1575.8 (short); contract size is 0.01.
+ATTACHED_CASES = [
+    ("long", "buy", "sell", 1522.13),
+    ("short", "sell", "buy", 1623.07),
+]
+
+
+def attached_api(position_side, entry_side, stop):
+    """API mock carrying one live-observed attached (ftsa*) untrigger TPSL row."""
+    api = object.__new__(UMXSync)
+    api.markets = {PAIR: {"base": "SNDK", "quote": "USDT"}}
+    api._is_futures_symbol = Mock(return_value=True)
+    api.market_id = Mock(return_value=SYMBOL)
+    api._contract_size = Mock(return_value=0.01)
+    api._coin_amount_to_contracts = Mock(side_effect=lambda symbol, qty: qty / 0.01)
+    api.fetch_positions = Mock(return_value=[{"side": position_side, "contracts": 1}])
+    api.client = Mock()
+    api.client.private_params.side_effect = lambda params: params
+    row = {
+        "symbol": SYMBOL,
+        "complexOId": "attached1",
+        "side": entry_side,
+        "qty": "0.01",
+        "status": "untrigger",
+        "createTime": "1000000",
+        "tpslOrder": {
+            "tpslClOrdId": "ftsafixture01",
+            "tpslMode": "partially_position",
+            "stopLoss": str(stop),
+            "stopLossType": "last_price",
+            "slOrderType": "market",
+            "slLimitPrice": None,
+        },
+    }
+    api._test_rows = [row]
+
+    def request(method, path, **kwargs):
+        if path == "/v2/trade/openOrderComplex":
+            open_states = {"live", "untrigger"}
+            return {"data": [r for r in api._test_rows if r["status"] in open_states]}
+        if path == "/v2/history/orderComplexs":
+            open_states = {"live", "untrigger"}
+            return {"data": [r for r in api._test_rows if r["status"] not in open_states]}
+        if path == "/v1/trade/cancelComplex":
+            assert method == "POST" and kwargs["data"]["complexOId"] == "attached1"
+            api._test_rows[0]["status"] = "canceled"
+            return {"data": {"complexOId": "attached1"}}
+        if path == "/v2/trade/stopPosition":
+            raise AssertionError("Attached protection must be adopted, never re-posted")
+        raise AssertionError(path)
+
+    api.client.request.side_effect = request
+    return api
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+def test_untrigger_attached_stop_parses_open_with_exit_side(
+    position_side, entry_side, exit_side, stop
+):
+    api = attached_api(position_side, entry_side, stop)
+    order = api.fetch_order("attached1", PAIR, {"stop": True})
+    assert order["status"] == "open" and order["amount"] == 1 and order["filled"] == 0
+    assert order["side"] == exit_side  # Normalized closing side for Freqtrade.
+    assert order["info"]["side"] == entry_side  # Raw venue payload is preserved.
+    assert order["stopLossPrice"] == stop
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+def test_untrigger_attached_stop_is_adopted_without_duplicate_post(
+    position_side, entry_side, exit_side, stop
+):
+    api = attached_api(position_side, entry_side, stop)
+    # The bot's fresh request is slightly less protective than the attached stop.
+    requested = stop - 1 if exit_side == "sell" else stop + 1
+    order = api.create_order(
+        symbol=PAIR,
+        type="stop_market",
+        side=exit_side,
+        amount=1,
+        params={"reduceOnly": True, "stopLossPrice": requested},
+    )
+    assert order["id"] == "attached1" and order["status"] == "open"
+    assert order["side"] == exit_side and order["stopLossPrice"] == stop
+    assert all(c.args[0] == "GET" for c in api.client.request.call_args_list)
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+@pytest.mark.parametrize("conflict", ["direction", "quantity", "trigger-basis", "looser-stop"])
+def test_conflicting_attached_protection_is_rejected(
+    position_side, entry_side, exit_side, stop, conflict
+):
+    api = attached_api(position_side, entry_side, stop)
+    row = api._test_rows[0]
+    if conflict == "direction":
+        row["side"] = exit_side
+    elif conflict == "quantity":
+        row["qty"] = "0.02"
+    elif conflict == "trigger-basis":
+        row["tpslOrder"]["stopLossType"] = "mark_price"
+    else:
+        row["tpslOrder"]["stopLoss"] = str(stop - 1 if exit_side == "sell" else stop + 1)
+    with pytest.raises(ccxt.InvalidOrder, match="Conflicting"):
+        api.create_order(
+            symbol=PAIR,
+            type="stop_market",
+            side=exit_side,
+            amount=1,
+            params={"reduceOnly": True, "stopLossPrice": stop},
+        )
+    assert all(c.args[0] == "GET" for c in api.client.request.call_args_list)
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+def test_untrigger_attached_stop_cancel_reads_actual_state(
+    position_side, entry_side, exit_side, stop
+):
+    api = attached_api(position_side, entry_side, stop)
+    order = api.cancel_order("attached1", PAIR, {"stop": True})
+    assert order["status"] == "canceled"
+    posts = [c for c in api.client.request.call_args_list if c.args[0] == "POST"]
+    assert len(posts) == 1 and posts[0].args[1] == "/v1/trade/cancelComplex"
+    assert api.fetch_order("attached1", PAIR, {"stop": True})["status"] == "canceled"
+    api.cancel_order("attached1", PAIR, {"stop": True})
+    assert len([c for c in api.client.request.call_args_list if c.args[0] == "POST"]) == 1
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+def test_untrigger_trigger_racing_with_cancel_is_reconciled(
+    position_side, entry_side, exit_side, stop
+):
+    # The slEffective branch below is a protocol-shaped simulation of a trigger racing
+    # the cancel; no live attached-stop trigger evidence is claimed here.
+    api = attached_api(position_side, entry_side, stop)
+    request = api.client.request.side_effect
+    api.client.order_info.return_value = {"data": {"symbol": SYMBOL, "orderId": "execution-att"}}
+
+    def trigger_during_cancel(method, path, **kwargs):
+        if path == "/v1/trade/cancelComplex":
+            api._test_rows[0]["status"] = "slEffective"
+            return {"data": {"complexOId": "attached1"}}
+        return request(method, path, **kwargs)
+
+    api.client.request.side_effect = trigger_during_cancel
+    order = api.cancel_order("attached1", PAIR, {"stop": True})
+    assert order["status"] == "closed" and order["filled"] == 0 and order["side"] == exit_side
+    assert order["info"]["triggeredOrderId"] == "execution-att"
+    api.client.order_info.assert_called_once_with(
+        {"clientOrderId": "ftsafixture01", "orderFilter": "order"}
+    )
+
+
+@pytest.mark.parametrize("status", ["triggered", "partiallyFilled", "expired"])
+def test_unknown_attached_stop_state_is_rejected(status):
+    api = attached_api("long", "buy", 1522.13)
+    api._test_rows[0]["status"] = status
+    with pytest.raises(ccxt.ExchangeError, match="Unsupported UMX stop-order state"):
+        api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+@pytest.mark.parametrize("side", [None, "hold"])
+def test_attached_stop_invalid_entry_side_is_rejected(side):
+    api = attached_api("long", side, 1522.13)
+    with pytest.raises(ccxt.ExchangeError, match="Invalid UMX attached-stop entry side"):
+        api.fetch_order("attached1", PAIR, {"stop": True})
 
 
 @pytest.mark.parametrize("params", [{}, {"postOnly": True, "tpslOrder": {}}])
@@ -222,8 +394,14 @@ def test_stop_quantity_does_not_send_binary_float_dust(stop_api):
 
 
 @pytest.mark.parametrize("status,filled", [("open", 0), ("open", 0.5), ("closed", 1)])
-def test_native_lookup_uses_execution_status_and_fills(stop_api, status, filled):
-    create(stop_api)
+@pytest.mark.parametrize("attached", [False, True])
+def test_native_lookup_uses_execution_status_and_fills(stop_api, status, filled, attached):
+    if attached:
+        stop_api = attached_api("long", "buy", 1522.13)
+        stop_id = "attached1"
+    else:
+        create(stop_api)
+        stop_id = "stop1"
     stop_api._test_rows[0]["status"] = "slEffective"
     stop_api.client.order_info.return_value = {"data": {"symbol": SYMBOL, "orderId": "execution1"}}
     exchange = object.__new__(UMX)
@@ -245,8 +423,8 @@ def test_native_lookup_uses_execution_status_and_fills(stop_api, status, filled)
             stop_api.fetch_order(order_id, pair, params) if params else deepcopy(execution)
         )
     )
-    order = exchange.fetch_stoploss_order("stop1", PAIR)
-    assert order["id"] == "stop1" and order["id_stop"] == "execution1"
+    order = exchange.fetch_stoploss_order(stop_id, PAIR)
+    assert order["id"] == stop_id and order["id_stop"] == "execution1"
     assert order["status"] == status and order["filled"] == filled
     assert order["status_stop"] == "triggered"
 

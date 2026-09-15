@@ -119,10 +119,18 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
   positions. It checks direction and quantity, adopts a matching owned TPSL after an uncertain
   response, and reads back accepted parameters. A triggered TPSL resolves to its execution order;
   trigger status alone never supplies a fill. Cancellation reads back the resulting state.
-  Spot, take-profit and limit-stop variants remain unsupported. This transport has software
-  coverage but no live TPSL acceptance. Attached entry stops are sent atomically with PO entries
+  Spot, take-profit and limit-stop variants remain unsupported. Full live TPSL acceptance is
+  still pending. Attached entry stops are sent atomically with PO entries
   when configured; adoption requires the actual position quantity and an equal or tighter trigger.
   Venue activation during partial fills and remainder cancellation still require live evidence.
+- Observed attached stops (`ftsa` client IDs) use `untrigger` while waiting, and report the
+  entry direction in their raw `side`. The stop adapter accepts `untrigger` and legacy `live`
+  as open/cancellable states. It matches an attached stop using that entry direction and exposes
+  the opposite, closing direction to Freqtrade while retaining the raw response in `info`.
+  Independently placed position stops (`ftsl` client IDs) keep their existing closing-direction
+  contract; the attached-order observations do not establish a different wire format for them.
+  Unknown states are rejected. A simulated `slEffective` response remains protocol test coverage,
+  not proof of the venue's actual trigger response or exit fill; these require live evidence.
 
 ## Documentation sources
 
