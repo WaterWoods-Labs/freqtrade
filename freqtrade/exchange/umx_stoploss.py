@@ -183,14 +183,15 @@ class UMXStoploss:
     def _parse_stoploss(self, raw, symbol):
         info = self._stop_info(raw)
         state = raw.get("status")
-        if state not in {"live", "untrigger", "canceled", "fail", "slEffective"}:
-            raise ccxt.ExchangeError("Unsupported UMX stop-order state")
+        if state not in {"live", "untrigger", "canceled", "fail", "slEffective", "filled"}:
+            raise ccxt.ExchangeError(f"Unsupported UMX stop-order state: {state!r}")
         status = {
             "live": "open",
             "untrigger": "open",
             "canceled": "canceled",
             "fail": "rejected",
             "slEffective": "closed",
+            "filled": "closed",
         }[state]
         amount = self._coin_amount_to_contracts(symbol, float(raw.get("qty", 0)))
         order = self._parse_order(
@@ -220,7 +221,63 @@ class UMXStoploss:
             if execution.get("symbol") != self.market_id(symbol) or not execution.get("orderId"):
                 raise ccxt.ExchangeError("UMX stop execution order cannot be reconciled")
             order["info"] = {**raw, "triggeredOrderId": str(execution["orderId"])}
+        if state == "filled":
+            # Live-observed attached-stop trigger (2026-09-16, SOXL-USDT-PERP): the venue
+            # reports "filled", the stop record carries no execution-order reference, and
+            # order_info cannot resolve tpslClOrdId. Reconcile the execution order
+            # strictly from bounded recent fills; never invent a linkage.
+            order["info"] = {
+                **raw,
+                "triggeredOrderId": self._find_triggered_order_id(raw, symbol),
+            }
         return order
+
+    def _find_triggered_order_id(self, raw, symbol):
+        """Resolve the execution order of a triggered stop from bounded recent fills."""
+        try:
+            stop_ms = int(raw["updateTime"])
+            qty = float(raw["qty"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ccxt.ExchangeError("Triggered UMX stop lacks update time or quantity") from error
+        if qty <= 0:
+            raise ccxt.ExchangeError("Triggered UMX stop has no positive quantity")
+        window_ms = 5 * 60 * 1000
+        response = self.client.trade_history(
+            symbol=self.market_id(symbol),
+            business_type="linear_perpetual",
+            begin_time=stop_ms,
+            limit=100,
+        )
+        fills = response.get("data")
+        if not isinstance(fills, list):
+            raise ccxt.ExchangeError("UMX fill history response is not a list")
+        candidates = {}
+        for fill in fills:
+            try:
+                fill_ms = int(fill["fillTime"])
+                fill_qty = float(fill["fillQty"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ccxt.ExchangeError("UMX fill record lacks time or quantity") from error
+            if not stop_ms <= fill_ms <= stop_ms + window_ms:
+                continue
+            if fill.get("symbol") != self.market_id(symbol):
+                continue
+            if fill.get("orderType") != "market" or fill.get("side") not in {"buy", "sell"}:
+                continue
+            order_id = str(fill.get("orderId"))
+            candidates.setdefault(order_id, []).append((fill_ms, fill_qty, fill["side"]))
+        matches = [
+            order_id
+            for order_id, parts in candidates.items()
+            if len({side for _, _, side in parts}) == 1
+            and math.isclose(sum(q for _, q, _ in parts), qty, rel_tol=1e-9, abs_tol=1e-9)
+        ]
+        if len(matches) != 1:
+            raise ccxt.ExchangeError(
+                "Triggered UMX stop execution cannot be reconciled from fills: "
+                f"expected exactly one market order with quantity {qty}, found {len(matches)}"
+            )
+        return matches[0]
 
     def _fetch_stoploss(self, order_id, symbol):
         return self._parse_stoploss(self._find_stoploss(order_id, symbol), symbol)

@@ -282,7 +282,90 @@ def test_untrigger_trigger_racing_with_cancel_is_reconciled(
 def test_unknown_attached_stop_state_is_rejected(status):
     api = attached_api("long", "buy", 1522.13)
     api._test_rows[0]["status"] = status
-    with pytest.raises(ccxt.ExchangeError, match="Unsupported UMX stop-order state"):
+    with pytest.raises(
+        ccxt.ExchangeError, match=f"Unsupported UMX stop-order state: '{status}'"
+    ):
+        api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+def _filled_fixture(api, *, status="filled"):
+    # Live-observed wire shape (2026-09-16, SOXL-USDT-PERP attached stop): triggered
+    # attached stops report "filled", carry updateTime, and give no execution-order
+    # reference; order_info cannot resolve the ftsa client ID.
+    row = api._test_rows[0]
+    row["status"] = status
+    row["updateTime"] = "2000000"
+    row["positionId"] = "pos-fixture"
+    row["parentOrderId"] = "entry-order-fixture"
+    return row
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+def test_filled_attached_stop_resolves_execution_from_fills(
+    position_side, entry_side, exit_side, stop
+):
+    api = attached_api(position_side, entry_side, stop)
+    _filled_fixture(api)
+    api.client.trade_history.return_value = {
+        "data": [
+            {
+                "orderId": "execution-1",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": exit_side,
+                "fillQty": "0.006",
+                "fillTime": "2000531",
+            },
+            {  # A fill from another order inside the window must not break matching.
+                "orderId": "execution-2",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": exit_side,
+                "fillQty": "0.004",
+                "fillTime": "2000600",
+            },
+            {
+                "orderId": "execution-1",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": exit_side,
+                "fillQty": "0.004",
+                "fillTime": "2000531",
+            },
+        ]
+    }
+    order = api.fetch_order("attached1", PAIR, {"stop": True})
+    assert order["status"] == "closed" and order["side"] == exit_side
+    assert order["info"]["triggeredOrderId"] == "execution-1"
+    api.client.trade_history.assert_called_once_with(
+        symbol=SYMBOL, business_type="linear_perpetual", begin_time=2000000, limit=100
+    )
+    api.client.order_info.assert_not_called()
+
+
+@pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
+@pytest.mark.parametrize("fills", ["empty", "ambiguous", "quantity-mismatch"])
+def test_filled_attached_stop_without_strict_fill_match_is_rejected(
+    position_side, entry_side, exit_side, stop, fills
+):
+    api = attached_api(position_side, entry_side, stop)
+    _filled_fixture(api)
+    fill = {
+        "orderId": "execution-1",
+        "symbol": SYMBOL,
+        "orderType": "market",
+        "side": exit_side,
+        "fillQty": "0.01",
+        "fillTime": "2000531",
+    }
+    if fills == "empty":
+        api.client.trade_history.return_value = {"data": []}
+    elif fills == "ambiguous":
+        other = {**fill, "orderId": "execution-2"}
+        api.client.trade_history.return_value = {"data": [fill, other]}
+    else:
+        api.client.trade_history.return_value = {"data": [{**fill, "fillQty": "0.009"}]}
+    with pytest.raises(ccxt.ExchangeError, match="cannot be reconciled from fills"):
         api.fetch_order("attached1", PAIR, {"stop": True})
 
 
