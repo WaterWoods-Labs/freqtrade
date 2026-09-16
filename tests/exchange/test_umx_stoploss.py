@@ -282,9 +282,7 @@ def test_untrigger_trigger_racing_with_cancel_is_reconciled(
 def test_unknown_attached_stop_state_is_rejected(status):
     api = attached_api("long", "buy", 1522.13)
     api._test_rows[0]["status"] = status
-    with pytest.raises(
-        ccxt.ExchangeError, match=f"Unsupported UMX stop-order state: '{status}'"
-    ):
+    with pytest.raises(ccxt.ExchangeError, match=f"Unsupported UMX stop-order state: '{status}'"):
         api.fetch_order("attached1", PAIR, {"stop": True})
 
 
