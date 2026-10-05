@@ -173,7 +173,7 @@ def test_list_exchanges(capsys):
     assert re.search(r"All ccxt exchanges and native Freqtrade adapters.*", captured.out)
     assert re.search(r".*binance.*", captured.out)
     assert re.search(r".*bingx.*", captured.out)
-    assert re.search(r".*bitmex.*", captured.out)
+    assert re.search(r".*poloniex.*", captured.out)
 
     # Test with --one-column --all
     args = [
@@ -186,7 +186,7 @@ def test_list_exchanges(capsys):
     captured = capsys.readouterr()
     assert re.search(r"^binance$", captured.out, re.MULTILINE)
     assert re.search(r"^bingx$", captured.out, re.MULTILINE)
-    assert re.search(r"^bitmex$", captured.out, re.MULTILINE)
+    assert re.search(r"^poloniex$", captured.out, re.MULTILINE)
 
     # Only dex
     args = [

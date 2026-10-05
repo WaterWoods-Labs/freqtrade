@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import Mock
 
 import ccxt
@@ -8,6 +9,7 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.umx import UMX
 from freqtrade.exchange.umx_api import UMXSync
 from freqtrade.exchange.umx_connector.client import UMXClient
+from freqtrade.util import dt_ts, dt_utc
 
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
@@ -60,21 +62,143 @@ def test_readonly_leverage_never_sets(actual):
     exchange._set_leverage.assert_not_called()
 
 
-def test_strict_ohlcv_retains_closed_last_and_does_not_fill_gaps(mocker):
+@pytest.fixture
+def strict_ohlcv_exchange():
     exchange = object.__new__(UMX)
     exchange.close = Mock()
-    exchange._config = {"exchange": {"umx_strict_ohlcv": True}}
+    exchange._config = {
+        "exchange": {"umx_strict_ohlcv": True},
+        "candle_type_def": CandleType.FUTURES,
+    }
     exchange._klines = {}
     exchange._pairs_last_refresh_time = {}
+    exchange._pairs_last_poll_time = {}
+    exchange._ohlcv_partial_candle = True
+    exchange._ohlcv_late_candle_grace_ms = 15000
+    exchange._ohlcv_max_poll_interval_ms = 1800000
+    exchange._startup_candle_count = 0
     exchange._ft_has = {"ohlcv_candle_limit": 1000}
     exchange.ohlcv_candle_limit = Mock(return_value=1000)
-    mocker.patch("freqtrade.exchange.exchange.dt_ts", return_value=900000)
-    ticks = [[0, 1, 1, 1, 1, 1], [600000, 1, 1, 1, 1, 1]]
+    return exchange
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_strict_ohlcv_retains_closed_last_and_does_not_fill_gaps(strict_ohlcv_exchange, cache):
+    exchange = strict_ohlcv_exchange
+    start = dt_utc(2026, 1, 1)
+    start_ms = dt_ts(start)
+    ticks = [[start_ms, 1, 1, 1, 1, 1], [start_ms + 600000, 1, 1, 1, 1, 1]]
     frame = exchange._process_ohlcv_df(
-        "ETH/USDT:USDT", "5m", CandleType.FUTURES, ticks, False, True
+        "ETH/USDT:USDT", "5m", CandleType.FUTURES, ticks, cache, True, start_ms + 916000
     )
-    assert len(frame) == 2
-    assert frame.date.iloc[-1].value // 1000000 == 600000
+    assert frame.date.tolist() == [start, start + timedelta(minutes=10)]
+
+    if cache:
+        # The cache merge must also preserve gaps instead of inventing zero-volume candles.
+        frame = exchange._process_ohlcv_df(
+            "ETH/USDT:USDT",
+            "5m",
+            CandleType.FUTURES,
+            [[start_ms + 1200000, 1, 1, 1, 1, 1]],
+            True,
+            True,
+            start_ms + 1516000,
+        )
+        assert frame.date.tolist() == [start + timedelta(minutes=m) for m in (0, 10, 20)]
+        key = ("ETH/USDT:USDT", "5m", CandleType.FUTURES)
+        assert exchange._pairs_last_refresh_time[key] == start_ms + 1200000
+        assert exchange._pairs_last_poll_time[key] == start_ms + 1516000
+
+
+@pytest.mark.parametrize("drop_incomplete", [True, False])
+def test_strict_ohlcv_judges_completeness_at_fetch_start(
+    strict_ohlcv_exchange, time_machine, drop_incomplete
+):
+    exchange = strict_ohlcv_exchange
+    start = dt_utc(2026, 1, 1)
+    start_ms = dt_ts(start)
+    # Processing happens after the close and grace period, but the fetched snapshot is partial.
+    time_machine.move_to(start + timedelta(minutes=15, seconds=20), tick=False)
+    ticks = [[start_ms, 1, 1, 1, 1, 1], [start_ms + 600000, 1, 1, 1, 1, 1]]
+    frame = exchange._process_ohlcv_df(
+        "ETH/USDT:USDT",
+        "5m",
+        CandleType.FUTURES,
+        ticks,
+        False,
+        drop_incomplete,
+        start_ms + 899000,
+    )
+    # Strict mode must still reject the incomplete candle when the caller disables dropping.
+    assert frame.date.tolist() == [start]
+
+
+@pytest.mark.parametrize(
+    "after_close_ms,expected_rows", [(0, 1), (14999, 1), (15000, 2), (16000, 2)]
+)
+def test_strict_ohlcv_withholds_just_closed_candle_until_final(
+    strict_ohlcv_exchange, after_close_ms, expected_rows
+):
+    exchange = strict_ohlcv_exchange
+    start = dt_utc(2026, 1, 1)
+    start_ms = dt_ts(start)
+    ticks = [[start_ms, 1, 1, 1, 1, 1], [start_ms + 600000, 1, 1, 1, 1, 1]]
+    frame = exchange._process_ohlcv_df(
+        "ETH/USDT:USDT",
+        "5m",
+        CandleType.FUTURES,
+        ticks,
+        False,
+        True,
+        start_ms + 900000 + after_close_ms,
+    )
+    assert frame.date.tolist() == [start, start + timedelta(minutes=10)][:expected_rows]
+
+
+@pytest.mark.parametrize("drop_incomplete", [None, True, False])
+@pytest.mark.parametrize("cache", [False, True])
+def test_strict_ohlcv_never_drops_funding_rates(strict_ohlcv_exchange, drop_incomplete, cache):
+    exchange = strict_ohlcv_exchange
+    start = dt_utc(2026, 1, 1)
+    start_ms = dt_ts(start)
+    candle_type = CandleType.FUNDING_RATE
+    drop_hint = exchange._drop_incomplete_candle(candle_type, drop_incomplete)
+    assert drop_hint is False
+    # A settled rate is final even though its timestamp is in the currently forming interval.
+    frame = exchange._process_ohlcv_df(
+        "ETH/USDT:USDT",
+        "1h",
+        candle_type,
+        [[start_ms, 0.0001], [start_ms + 3600000, -0.0002]],
+        cache,
+        drop_hint,
+        start_ms + 5400000,
+    )
+    assert frame.date.tolist() == [start, start + timedelta(hours=1)]
+    assert frame.funding_rate.tolist() == pytest.approx([0.0001, -0.0002])
+    assert frame.open.equals(frame.funding_rate)
+
+
+def test_strict_ohlcv_single_forming_candle_records_poll_without_caching_it(
+    strict_ohlcv_exchange, time_machine
+):
+    exchange = strict_ohlcv_exchange
+    start = dt_utc(2026, 1, 1)
+    start_ms = dt_ts(start)
+    fetch_start_ms = start_ms + 610000
+    time_machine.move_to(start + timedelta(minutes=10, seconds=10), tick=False)
+    key = ("ETH/USDT:USDT", "5m", CandleType.FUTURES)
+    frame = exchange._process_ohlcv_df(
+        *key, [[start_ms + 600000, 1, 1, 1, 1, 1]], True, True, fetch_start_ms
+    )
+    assert frame.empty
+    assert exchange._klines[key].empty
+    assert exchange._pairs_last_poll_time[key] == fetch_start_ms
+    assert exchange._pairs_last_refresh_time[key] == start_ms + 300000
+    assert exchange._now_is_time_to_refresh(*key) is False
+
+    time_machine.move_to(start + timedelta(minutes=15), tick=False)
+    assert exchange._now_is_time_to_refresh(*key) is True
 
 
 def test_public_pacing_shared_and_private_not_queued(mocker):
