@@ -4,8 +4,13 @@ This guide describes the implemented UMX adapter contract. It translates UMX RES
 Freqtrade's native exchange interface; it is not a copy of the exchange's API manual.
 Branch, CI, and release procedures are in [UMX maintenance](umx-maintenance.md).
 
-Maker-specific options are opt-in: `exchange.umx_strict_ohlcv=true` retains a last candle
-only when its closing time has passed and disables missing-candle filling;
+Maker-specific options are opt-in: `exchange.umx_strict_ohlcv=true` disables missing-candle
+filling, including when merging cached candles, and excludes unfinished price candles even
+when a caller requests partial candles. Finality is judged at the request start time, not
+the later processing time. A just-closed candle with no newer candle is withheld for the
+upstream grace period (15 seconds by default, capped at half the timeframe); older completed
+candles are retained even when UMX omits periods without trades. Funding-rate records are
+always final and are not dropped by this rule;
 `exchange.umx_leverage_readonly=true` checks that symbol leverage is already 1x without
 setting it; `exchange.umx_public_request_interval=0.2` spaces public GET starts across
 the synchronous/asynchronous clients in one process. Private requests bypass that public
