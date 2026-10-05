@@ -234,10 +234,12 @@ class FreqtradeBot(LoggingMixin):
         try:
             # Wrap db activities in shutdown to avoid problems if database is gone,
             # and raises further exceptions.
-            if self.config.get("cancel_open_orders_on_exit"):
-                self.cancel_all_open_orders()
+            # Trade.session is missing if startup failed before init_db().
+            if hasattr(Trade, "session"):
+                if self.config.get("cancel_open_orders_on_exit"):
+                    self.cancel_all_open_orders()
 
-            self.check_for_open_trades()
+                self.check_for_open_trades()
         except Exception as e:
             logger.warning(f"Exception during cleanup: {e.__class__.__name__} {e}")
 
@@ -2378,11 +2380,12 @@ class FreqtradeBot(LoggingMixin):
         :return: amount to exit
         :raise: DependencyException: if available balance is not within 2% of the available amount.
         """
-        # Update wallets to ensure amounts tied up in a stoploss is now free!
-        self.wallets.update()
         if self.trading_mode == TradingMode.FUTURES:
             # A safe exit amount isn't needed for futures, you can just exit/close the position
             return amount
+
+        # Update wallets to ensure amounts tied up in a stoploss is now free!
+        self.wallets.update()
 
         trade_base_currency = self.exchange.get_pair_base_currency(pair)
         # Free + Used - open orders will eventually still be canceled.
