@@ -200,11 +200,7 @@ class UMXStoploss:
             amount=amount,
             status=status,
         )
-        # Attached protections report the entry side; Freqtrade tracks the closing side.
-        if str(info.get("tpslClOrdId", "")).startswith("ftsa"):
-            if raw.get("side") not in {"buy", "sell"}:
-                raise ccxt.ExchangeError("Invalid UMX attached-stop entry side")
-            order["side"] = "sell" if raw["side"] == "buy" else "buy"
+        order["side"] = self._stop_exit_side(raw)
         order.update(
             stopLossPrice=float(info["stopLoss"]),
             stopPrice=float(info["stopLoss"]),
@@ -232,6 +228,15 @@ class UMXStoploss:
             }
         return order
 
+    def _stop_exit_side(self, raw):
+        side = raw.get("side")
+        attached = str(self._stop_info(raw).get("tpslClOrdId", "")).startswith("ftsa")
+        if side not in {"buy", "sell"}:
+            kind = "attached-stop entry" if attached else "stop"
+            raise ccxt.ExchangeError(f"Invalid UMX {kind} side")
+        # Attached protections report the entry side; standalone stops report the exit side.
+        return ("sell" if side == "buy" else "buy") if attached else side
+
     def _find_triggered_order_id(self, raw, symbol):
         """Resolve the execution order of a triggered stop from bounded recent fills."""
         try:
@@ -241,16 +246,24 @@ class UMXStoploss:
             raise ccxt.ExchangeError("Triggered UMX stop lacks update time or quantity") from error
         if qty <= 0:
             raise ccxt.ExchangeError("Triggered UMX stop has no positive quantity")
+        exit_side = self._stop_exit_side(raw)
         window_ms = 5 * 60 * 1000
+        # A venue-observed filled stop had a whole-second updateTime 5 ms after
+        # its execution fillTime. Allow one second of timestamp rounding without
+        # admitting an unbounded history of unrelated executions.
+        begin_ms = max(0, stop_ms - 1000)
         response = self.client.trade_history(
             symbol=self.market_id(symbol),
             business_type="linear_perpetual",
-            begin_time=stop_ms,
+            begin_time=begin_ms,
             limit=100,
+            params={"endTime": stop_ms + window_ms},
         )
         fills = response.get("data")
         if not isinstance(fills, list):
             raise ccxt.ExchangeError("UMX fill history response is not a list")
+        if len(fills) >= 100:
+            raise ccxt.ExchangeError("Triggered UMX fill history may be truncated")
         candidates = {}
         for fill in fills:
             try:
@@ -258,7 +271,7 @@ class UMXStoploss:
                 fill_qty = float(fill["fillQty"])
             except (KeyError, TypeError, ValueError) as error:
                 raise ccxt.ExchangeError("UMX fill record lacks time or quantity") from error
-            if not stop_ms <= fill_ms <= stop_ms + window_ms:
+            if not begin_ms <= fill_ms <= stop_ms + window_ms:
                 continue
             if fill.get("symbol") != self.market_id(symbol):
                 continue
@@ -270,6 +283,7 @@ class UMXStoploss:
             order_id
             for order_id, parts in candidates.items()
             if len({side for _, _, side in parts}) == 1
+            and parts[0][2] == exit_side
             and math.isclose(sum(q for _, q, _ in parts), qty, rel_tol=1e-9, abs_tol=1e-9)
         ]
         if len(matches) != 1:
