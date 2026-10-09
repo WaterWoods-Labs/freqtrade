@@ -137,8 +137,11 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
   Unknown states are rejected with the raw state value in the error. Live evidence
   (2026-09-16, SOXL-USDT-PERP attached stop) shows a triggered attached stop reports `filled`
   with no execution-order reference, and `order_info` cannot resolve its `ftsa` client ID;
-  the adapter reconciles the execution order strictly from bounded post-trigger fills
-  (single market order matching the stop quantity) and rejects ambiguity. The simulated
+  the adapter reconciles the execution order from fills between one second before and five
+  minutes after the stop's `updateTime`. The one-second lookback accounts for a venue-observed
+  whole-second stop update occurring 5 ms after its millisecond execution timestamp. A single
+  market order must match the symbol, closing direction, and total stop quantity. Ambiguous
+  matches and a full 100-fill response (which may omit other matches) are rejected. The simulated
   `slEffective` response remains protocol test coverage for the legacy trigger wording.
 
 ## Documentation sources

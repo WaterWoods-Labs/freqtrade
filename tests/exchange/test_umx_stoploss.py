@@ -336,9 +336,174 @@ def test_filled_attached_stop_resolves_execution_from_fills(
     assert order["status"] == "closed" and order["side"] == exit_side
     assert order["info"]["triggeredOrderId"] == "execution-1"
     api.client.trade_history.assert_called_once_with(
-        symbol=SYMBOL, business_type="linear_perpetual", begin_time=2000000, limit=100
+        symbol=SYMBOL,
+        business_type="linear_perpetual",
+        begin_time=1999000,
+        limit=100,
+        params={"endTime": 2300000},
     )
     api.client.order_info.assert_not_called()
+
+
+def test_filled_stop_reconciles_observed_natgas_fill_before_update_time():
+    api = attached_api("long", "buy", 1522.13)
+    symbol = "NATGAS-USDT-PERP"
+    api.market_id.return_value = symbol
+    row = _filled_fixture(api)
+    # Observed NATGAS stop updateTime has second resolution; its closing fill is
+    # five milliseconds earlier. Replay only the fields needed for reconciliation.
+    row.update(symbol=symbol, qty="5.9", updateTime="1791474982000")
+    api.client.trade_history.return_value = {
+        "data": [
+            {
+                "orderId": "natgas-execution",
+                "symbol": symbol,
+                "orderType": "market",
+                "side": "sell",
+                "fillQty": "5.9",
+                "fillTime": "1791474981995",
+            }
+        ]
+    }
+
+    assert api._find_triggered_order_id(row, "NATGAS/USDT:USDT") == "natgas-execution"
+    api.client.trade_history.assert_called_once_with(
+        symbol=symbol,
+        business_type="linear_perpetual",
+        begin_time=1791474981000,
+        limit=100,
+        params={"endTime": 1791475282000},
+    )
+    api.client.order_info.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "offset_ms,accepted",
+    [(-1001, False), (-1000, True), (0, True), (300000, True), (300001, False)],
+)
+def test_filled_attached_stop_bounds_execution_time(offset_ms, accepted):
+    api = attached_api("long", "buy", 1522.13)
+    row = _filled_fixture(api)
+    api.client.trade_history.return_value = {
+        "data": [
+            {
+                "orderId": "execution-1",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": "sell",
+                "fillQty": row["qty"],
+                "fillTime": str(int(row["updateTime"]) + offset_ms),
+            }
+        ]
+    }
+
+    if accepted:
+        order = api.fetch_order("attached1", PAIR, {"stop": True})
+        assert order["info"]["triggeredOrderId"] == "execution-1"
+    else:
+        with pytest.raises(ccxt.ExchangeError, match="cannot be reconciled from fills"):
+            api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+@pytest.mark.parametrize(
+    "client_id,raw_side,exit_side",
+    [
+        ("ftsafixture", "buy", "sell"),
+        ("ftsafixture", "sell", "buy"),
+        ("ftslfixture", "sell", "sell"),
+        ("ftslfixture", "buy", "buy"),
+    ],
+)
+@pytest.mark.parametrize("include_exit_fill", [False, True])
+def test_filled_stop_only_matches_execution_on_closing_side(
+    client_id, raw_side, exit_side, include_exit_fill
+):
+    api = attached_api("long", "buy", 1522.13)
+    row = _filled_fixture(api)
+    row["side"] = raw_side
+    row["tpslOrder"]["tpslClOrdId"] = client_id
+    wrong_side = "buy" if exit_side == "sell" else "sell"
+    fill = {
+        "orderId": "wrong-direction",
+        "symbol": SYMBOL,
+        "orderType": "market",
+        "side": wrong_side,
+        "fillQty": row["qty"],
+        "fillTime": "1999995",
+    }
+    fills = [fill]
+    if include_exit_fill:
+        fills.append({**fill, "orderId": "execution-1", "side": exit_side})
+    api.client.trade_history.return_value = {"data": fills}
+
+    if include_exit_fill:
+        order = api.fetch_order("attached1", PAIR, {"stop": True})
+        assert order["side"] == exit_side
+        assert order["info"]["triggeredOrderId"] == "execution-1"
+    else:
+        with pytest.raises(ccxt.ExchangeError, match="cannot be reconciled from fills"):
+            api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+def test_filled_attached_stop_rejects_ambiguity_across_update_time():
+    api = attached_api("long", "buy", 1522.13)
+    row = _filled_fixture(api)
+    fill = {
+        "orderId": "execution-before",
+        "symbol": SYMBOL,
+        "orderType": "market",
+        "side": "sell",
+        "fillQty": row["qty"],
+        "fillTime": "1999995",
+    }
+    api.client.trade_history.return_value = {
+        "data": [fill, {**fill, "orderId": "execution-after", "fillTime": "2000531"}]
+    }
+
+    with pytest.raises(ccxt.ExchangeError, match=r"expected exactly one market order.*found 2"):
+        api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+def test_filled_stop_rejects_mixed_side_execution():
+    api = attached_api("long", "buy", 1522.13)
+    row = _filled_fixture(api)
+    fill = {
+        "orderId": "execution-1",
+        "symbol": SYMBOL,
+        "orderType": "market",
+        "side": "sell",
+        "fillQty": row["qty"],
+        "fillTime": "1999995",
+    }
+    api.client.trade_history.return_value = {
+        "data": [fill, {**fill, "side": "buy", "fillQty": "0.004"}]
+    }
+
+    # Filtering away the wrong-side part would manufacture an exact quantity match.
+    with pytest.raises(ccxt.ExchangeError, match="cannot be reconciled from fills"):
+        api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+def test_filled_stop_rejects_potentially_truncated_fill_history():
+    api = attached_api("long", "buy", 1522.13)
+    row = _filled_fixture(api)
+    api.client.trade_history.return_value = {
+        "data": [
+            {
+                "orderId": f"execution-{index}",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": "sell",
+                "fillQty": row["qty"] if index == 0 else "0.004",
+                "fillTime": "1999995",
+            }
+            for index in range(100)
+        ]
+    }
+
+    # One matching order on a full page cannot exclude another match on a missing page.
+    with pytest.raises(ccxt.ExchangeError, match="Triggered UMX fill history may be truncated"):
+        api.fetch_order("attached1", PAIR, {"stop": True})
 
 
 @pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
