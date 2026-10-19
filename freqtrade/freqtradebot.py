@@ -64,6 +64,8 @@ from freqtrade.rpc.rpc_types import (
 )
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
+from freqtrade.umx_opportunity import EntryIntent, OpportunityController
+from freqtrade.umx_opportunity import enabled as opportunity_enabled
 from freqtrade.util import FtPrecise, FtScheduler, MeasureTime, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.migrations import migrate_live_content
 from freqtrade.wallets import Wallets
@@ -196,6 +198,11 @@ class FreqtradeBot(LoggingMixin):
             self._schedule.every().day.at("00:07").do(self.wallets.record_wallet_state)
 
             self.strategy.ft_bot_start()
+            self._umx_opportunity = (
+                OpportunityController(self)
+                if opportunity_enabled(self.strategy, self.config)
+                else None
+            )
             # Initialize protections AFTER bot start - otherwise parameters are not loaded.
             self.protections = ProtectionManager(self.config, self.strategy.protections)
 
@@ -266,6 +273,8 @@ class FreqtradeBot(LoggingMixin):
         Called on startup and after reloading the bot - triggers notifications and
         performs startup tasks
         """
+        if self._umx_opportunity:
+            self._umx_opportunity.reconcile(startup=True)
         migrate_live_content(self.config, self.exchange, self.wallets.get_starting_balance())
         set_startup_time()
 
@@ -339,6 +348,8 @@ class FreqtradeBot(LoggingMixin):
 
         with self._exit_lock:
             # Check for exchange cancellations, timeouts and user requested replace
+            if self._umx_opportunity:
+                self._umx_opportunity.reconcile()
             self.manage_open_orders()
 
         # Protect from collisions with force_exit.
@@ -802,6 +813,12 @@ class FreqtradeBot(LoggingMixin):
         :param free_trade_slots: Number of available slots for new trades.
         :return: Number of trades created
         """
+        if self._umx_opportunity:
+            with self._exit_lock:
+                return self._umx_opportunity.run(free_trade_slots)
+        return self._enter_ordinary_positions(free_trade_slots)
+
+    def _enter_ordinary_positions(self, free_trade_slots: int) -> int:
         trades_created = 0
 
         whitelist = self.active_pair_whitelist.copy()
@@ -1064,7 +1081,34 @@ class FreqtradeBot(LoggingMixin):
             logger.info(f"Bids to asks delta for {pair} does not satisfy condition.")
             return False
 
-    def execute_entry(
+    def _validate_opportunity_entry(self, intent, recovered, pair, is_short, trade, mode):
+        controller = self._umx_opportunity
+        if controller and (
+            not controller.authorized(intent)
+            or mode != "initial"
+            or trade is not None
+            or pair != intent.pair
+            or is_short != (intent.side == "short")
+        ):
+            raise OperationalException("Opportunity entry requires a frozen controller intent")
+        if not controller and (intent is not None or recovered is not None):
+            raise OperationalException("Opportunity intent supplied to an ordinary strategy")
+
+    def _place_entry(self, intent, recovered, **kwargs):
+        controller = self._umx_opportunity
+        if recovered is not None:
+            if not controller or not controller.recovering:
+                raise OperationalException("Order recovery requires the opportunity controller")
+            return recovered
+        if controller and not controller.before_submit(intent):
+            return None
+        extra = {"client_order_id": intent.id} if controller else {}
+        order = self.exchange.create_order(**kwargs, **extra)
+        if controller:
+            controller.after_response(intent, order)
+        return order
+
+    def execute_entry(  # noqa: C901 - preserve the native entry bookkeeping for both paths.
         self,
         pair: str,
         stake_amount: float,
@@ -1076,6 +1120,8 @@ class FreqtradeBot(LoggingMixin):
         trade: Trade | None = None,
         mode: EntryExecuteMode = "initial",
         leverage_: float | None = None,
+        opportunity_intent: EntryIntent | None = None,
+        recovered_order: CcxtOrder | None = None,
     ) -> bool:
         """
         Executes an entry for the given pair
@@ -1084,6 +1130,10 @@ class FreqtradeBot(LoggingMixin):
         :return: True if an entry order is created, False if it fails.
         :raise: DependencyException or it's subclasses like ExchangeError.
         """
+        controller = self._umx_opportunity
+        self._validate_opportunity_entry(
+            opportunity_intent, recovered_order, pair, is_short, trade, mode
+        )
         time_in_force = self.strategy.order_time_in_force["entry"]
 
         side: BuySell = "sell" if is_short else "buy"
@@ -1091,9 +1141,14 @@ class FreqtradeBot(LoggingMixin):
         trade_side: LongShort = "short" if is_short else "long"
         pos_adjust = trade is not None
 
-        enter_limit_requested, stake_amount, leverage = self.get_valid_enter_price_and_stake(
-            pair, price, stake_amount, trade_side, enter_tag, trade, mode, leverage_
-        )
+        if controller:
+            enter_limit_requested, amount = controller.exact_values(opportunity_intent)
+            stake_amount = amount * enter_limit_requested
+            leverage = 1.0
+        else:
+            enter_limit_requested, stake_amount, leverage = self.get_valid_enter_price_and_stake(
+                pair, price, stake_amount, trade_side, enter_tag, trade, mode, leverage_
+            )
 
         if not stake_amount:
             return False
@@ -1111,20 +1166,22 @@ class FreqtradeBot(LoggingMixin):
             )
         )
         logger.info(msg)
-        amount = (stake_amount / enter_limit_requested) * leverage
+        amount = amount if controller else (stake_amount / enter_limit_requested) * leverage
         order_type = ordertype or self.strategy.order_types["entry"]
 
-        if mode == "initial" and not strategy_safe_wrapper(
-            self.strategy.confirm_trade_entry, default_retval=True
-        )(
-            pair=pair,
-            order_type=order_type,
-            amount=amount,
-            rate=enter_limit_requested,
-            time_in_force=time_in_force,
-            current_time=datetime.now(UTC),
-            entry_tag=enter_tag,
-            side=trade_side,
+        if (
+            not controller
+            and mode == "initial"
+            and not strategy_safe_wrapper(self.strategy.confirm_trade_entry, default_retval=True)(
+                pair=pair,
+                order_type=order_type,
+                amount=amount,
+                rate=enter_limit_requested,
+                time_in_force=time_in_force,
+                current_time=datetime.now(UTC),
+                entry_tag=enter_tag,
+                side=trade_side,
+            )
         ):
             logger.info(f"User denied entry for {pair}.")
             return False
@@ -1132,7 +1189,9 @@ class FreqtradeBot(LoggingMixin):
         if trade and self.handle_similar_open_order(trade, enter_limit_requested, amount, side):
             return False
 
-        order = self.exchange.create_order(
+        order = self._place_entry(
+            opportunity_intent,
+            recovered_order,
             pair=pair,
             ordertype=order_type,
             side=side,
@@ -1143,6 +1202,8 @@ class FreqtradeBot(LoggingMixin):
             leverage=leverage,
             initial_order=trade is None,
         )
+        if order is None:
+            return False
         order_obj = Order.parse_from_ccxt_object(order, pair, side, amount, enter_limit_requested)
         order_obj.ft_order_tag = enter_tag
         order_id = order["id"]
@@ -1212,7 +1273,7 @@ class FreqtradeBot(LoggingMixin):
                 fee_close=fee,
                 open_rate=enter_limit_filled_price,
                 open_rate_requested=enter_limit_requested,
-                open_date=datetime.now(UTC),
+                open_date=dt_from_ts(order["timestamp"]) if controller else datetime.now(UTC),
                 exchange=self.exchange.id,
                 strategy=self.strategy.get_strategy_name(),
                 enter_tag=enter_tag,
@@ -2548,6 +2609,8 @@ class FreqtradeBot(LoggingMixin):
             logger.warning("Unable to fetch order %s: %s", order_id, exception)
             return False
 
+        if self._umx_opportunity:
+            self._umx_opportunity.invalidate_stale_fee(trade, order)
         trade.update_order(order)
 
         if self.exchange.check_order_canceled_empty(order):

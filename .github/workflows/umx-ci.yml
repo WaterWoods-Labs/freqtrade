@@ -101,6 +101,8 @@ jobs:
       - name: Run focused UMX tests
         run: |
           pytest -q \
+            tests/test_umx_opportunity.py \
+            tests/test_umx_opportunity_allocation.py \
             tests/exchange/test_umx.py \
             tests/exchange/test_umx_maker.py \
             tests/exchange/test_umx_stoploss.py \

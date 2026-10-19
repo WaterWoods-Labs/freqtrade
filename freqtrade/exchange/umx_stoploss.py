@@ -4,6 +4,7 @@ Only market stop losses on an existing net perpetual position are supported.
 Trigger acknowledgement is not a fill: Freqtrade must query the execution order.
 """
 
+import hashlib
 import math
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from uuid import uuid4
@@ -45,7 +46,11 @@ class UMXStoploss:
             **params,
             "clientOrderId": params.get("clientOrderId") or "ftme" + uuid4().hex[:28],
             "tpslOrder": {
-                "tpslClOrdId": "ftsa" + uuid4().hex[:28],
+                "tpslClOrdId": (
+                    "ftsa" + hashlib.sha256(params["clientOrderId"].encode()).hexdigest()[:28]
+                    if str(params.get("clientOrderId", "")).startswith("ftop")
+                    else "ftsa" + uuid4().hex[:28]
+                ),
                 "stopLoss": format(stop, "f"),
                 "stopLossType": "last_price",
                 "slOrderType": "market",

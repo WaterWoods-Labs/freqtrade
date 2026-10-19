@@ -1,7 +1,9 @@
 """ccxt-like UMX facade backed by the internal REST connector."""
 
 import asyncio
+import math
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import ccxt
@@ -656,6 +658,7 @@ class UMXSync(UMXStoploss):
         payload = self.client.place_order(body)
         raw = {
             **(payload.get("data") or {}),
+            "clientOrderId": body["clientOrderId"],
             "symbol": self.market_id(symbol),
             "side": side.lower(),
             "orderType": order_type,
@@ -710,6 +713,13 @@ class UMXSync(UMXStoploss):
             {"orderId": order_id, "orderFilter": "order", **(params or {})}
         )
         return self._parse_order(payload.get("data") or {}, symbol=symbol)
+
+    def fetch_order_by_client_id(self, client_order_id: str, symbol: str) -> dict[str, Any]:
+        payload = self.client.order_info({"clientOrderId": client_order_id, "orderFilter": "order"})
+        raw = payload.get("data")
+        if not isinstance(raw, dict) or raw.get("clientOrderId") != client_order_id:
+            raise ccxt.ExchangeError("UMX client order identity cannot be established")
+        return self._parse_order(raw, symbol=symbol)
 
     def fetch_open_orders(
         self,
@@ -1009,9 +1019,11 @@ class UMXSync(UMXStoploss):
         windows: list[tuple[int | None, int | None]],
         page_size: int,
         request_params: dict[str, Any],
+        strict: bool = False,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+        strict_seen: dict[str, tuple] = {}
         for window_start, window_end in windows:
             page_params = dict(request_params)
             previous_cursor: str | None = None
@@ -1025,8 +1037,20 @@ class UMXSync(UMXStoploss):
                     params=page_params,
                 )
                 page = payload.get("data", [])
+                if strict and ("data" not in payload or not isinstance(page, list)):
+                    raise ccxt.ExchangeError("UMX funding bill page is missing or invalid")
                 for raw in page:
+                    if strict:
+                        self._validate_funding_bill(raw)
                     row_id = str(raw.get("id") or raw.get("actionId") or "")
+                    if strict:
+                        signature = tuple(
+                            raw.get(k)
+                            for k in ("actionType", "symbol", "currency", "qty", "createTime")
+                        )
+                        if row_id in strict_seen and strict_seen[row_id] != signature:
+                            raise ccxt.ExchangeError("UMX funding bill changed between pages")
+                        strict_seen[row_id] = signature
                     if row_id and row_id in seen_ids:
                         continue
                     if row_id:
@@ -1040,6 +1064,32 @@ class UMXSync(UMXStoploss):
                 previous_cursor = cursor
                 page_params["endId"] = cursor
         return rows
+
+    @staticmethod
+    def _validate_funding_bill(raw):
+        if not isinstance(raw, dict) or raw.get("actionType") is None:
+            raise ccxt.ExchangeError("UMX funding bill action type is missing")
+        if str(raw["actionType"]) != "18":
+            return
+        try:
+            amount = Decimal(str(raw["qty"]))
+            timestamp = Decimal(str(raw["createTime"]))
+            valid = (
+                amount.is_finite()
+                and math.isfinite(float(amount))
+                and timestamp.is_finite()
+                and timestamp > 0
+                and timestamp == timestamp.to_integral_value()
+                and bool(raw.get("id") or raw.get("actionId"))
+                and isinstance(raw.get("symbol"), str)
+                and bool(raw["symbol"])
+                and isinstance(raw.get("currency"), str)
+                and bool(raw["currency"])
+            )
+        except (KeyError, ValueError, TypeError, InvalidOperation, OverflowError) as error:
+            raise ccxt.ExchangeError("UMX funding bill amount/time evidence is invalid") from error
+        if not valid:
+            raise ccxt.ExchangeError("UMX funding bill amount/time/identity evidence is invalid")
 
     def _parse_funding_bill(
         self,
@@ -1074,6 +1124,7 @@ class UMXSync(UMXStoploss):
         params: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         request_params = dict(params or {})
+        strict = request_params.pop("opportunityStrict", False) is True
         request_params.pop("actionType", None)
         explicit_begin = request_params.pop("beginTime", None)
         explicit_end = request_params.pop("endTime", None)
@@ -1089,7 +1140,9 @@ class UMXSync(UMXStoploss):
         windows = self._funding_bill_windows(
             begin_time, end_time, int(explicit_end) if explicit_end is not None else None
         )
-        rows = self._fetch_funding_bill_rows(windows, min(limit or 100, 100), request_params)
+        rows = self._fetch_funding_bill_rows(
+            windows, min(limit or 100, 100), request_params, strict
+        )
         history = [
             parsed
             for raw in rows

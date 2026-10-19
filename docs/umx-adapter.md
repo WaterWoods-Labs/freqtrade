@@ -144,6 +144,60 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
   matches and a full 100-fill response (which may omit other matches) are rejected. The simulated
   `slEffective` response remains protocol test coverage for the legacy trigger wording.
 
+## Opportunity Maker execution contract
+
+`UMXChanB1S1OpportunityMaker` opts into core contract version 1 with
+`umx_opportunity_mode: true`. All three markers (strategy name, strategy contract version,
+and configuration flag) must agree. The existing fixed-20-USDT Maker path remains separate.
+The strategy supplies current qualified candidates; the core freezes the ordered batch after
+analysis, open-order reconciliation and exits, before its first entry request. Same-minute exits
+cannot reverse into another position in that symbol. Ordinary callbacks, force-entry and position
+adjustment cannot bypass this path, and callback exceptions cannot fall back to permissive values.
+
+The strategy requires the original ordered 56-pair universe, 1x cross margin,
+`available_capital=1000`, `max_open_trades=5`, and an initial STOPPED state.
+`stake_amount="unlimited"` provides schema compatibility; native slot-based sizing is bypassed.
+Closed B1/S1 signals retain the original higher-timeframe and anchor checks and are eligible for
+the first 60 seconds after their 5-minute candle closes. Entry orders retain the 60-second timeout.
+Entries use native PO with attached 3% last-price protection; exits keep the existing reversal
+and stop behavior.
+
+The independent allocation starts at 1000 USDT. Each decision-minute snapshot computes 95% of
+allocated equity, subtracts marked absolute exposure and actual outstanding entry amounts, and
+shares the remainder among the current batch, with at most five occupied symbols. Market maxima
+redistribute capped excess; failing minima are removed in reverse priority and replenished before
+quantities are frozen. Contract increments round down and dust remains cash. Existing positions
+are not rebalanced. Subsequent fills, fees, cancellations and price changes never resize another
+intent in that batch. Positive actual fees reduce the next decision's equity and available budget;
+95% is a decision-time entry budget, not a continuously maintained exposure limit.
+
+`user_data/umx_b1s1_maker_state/opportunity.sqlite` binds the strategy, database location, initial
+capital and ordered universe. An atomic batch transaction claims every selected signal before
+submission. Intents progress through `PLANNED`, `SUBMITTING`, `ACKED`, `REGISTERED` and `DONE`;
+unsubmitted expired or interrupted intents become `SKIPPED` without reusing their signal.
+`SUBMITTING` without acknowledgement is uncertain indefinitely. Recovery only queries its
+original client ID, persists the response and restores the native Trade/Order record using the
+original exchange timestamp. It never resubmits or frees an uncertain request on a timeout.
+Parsed definitive venue rejections end that intent without changing the rest of its batch.
+Missing registered history blocks entry instead of silently resetting capital to 1000 USDT.
+
+Allocated cash is reconstructed from actual entry/exit fills and signed USDT fees. Funding bills
+have a separate durable ID ledger and strict successful-query checkpoint, including stops and
+partial exits; native funding-error fallbacks and estimated closing fees are not equity inputs.
+An audit gap beyond the supported 89-day funding retention window blocks new entries. Fee data
+missing for a newly observed filled quantity also blocks entry. Account equity or deposits do not
+increase the allocation. All six account scopes are checked: position scopes must agree,
+ordinary orders must match their recorded quantities, OCO/trigger entry orders are forbidden,
+and TPSL orders must belong to native protection or the deterministic attached-stop identity of
+a frozen intent. Unowned or absent protection blocks new entries without canceling it.
+
+Dry-run accounting uses simulated fills and gross marked unrealized PnL, never private account
+requests; private settled funding is excluded from its ledger. Its PO simulation rejects a
+crossing quote using the same book used by its fill helper.
+Offline tests and public-market dry runs do not establish real venue fills, stop activation during
+partial fills, cancel races, or host-loss acceptance. Runtime deployment and final activation still
+require the maintained immutable-image and acceptance runbook.
+
 ## Documentation sources
 
 Consult the official [concise coin API](https://www.umx.com/zh-CN/docs/coin-apis/introduction/quick-start)
