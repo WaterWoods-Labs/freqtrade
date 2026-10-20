@@ -28,7 +28,7 @@ jobs:
     strategy:
       matrix:
         os: [ "ubuntu-22.04", "ubuntu-24.04", "ubuntu-26.04", "ubuntu-24.04-arm", "macos-15" , "macos-26", "windows-2022", "windows-2025" ]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
         exclude:
           - os: "ubuntu-22.04"
             python-version: "3.13"
@@ -36,12 +36,8 @@ jobs:
             python-version: "3.14"
           # Reduce ARM runs to newer python versions
           - os: "ubuntu-24.04-arm"
-            python-version: "3.11"
-          - os: "ubuntu-24.04-arm"
             python-version: "3.12"
           # ubuntu 26.04 has 3.14 as default python version
-          - os: "ubuntu-26.04"
-            python-version: "3.11"
           - os: "ubuntu-26.04"
             python-version: "3.12"
           - os: "ubuntu-26.04"
@@ -286,7 +282,7 @@ jobs:
 
     - name: Tests incl. ccxt compatibility tests
       env:
-        CI_WEB_PROXY: http://152.67.66.8:13128
+        CI_WEB_PROXY: http://140.238.213.2:13128
       run: |
         pytest --random-order --longrun --durations 20 -n auto
 
