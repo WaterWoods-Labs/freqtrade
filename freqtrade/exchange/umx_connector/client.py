@@ -125,7 +125,22 @@ class UMXClient:
             payload = response.json()
         except ValueError as e:
             raise ccxt.ExchangeError("UMX returned invalid JSON") from e
-        return self._handle_response(payload)
+        return self._handle_request_payload(payload, method, path)
+
+    def _handle_request_payload(self, payload, method, path):
+        try:
+            return self._handle_response(payload)
+        except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as error:
+            # Only a parsed venue rejection of this POST is definitive. Transport failures,
+            # throttles, duplicate IDs and other ambiguous outcomes must be recovered by GET.
+            message = str(error).lower()
+            if (
+                method == "POST"
+                and path == "/v2/trade/order"
+                and not any(word in message for word in ("duplicate", "already", "重复", "已存在"))
+            ):
+                error.umx_definitive_rejection = True
+            raise
 
     def public_symbols(
         self, params: dict[str, Any] | None = None, business_type: str = UMX_BUSINESS_SPOT

@@ -1276,6 +1276,13 @@ class Exchange(LoggingMixin):
         orderbook: OrderBook | None = None
         if self.exchange_has("fetchL2OrderBook"):
             orderbook = self.fetch_l2_order_book(pair, 20)
+        if params and params.get("postOnly"):
+            if not orderbook or not orderbook["bids"] or not orderbook["asks"]:
+                raise OperationalException("PO simulation requires a current order book")
+            if self._dry_is_price_crossed(pair, side, rate, orderbook):
+                dry_order["status"] = "rejected"
+                self._dry_run_open_orders[dry_order["id"]] = dry_order
+                return dry_order
         if not stop_loss and ordertype == "limit" and orderbook:
             # Allow a 1% price difference
             allowed_diff = 0.01
@@ -1525,6 +1532,13 @@ class Exchange(LoggingMixin):
             or self._ft_has.get("marketOrderRequiresPrice", False)
         )
 
+    def _client_order_params(self, client_order_id: str | None) -> dict:
+        if client_order_id is None:
+            return {}
+        if self.id != "umx":
+            raise OperationalException("Frozen entry client IDs are supported only on UMX")
+        return {"clientOrderId": client_order_id}
+
     def create_order(
         self,
         *,
@@ -1537,14 +1551,25 @@ class Exchange(LoggingMixin):
         time_in_force: str = "GTC",
         reduceOnly: bool = False,
         initial_order: bool = True,
+        client_order_id: str | None = None,
     ) -> CcxtOrder:
         if self._config["dry_run"]:
+            dry_params = {"postOnly": True} if client_order_id is not None else None
             dry_order = self.create_dry_run_order(
-                pair, ordertype, side, amount, self.price_to_precision(pair, rate), leverage
+                pair,
+                ordertype,
+                side,
+                amount,
+                self.price_to_precision(pair, rate),
+                leverage,
+                params=dry_params,
             )
+            if client_order_id is not None:
+                dry_order["clientOrderId"] = client_order_id
             return dry_order
 
         params = self._get_params(side, ordertype, leverage, reduceOnly, time_in_force)
+        params.update(self._client_order_params(client_order_id))
 
         try:
             # Set the precision for amount and price(rate) as accepted by the exchange

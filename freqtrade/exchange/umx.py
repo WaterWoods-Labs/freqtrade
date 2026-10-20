@@ -29,6 +29,64 @@ class UMX(Exchange):
     """
 
     umx_maker_contract_version = 3
+    umx_opportunity_contract_version = 1
+
+    def fetch_order_by_client_id(self, client_order_id, pair):
+        """GET-only recovery of a durable entry intent; a miss never authorizes retry."""
+        if self._config["dry_run"]:
+            for order in self._dry_run_open_orders.values():
+                if order.get("clientOrderId") == client_order_id:
+                    return self.fetch_dry_run_order(order["id"])
+            raise OperationalException("Unknown simulated entry; private recovery is prohibited")
+        order = self._api.fetch_order_by_client_id(client_order_id, pair)
+        return self._order_contracts_to_amount(order)
+
+    def opportunity_funding_history(self, since, now):
+        if self._config["dry_run"]:
+            raise OperationalException("Private opportunity funding is prohibited in dry run")
+        return self._api.fetch_funding_history(
+            since=since, params={"endTime": int(now.timestamp() * 1000), "opportunityStrict": True}
+        )
+
+    def opportunity_account_snapshot(self):
+        """Unfiltered positions and ordinary orders for strict ownership reconciliation."""
+        positions = self._api.fetch_positions()
+        raw = self._api.client.positions().get("data")
+        if not isinstance(raw, list):
+            raise OperationalException("UMX unfiltered position evidence is invalid")
+        unfiltered = [self._api._parse_position(row) for row in raw]
+        if any(row is None for row in unfiltered):
+            raise OperationalException("UMX unfiltered position quantities are unavailable")
+
+        def signature(rows):
+            return sorted(
+                (row["symbol"], row["side"], row["contracts"]) for row in rows if row["contracts"]
+            )
+
+        if signature(positions) != signature(unfiltered):
+            raise OperationalException("UMX unfiltered and linear position scopes disagree")
+        orders = [self._order_contracts_to_amount(o) for o in self._api.fetch_open_orders()]
+        return positions, orders
+
+    def opportunity_conditional_snapshot(self):
+        """Reject conditional entries and return TPSL records for ownership validation."""
+        client = self._api.client
+        oco = client.open_orders({"orderFilter": "oco"}).get("data")
+        if not isinstance(oco, list) or oco:
+            raise OperationalException("UMX opportunity account has OCO orders or invalid evidence")
+        results = {}
+        for kind in ("trigger", "tpsl"):
+            payload = client.request(
+                "GET",
+                "/v2/trade/openOrderComplex",
+                private=True,
+                params=client.private_params({"complexType": kind}),
+            )
+            rows = payload.get("data")
+            if not isinstance(rows, list) or (kind == "trigger" and rows):
+                raise OperationalException("UMX opportunity conditional entry scope is not empty")
+            results[kind] = rows
+        return results["tpsl"]
 
     _ft_has: FtHas = {
         "ohlcv_candle_limit": 1000,
