@@ -3,12 +3,13 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from functools import wraps
 from hashlib import sha256
 from math import floor, isclose, isfinite
 from pathlib import Path
 from threading import Lock
-from time import sleep
+from time import monotonic, sleep
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -37,9 +38,9 @@ from freqtrade.exchange.binance_order_intent import (
     PortfolioOrderPurpose,
 )
 from freqtrade.exchange.binance_portfolio_policy import (
-    _PORTFOLIO_MARGIN_CHAN_PAIRS,
-    _PORTFOLIO_MARGIN_CHAN_POLICY,
+    _PORTFOLIO_MARGIN_CHAN_POLICIES,
     _PORTFOLIO_MARGIN_CHAN_RISK_KEYS,
+    _PORTFOLIO_MARGIN_DCA_POLICY,
     _portfolio_margin_chan_risk_policy_valid,
 )
 from freqtrade.exchange.binance_public_data import (
@@ -63,6 +64,16 @@ logger = logging.getLogger(__name__)
 class _PortfolioContainmentOutcome:
     flattened: bool
     exchange_evidence_seen: bool
+
+
+@dataclass(frozen=True)
+class _PortfolioDcaEntryLease:
+    pair: str
+    side: str
+    rate: float
+    time_in_force: str
+    expires_at: datetime
+    monotonic_deadline: float
 
 
 class Binance(Exchange):
@@ -154,6 +165,7 @@ class Binance(Exchange):
         self._portfolio_unknown_conditional_client_order_id: str | None = None
         self._portfolio_unknown_conditional_pair: str | None = None
         self._portfolio_unknown_order_latched = False
+        self._portfolio_dca_entry_lease: _PortfolioDcaEntryLease | None = None
         self._portfolio_order_intent_store: PortfolioOrderIntentStore | None = None
         if self._portfolio_margin:
             self._validate_portfolio_margin_config(config, options)
@@ -162,12 +174,14 @@ class Binance(Exchange):
                 allowed_pairs = set(exchange_config.get("pair_whitelist", []))
                 reservations_enabled = (
                     isinstance(risk_config, dict)
-                    and risk_config.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+                    and risk_config.get("policy") in _PORTFOLIO_MARGIN_CHAN_POLICIES
                 )
                 self._portfolio_order_intent_store = PortfolioOrderIntentStore(
                     intent_path,
                     allowed_pairs,
                     reservations_enabled=reservations_enabled,
+                    dca_enabled=isinstance(risk_config, dict)
+                    and risk_config.get("policy") == _PORTFOLIO_MARGIN_DCA_POLICY,
                 )
                 self._portfolio_create_lock = self._portfolio_order_intent_store.operation_lock
                 pending_intents = self._portfolio_order_intent_store.intents
@@ -189,7 +203,92 @@ class Binance(Exchange):
                 "overrides cannot be used with the ordinary Binance adapter."
             )
         super().__init__(*args, **kwargs)
+        if (
+            self._portfolio_margin_risk is not None
+            and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_DCA_POLICY
+            and not config.get("dry_run", True)
+        ):
+            self._install_portfolio_dca_submission_guard()
         self._spot_delist_schedule_cache: FtTTLCache = FtTTLCache(maxsize=100, ttl=300)
+
+    def arm_portfolio_dca_entry(
+        self, pair: str, side: BuySell, rate: float, time_in_force: str, available_at: datetime
+    ) -> None:
+        """Bind one submission to the current closed candle's 60-second signal window."""
+        self._portfolio_dca_entry_lease = None
+        now = datetime.now(UTC)
+        if (
+            self._portfolio_margin_risk is None
+            or self._portfolio_margin_risk.get("policy") != _PORTFOLIO_MARGIN_DCA_POLICY
+            or pair not in self._portfolio_margin_risk["pairs"]
+            or side not in ("buy", "sell")
+            or time_in_force not in ("PO", "IOC")
+            or not isinstance(rate, (int, float))
+            or isinstance(rate, bool)
+            or not isfinite(rate)
+            or rate <= 0
+            or not isinstance(available_at, datetime)
+            or available_at.tzinfo is None
+            or available_at.timestamp() % 300 != 0
+        ):
+            raise InvalidOrderException(
+                "Portfolio Margin DCA requires an exact fresh signal lease."
+            )
+        expires_at = available_at + timedelta(seconds=60)
+        remaining = (expires_at - now).total_seconds()
+        if not 0 < remaining <= 60:
+            raise InvalidOrderException("Portfolio Margin DCA signal is stale or in the future.")
+        self._portfolio_dca_entry_lease = _PortfolioDcaEntryLease(
+            pair, side, rate, time_in_force, expires_at, monotonic() + remaining
+        )
+
+    def clear_portfolio_dca_entry(self) -> None:
+        self._portfolio_dca_entry_lease = None
+
+    def _require_portfolio_dca_entry_lease(self) -> _PortfolioDcaEntryLease:
+        lease = self._portfolio_dca_entry_lease
+        if (
+            lease is None
+            or datetime.now(UTC) >= lease.expires_at
+            or monotonic() >= lease.monotonic_deadline
+        ):
+            self._portfolio_dca_entry_lease = None
+            raise InvalidOrderException("Portfolio Margin DCA signal expired before submission.")
+        return lease
+
+    def _install_portfolio_dca_submission_guard(self) -> None:
+        # CCXT throttles before signing. Check here, after account snapshots, durable
+        # intent persistence, leverage preparation and rate limiting, before HTTP.
+        original_sign = self._api.sign
+
+        @wraps(original_sign)
+        def sign(path, api="public", method="GET", params=None, headers=None, body=None):
+            params = params or {}
+            if (
+                api == "papi"
+                and path == "um/order"
+                and method == "POST"
+                and params.get("reduceOnly") not in (True, "true")
+            ):
+                lease = self._require_portfolio_dca_entry_lease()
+                expected_tif = "GTX" if lease.time_in_force == "PO" else "IOC"
+                if (
+                    params.get("symbol") != self._api.market(lease.pair)["id"]
+                    or params.get("side") != lease.side.upper()
+                    or params.get("type") != "LIMIT"
+                    or params.get("timeInForce") != expected_tif
+                    or params.get("newClientOrderId") != self._portfolio_active_client_order_id
+                    or self._portfolio_active_client_order_id is None
+                    or float(params.get("price") or 0)
+                    != self.price_to_precision(lease.pair, lease.rate)
+                ):
+                    raise InvalidOrderException(
+                        "Portfolio Margin DCA order differs from its lease."
+                    )
+                self._portfolio_dca_entry_lease = None
+            return original_sign(path, api, method, params, headers, body)
+
+        self._api.sign = sign
 
     @property
     def portfolio_margin_unknown_order_latched(self) -> bool:
@@ -224,7 +323,7 @@ class Binance(Exchange):
         risk_config = exchange_config.get("portfolio_margin_risk")
         if (
             isinstance(risk_config, dict)
-            and risk_config.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+            and risk_config.get("policy") in _PORTFOLIO_MARGIN_CHAN_POLICIES
         ):
             # Every process writing the same Portfolio Margin account must use the same
             # non-secret namespace and shared user_data_dir. Only its digest reaches disk.
@@ -434,14 +533,15 @@ class Binance(Exchange):
                     not Binance._portfolio_margin_chan_risk_policy_valid(risk_config)
                     or config.get("force_entry_enable") is True
                     or not isinstance(pair_whitelist, list)
-                    or len(pair_whitelist) != len(_PORTFOLIO_MARGIN_CHAN_PAIRS)
-                    or set(pair_whitelist) != _PORTFOLIO_MARGIN_CHAN_PAIRS
+                    or len(pair_whitelist) != len(risk_config.get("pairs", {}))
+                    or set(pair_whitelist) != set(risk_config.get("pairs", {}))
                 ):
                     raise OperationalException(
                         "Binance Portfolio Margin Chan risk policy must define exactly the "
-                        "reviewed BTC, ETH, BNB, SOL, and SPY pairs, allow long and short, use "
-                        "1x leverage, cap each pair at 100 USDT and total projected entry "
-                        "exposure at 500 USDT, define a non-secret account namespace, disable "
+                        "reviewed pair set and limits: chan_multi_pair uses five pairs with "
+                        "100/500 USDT pair/total caps; chan_dca4_56_v1 uses 56 pairs with "
+                        "75/950 USDT caps. Both require long and short, 1x leverage, "
+                        "a non-secret account namespace, disable "
                         "force-entry, and reject an explicit force-entry price."
                     )
             else:
@@ -1391,6 +1491,139 @@ class Binance(Exchange):
                 "entry exposure exceeds the configured risk limit."
             )
 
+    def _validate_portfolio_margin_dca_projected_exposure(  # noqa: C901
+        self, pair: str, proposed_notional: float, client_order_id: str, side: BuySell
+    ) -> None:
+        """Bound one same-direction add using durable intents and exact PAPI orders.
+
+        Missing order evidence keeps the full pair cap reserved. Exact confirmed
+        orders reserve their original limit notional, even if position snapshots
+        lag or a partial exit reduces the reported position. The account lock is
+        held across this check, intent persistence, POST and reservation promotion.
+        """
+        risk = self._portfolio_margin_risk
+        if (
+            risk is None
+            or not self._portfolio_margin_chan_risk_policy_valid(risk)
+            or risk.get("policy") != _PORTFOLIO_MARGIN_DCA_POLICY
+            or pair not in risk["pairs"]
+            or side not in ("buy", "sell")
+            or isinstance(proposed_notional, bool)
+            or not isinstance(proposed_notional, (int, float))
+            or not isfinite(proposed_notional)
+            or proposed_notional <= 0
+        ):
+            raise OperationalException("Portfolio Margin DCA entry has an invalid risk policy.")
+        self._reconcile_portfolio_entry_reservations()
+        store = self._portfolio_order_intent_store
+        if store is None:
+            raise OperationalException("Portfolio Margin DCA requires durable entry reservations.")
+        limits = risk["pairs"]
+        exposure = dict.fromkeys(limits, 0.0)
+        reserved = dict.fromkeys(limits, 0.0)
+        pending_pairs: set[str] = set()
+        positions_by_pair: dict[str, dict[str, Any]] = {}
+        orders = self._portfolio_margin_list_response(
+            "DCA open-order exposure",
+            lambda: self._api.fetch_open_orders(params=self._portfolio_margin_params()),
+        )
+        for open_order in orders:
+            if self._portfolio_chan_order_matches_client_id(open_order, client_order_id):
+                raise OperationalException("Portfolio Margin DCA client order id already exists.")
+            if self._portfolio_order_is_reduce_only(open_order):
+                continue
+            order_pair, notional = self._portfolio_open_order_entry_notional(open_order, limits)
+            exposure[order_pair] += notional
+            pending_pairs.add(order_pair)
+        for position in self._fetch_portfolio_positions_once():
+            position_pair, notional = self._portfolio_position_entry_notional(position, limits)
+            if not position_pair:
+                continue
+            if position_pair in positions_by_pair:
+                raise OperationalException(
+                    "Portfolio Margin DCA found duplicate position evidence."
+                )
+            positions_by_pair[position_pair] = position
+            exposure[position_pair] += notional
+
+        target_reservations = []
+        target_evidence: list[dict[str, Any]] = []
+        for reservation in store.reservations:
+            reserved_pair = reservation.pair
+            if reserved_pair not in limits:
+                raise OperationalException("Portfolio Margin DCA found an unreviewed reservation.")
+            if reserved_pair == pair:
+                target_reservations.append(reservation)
+            order = self._fetch_portfolio_entry_reservation_order(reservation)
+            if order is None:
+                reserved[reserved_pair] += float(limits[reserved_pair])
+                continue
+            terminal, filled = self._portfolio_entry_reservation_order_state(order)
+            try:
+                amount = float(order["amount"])
+                price = max(float(order["price"]), float(order.get("average") or 0.0))
+                contract_size = self.get_contract_size(reserved_pair)
+                if (
+                    not isfinite(amount)
+                    or amount < filled
+                    or amount <= 0
+                    or not isfinite(price)
+                    or price <= 0
+                    or contract_size is None
+                    or not isfinite(contract_size)
+                    or contract_size <= 0
+                    or order.get("side") not in ("buy", "sell")
+                ):
+                    raise ValueError("Invalid confirmed reservation")
+            except (TypeError, ValueError, KeyError) as exc:
+                raise OperationalException(
+                    "Portfolio Margin DCA reservation evidence is incomplete."
+                ) from exc
+            notional = (filled if terminal else amount) * contract_size * price
+            if not isfinite(notional):
+                raise OperationalException("Portfolio Margin DCA reservation notional is invalid.")
+            reserved[reserved_pair] += notional
+            if reserved_pair == pair:
+                target_evidence.append(
+                    {"terminal": terminal, "filled": filled, "side": order["side"]}
+                )
+
+        effective = {item: max(exposure[item], reserved[item]) for item in limits}
+        if target_reservations:
+            target_position = positions_by_pair.get(pair)
+            direction = "long" if side == "buy" else "short"
+            if (
+                len(target_reservations) != 1
+                or len(target_evidence) != 1
+                or pair in pending_pairs
+                or target_position is None
+                or not target_reservations[0].exposure_seen
+                or not target_evidence[0]["terminal"]
+                or target_evidence[0]["filled"] <= 0
+                or target_evidence[0]["side"] != side
+                or target_position.get("side") != direction
+                or abs(float(target_position["contracts"])) + 1e-9 < target_evidence[0]["filled"]
+                or proposed_notional > 35 + 1e-9
+            ):
+                raise OperationalException(
+                    "Portfolio Margin DCA add lacks one confirmed same-side entry."
+                )
+        elif pair in positions_by_pair or pair in pending_pairs or proposed_notional > 40 + 1e-9:
+            raise OperationalException(
+                "Portfolio Margin DCA initial entry exceeds its fresh-position limit."
+            )
+
+        occupied = sum(value > 1e-9 for value in effective.values())
+        if (
+            (effective[pair] <= 1e-9 and occupied >= 20)
+            or effective[pair] + proposed_notional > float(limits[pair]) + 1e-9
+            or sum(effective.values()) + proposed_notional
+            > float(risk["max_total_entry_notional"]) + 1e-9
+        ):
+            raise OperationalException(
+                "Portfolio Margin DCA projected pair, total or slot limit exceeded."
+            )
+
     def validate_config(self, config) -> None:
         super().validate_config(config)
         if not self._portfolio_margin:
@@ -2068,12 +2301,27 @@ class Binance(Exchange):
             chan_entry = (
                 not reduceOnly
                 and self._portfolio_margin_risk is not None
-                and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+                and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_CHAN_POLICIES
             )
-            if chan_entry:
-                self._validate_portfolio_margin_chan_projected_exposure(
-                    pair, amount * rate, client_order_id
-                )
+            if chan_entry and self._portfolio_margin_risk is not None:
+                if self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_DCA_POLICY:
+                    lease = self._require_portfolio_dca_entry_lease()
+                    if (pair, side, rate, time_in_force) != (
+                        lease.pair,
+                        lease.side,
+                        lease.rate,
+                        lease.time_in_force,
+                    ):
+                        raise InvalidOrderException(
+                            "Portfolio Margin DCA order differs from its lease."
+                        )
+                    self._validate_portfolio_margin_dca_projected_exposure(
+                        pair, amount * rate, client_order_id, side
+                    )
+                else:
+                    self._validate_portfolio_margin_chan_projected_exposure(
+                        pair, amount * rate, client_order_id
+                    )
             self._portfolio_active_client_order_id = client_order_id
             was_unknown_latched = self._portfolio_unknown_order_latched
             try:
@@ -2190,6 +2438,7 @@ class Binance(Exchange):
                 ) from submission_error
             finally:
                 self._portfolio_active_client_order_id = None
+                self._portfolio_dca_entry_lease = None
 
     def _create_portfolio_algo_stoploss(
         self,
@@ -2654,6 +2903,63 @@ class Binance(Exchange):
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None):
         return super().fetch_order(order_id, pair, self._portfolio_margin_params(params))
 
+    def settle_portfolio_dca_partial_entry(self, order: CcxtOrder, pair: str) -> CcxtOrder:
+        """Cancel a Maker remainder and return only an exact terminal exchange result.
+
+        An ambiguous cancel uses the existing persistent unknown-order containment,
+        including late fills, and latches the bot stopped. Never invent a cancelled fill.
+        """
+        if (
+            self._portfolio_margin_risk is None
+            or self._portfolio_margin_risk.get("policy") != _PORTFOLIO_MARGIN_DCA_POLICY
+            or self._config["dry_run"]
+        ):
+            raise OperationalException("DCA partial settlement requires the live DCA adapter.")
+        with self._get_portfolio_create_lock():
+            store = self._portfolio_order_intent_store
+            if store is None:
+                raise OperationalException("DCA partial settlement requires persistent evidence.")
+            order_id = str(order.get("id") or "")
+            reservation = next(
+                (
+                    r
+                    for r in store.reservations
+                    if r.pair == pair
+                    and self._portfolio_order_matches_intent(order, pair, r.client_order_id)
+                ),
+                None,
+            )
+            if reservation is None or not order_id:
+                raise OperationalException("DCA partial settlement lacks the exact reserved order.")
+            terminal, observed_fill = self._portfolio_entry_reservation_order_state(order)
+            if terminal or observed_fill <= 0:
+                raise InvalidOrderException("DCA partial settlement requires a positive fill.")
+            observed_fill = self._amount_to_contracts(pair, observed_fill)
+            client_id = reservation.client_order_id
+            store.begin_entry_reconciliation(client_id)
+            try:
+                try:
+                    self._api.cancel_order(order_id, pair, self._portfolio_margin_params())
+                except ccxt.BaseError:
+                    # A lost cancel response is resolved by the exact GET below.
+                    pass
+                for attempt in range(self._portfolio_order_recovery_attempts):
+                    result = self._fetch_portfolio_entry_reservation_order(reservation)
+                    if result is not None:
+                        terminal, filled = self._portfolio_entry_reservation_order_state(result)
+                        if terminal and filled >= observed_fill:
+                            store.promote_to_entry_reservation(client_id)
+                            return self._order_contracts_to_amount(result)
+                    if attempt + 1 < self._portfolio_order_recovery_attempts:
+                        sleep(self._portfolio_order_recovery_delay)
+            except Exception:
+                logger.exception("PAPI partial-entry cancellation could not be reconciled.")
+            self._portfolio_unknown_order_latched = True
+            self._contain_unknown_portfolio_order(pair, client_id)
+            raise OperationalException(
+                "DCA partial cancel was ambiguous; containment ran and trading remains stopped."
+            )
+
     def cancel_order(self, order_id: str, pair: str, params: dict | None = None):
         return super().cancel_order(order_id, pair, self._portfolio_margin_params(params))
 
@@ -3010,7 +3316,7 @@ class Binance(Exchange):
         if (
             store is not None
             and self._portfolio_margin_risk is not None
-            and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_CHAN_POLICY
+            and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_CHAN_POLICIES
             and store.reservations
         ):
             with self._get_portfolio_create_lock():
