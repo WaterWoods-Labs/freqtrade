@@ -122,6 +122,12 @@ image digest recorded in the release. Never move, delete, or reuse a release tag
 configuration must use the reported `ghcr.io/waterwoods-labs/freqtrade-umx@sha256:...` digest,
 never `latest` or another mutable tag.
 
+Adapter-only patches can reuse the immutable `umx-2026.10.20.1` dependency layers through
+`Dockerfile.umx-hotfix`. The release workflow compares the entire tree with that release's commit:
+only `freqtrade/exchange/umx.py`, tests, docs and the release recipe/workflow may differ. Any other
+change uses the normal Dockerfile. Both paths retain the exact-SHA full CI gate, multi-architecture
+publication, provenance and immutable release digest.
+
 The immutable tags `xcoin-2026.07.30.1` and `xcoin-2026.07.31.1`, and their
 `ghcr.io/waterwoods-labs/freqtrade-xcoin` images, are historical artifacts from before the hard
 cut. Retain those names for provenance; never retag them as UMX or use them for a new deployment.

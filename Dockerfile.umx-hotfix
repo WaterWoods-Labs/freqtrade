@@ -1,0 +1,5 @@
+# The release workflow selects this only when every runtime change is umx.py.
+# Retain the reviewed release's dependencies and both supported architectures.
+FROM ghcr.io/waterwoods-labs/freqtrade-umx@sha256:470710dded952b8c7efa61449f9a64a60284385afe6f69af6b8607867938e628
+
+COPY --chown=ftuser:ftuser freqtrade/exchange/umx.py /freqtrade/freqtrade/exchange/umx.py

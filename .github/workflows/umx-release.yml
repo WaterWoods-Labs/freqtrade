@@ -81,6 +81,19 @@ jobs:
             echo "UMX CI run [$run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id) passed its full job for \`$GITHUB_SHA\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Select dependency-preserving adapter build
+        id: recipe
+        shell: bash
+        run: |
+          # Any other runtime/dependency change uses the normal complete build.
+          recipe=Dockerfile
+          if git diff --quiet 65c2fac9183affe4b2f253a6671684d49c4bdcb8 "$GITHUB_SHA" -- \
+            . ':!freqtrade/exchange/umx.py' ':!tests/**' ':!docs/**' \
+            ':!.github/workflows/umx-release.yml' ':!Dockerfile.umx-hotfix'; then
+            recipe=Dockerfile.umx-hotfix
+          fi
+          echo "file=$recipe" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
@@ -99,6 +112,7 @@ jobs:
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
+          file: ${{ steps.recipe.outputs.file }}
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: mode=max
