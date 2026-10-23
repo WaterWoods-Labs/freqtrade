@@ -187,8 +187,10 @@ partial exits; native funding-error fallbacks and estimated closing fees are not
 An audit gap beyond the supported 89-day funding retention window blocks new entries. Fee data
 missing for a newly observed filled quantity also blocks entry. Account equity or deposits do not
 increase the allocation. All six account scopes are checked: position scopes must agree,
-ordinary orders must match their recorded quantities, OCO/trigger entry orders are forbidden,
-and TPSL orders must belong to native protection or the deterministic attached-stop identity of
+ordinary orders must match their recorded quantities and trigger entry orders are forbidden.
+The OCO view may contain a reduce-only protection only when its unique order ID, symbol, side,
+quantity, status and TPSL parameters match the TPSL view. TPSL orders must still belong to native
+protection or the deterministic attached-stop identity of
 a frozen intent. Unowned or absent protection blocks new entries without canceling it.
 
 Dry-run accounting uses simulated fills and gross marked unrealized PnL, never private account

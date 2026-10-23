@@ -1,6 +1,7 @@
 import hmac
 from copy import deepcopy
 from datetime import UTC, datetime
+from decimal import Decimal
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from freqtrade.exchange.umx_connector import (
     umx_symbol_to_ccxt,
 )
 from freqtrade.resolvers.exchange_resolver import ExchangeResolver
+from freqtrade.umx_opportunity import OpportunityController
 from freqtrade.wallets import PositionWallet, Wallets
 
 
@@ -45,6 +47,158 @@ def _umx_config(default_conf: dict, *, dry_run: bool = True) -> dict:
         }
     )
     return conf
+
+
+@pytest.fixture
+def opportunity_conditionals(mocker):
+    protection = {
+        "complexOId": "123456789",
+        "symbol": "MSFT-USDT-PERP",
+        "side": "sell",
+        "qty": "1.84",
+        "status": "untrigger",
+        "tpslOrder": {
+            "tpslClOrdId": "ftsa-owned-stop",
+            "tpslMode": "partially_position",
+            "stopLossType": "last_price",
+            "stopLoss": "535.62",
+            "slOrderType": "market",
+        },
+    }
+    oco = deepcopy(protection)
+    oco["orderId"] = oco.pop("complexOId")
+    oco.update(orderType="oco", orderFilter="oco", reduceOnly=True)
+    scopes = {"oco": [oco], "trigger": [], "tpsl": [protection]}
+    client = mocker.Mock()
+    client.open_orders.side_effect = lambda params: {"data": scopes[params["orderFilter"]]}
+    client.private_params.side_effect = lambda params: params
+    client.request.side_effect = lambda method, path, private, params: {
+        "data": scopes[params["complexType"]]
+    }
+    exchange = SimpleNamespace(_api=SimpleNamespace(client=client))
+    return exchange, scopes
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_opportunity_oco_view_returns_same_tpsl_for_ownership_validation(
+    opportunity_conditionals, side
+):
+    exchange, scopes = opportunity_conditionals
+    scopes["oco"][0]["side"] = scopes["tpsl"][0]["side"] = side
+    scopes["oco"][0]["qty"] = "1.8400"
+    assert UMX.opportunity_conditional_snapshot(exchange) == scopes["tpsl"]
+    exchange._api.client.open_orders.assert_called_once_with({"orderFilter": "oco"})
+    assert [call.args[0] for call in exchange._api.client.request.call_args_list] == [
+        "GET",
+        "GET",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("orderId", "unknown"),
+        ("symbol", "OTHER-USDT-PERP"),
+        ("side", "buy"),
+        ("qty", "1.83"),
+        ("qty", "NaN"),
+        ("qty", "Infinity"),
+        ("qty", None),
+        ("qty", "0"),
+        ("reduceOnly", False),
+        ("reduceOnly", "true"),
+        ("orderType", "limit"),
+        ("orderFilter", "order"),
+        ("status", "filled"),
+        ("tpslOrder", None),
+        ("tpslOrder", {}),
+        ("tpslOrder", {"stopLoss": "536.00"}),
+    ],
+)
+def test_opportunity_rejects_oco_without_matching_protection(
+    opportunity_conditionals, field, value
+):
+    exchange, scopes = opportunity_conditionals
+    scopes["oco"][0][field] = value
+    with pytest.raises(OperationalException, match="UMX opportunity OCO"):
+        UMX.opportunity_conditional_snapshot(exchange)
+
+
+@pytest.mark.parametrize("scope", ["oco", "tpsl"])
+@pytest.mark.parametrize("malformation", ["duplicate", "missing_id", "not_object", "not_list"])
+def test_opportunity_rejects_ambiguous_conditional_evidence(
+    opportunity_conditionals, scope, malformation
+):
+    exchange, scopes = opportunity_conditionals
+    if malformation == "duplicate":
+        scopes[scope].append(deepcopy(scopes[scope][0]))
+    elif malformation == "missing_id":
+        scopes[scope][0].pop("orderId" if scope == "oco" else "complexOId")
+    elif malformation == "not_object":
+        scopes[scope] = [None]
+    else:
+        scopes[scope] = None
+    with pytest.raises(OperationalException):
+        UMX.opportunity_conditional_snapshot(exchange)
+
+
+def test_opportunity_rejects_oco_absent_from_tpsl(opportunity_conditionals):
+    exchange, scopes = opportunity_conditionals
+    scopes["tpsl"] = []
+    with pytest.raises(OperationalException, match="lacks unique TPSL"):
+        UMX.opportunity_conditional_snapshot(exchange)
+
+
+def test_opportunity_still_rejects_trigger_entries(opportunity_conditionals):
+    exchange, scopes = opportunity_conditionals
+    scopes["trigger"] = [{"complexOId": "entry"}]
+    with pytest.raises(OperationalException, match="conditional entry scope"):
+        UMX.opportunity_conditional_snapshot(exchange)
+
+
+def test_opportunity_accepts_tpsl_only_and_empty_account(opportunity_conditionals):
+    exchange, scopes = opportunity_conditionals
+    scopes["oco"] = []
+    assert UMX.opportunity_conditional_snapshot(exchange) == scopes["tpsl"]
+    scopes["tpsl"] = []
+    assert UMX.opportunity_conditional_snapshot(exchange) == []
+
+
+@pytest.mark.parametrize("owned", [True, False])
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_opportunity_duplicate_view_still_requires_native_ownership(
+    opportunity_conditionals, owned, side
+):
+    exchange, scopes = opportunity_conditionals
+    pair = "MSFT/USDT:USDT"
+    scopes["oco"][0]["side"] = scopes["tpsl"][0]["side"] = side
+    exchange.opportunity_conditional_snapshot = lambda: UMX.opportunity_conditional_snapshot(
+        exchange
+    )
+    exchange.markets = {pair: {"id": "MSFT-USDT-PERP"}}
+    exchange.get_contract_size = lambda pair: 0.01
+    stop = SimpleNamespace(
+        order_id="123456789" if owned else "different-order",
+        ft_is_open=True,
+        ft_order_side="stoploss",
+        safe_price=535.62,
+    )
+    trade = SimpleNamespace(
+        is_open=True,
+        pair=pair,
+        orders=[stop],
+        entry_side=side,
+        exit_side="buy" if side == "sell" else "sell",
+    )
+    controller = OpportunityController.__new__(OpportunityController)
+    controller.bot = SimpleNamespace(exchange=exchange)
+    controller.journal = SimpleNamespace(rows=list)
+    remaining = {pair: (Decimal("1.84"), "short" if side == "sell" else "long", 520.02)}
+    if owned:
+        controller._validate_conditionals([trade], remaining)
+    else:
+        with pytest.raises(ValueError, match="Unowned TPSL"):
+            controller._validate_conditionals([trade], remaining)
 
 
 def test_umx_product_rejects_removed_exchange_risk_policy(default_conf) -> None:

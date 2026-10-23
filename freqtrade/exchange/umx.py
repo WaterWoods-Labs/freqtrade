@@ -1,6 +1,7 @@
 """UMX exchange subclass using the native UMX REST API."""
 
 import os
+from decimal import Decimal, InvalidOperation
 from math import isclose
 from typing import Any
 
@@ -72,8 +73,8 @@ class UMX(Exchange):
         """Reject conditional entries and return TPSL records for ownership validation."""
         client = self._api.client
         oco = client.open_orders({"orderFilter": "oco"}).get("data")
-        if not isinstance(oco, list) or oco:
-            raise OperationalException("UMX opportunity account has OCO orders or invalid evidence")
+        if not isinstance(oco, list):
+            raise OperationalException("UMX opportunity OCO evidence is invalid")
         results = {}
         for kind in ("trigger", "tpsl"):
             payload = client.request(
@@ -86,6 +87,44 @@ class UMX(Exchange):
             if not isinstance(rows, list) or (kind == "trigger" and rows):
                 raise OperationalException("UMX opportunity conditional entry scope is not empty")
             results[kind] = rows
+        # Attached position stops also appear in openOrders(orderFilter=oco).
+        # Accept only the same protection exposed by the TPSL endpoint; the
+        # controller must still verify its ownership and coverage against trades.
+        tpsl_by_id = {}
+        for row in results["tpsl"]:
+            order_id = str(row.get("complexOId") or "") if isinstance(row, dict) else ""
+            if not order_id or order_id in tpsl_by_id:
+                raise OperationalException("UMX opportunity TPSL identities are invalid")
+            tpsl_by_id[order_id] = row
+        seen = set()
+        for row in oco:
+            order_id = str(row.get("orderId") or "") if isinstance(row, dict) else ""
+            protection = tpsl_by_id.get(order_id)
+            if protection is None or order_id in seen:
+                raise OperationalException("UMX opportunity OCO order lacks unique TPSL evidence")
+            seen.add(order_id)
+            try:
+                quantity = Decimal(str(row.get("qty")))
+                same_quantity = (
+                    quantity.is_finite()
+                    and quantity > 0
+                    and quantity == Decimal(str(protection.get("qty")))
+                )
+            except InvalidOperation:
+                same_quantity = False
+            if (
+                row.get("orderType") != "oco"
+                or row.get("orderFilter") != "oco"
+                or row.get("reduceOnly") is not True
+                or not same_quantity
+                or not isinstance(row.get("tpslOrder"), dict)
+                or not row["tpslOrder"]
+                or any(
+                    row.get(field) != protection.get(field)
+                    for field in ("symbol", "side", "status", "tpslOrder")
+                )
+            ):
+                raise OperationalException("UMX opportunity OCO and TPSL protection disagree")
         return results["tpsl"]
 
     _ft_has: FtHas = {
