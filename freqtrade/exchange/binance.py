@@ -40,7 +40,8 @@ from freqtrade.exchange.binance_order_intent import (
 from freqtrade.exchange.binance_portfolio_policy import (
     _PORTFOLIO_MARGIN_CHAN_POLICIES,
     _PORTFOLIO_MARGIN_CHAN_RISK_KEYS,
-    _PORTFOLIO_MARGIN_DCA_POLICY,
+    _PORTFOLIO_MARGIN_DCA_LIMITS,
+    _PORTFOLIO_MARGIN_DCA_POLICIES,
     _portfolio_margin_chan_risk_policy_valid,
 )
 from freqtrade.exchange.binance_public_data import (
@@ -181,7 +182,7 @@ class Binance(Exchange):
                     allowed_pairs,
                     reservations_enabled=reservations_enabled,
                     dca_enabled=isinstance(risk_config, dict)
-                    and risk_config.get("policy") == _PORTFOLIO_MARGIN_DCA_POLICY,
+                    and risk_config.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES,
                 )
                 self._portfolio_create_lock = self._portfolio_order_intent_store.operation_lock
                 pending_intents = self._portfolio_order_intent_store.intents
@@ -205,7 +206,7 @@ class Binance(Exchange):
         super().__init__(*args, **kwargs)
         if (
             self._portfolio_margin_risk is not None
-            and self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_DCA_POLICY
+            and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES
             and not config.get("dry_run", True)
         ):
             self._install_portfolio_dca_submission_guard()
@@ -219,7 +220,7 @@ class Binance(Exchange):
         now = datetime.now(UTC)
         if (
             self._portfolio_margin_risk is None
-            or self._portfolio_margin_risk.get("policy") != _PORTFOLIO_MARGIN_DCA_POLICY
+            or self._portfolio_margin_risk.get("policy") not in _PORTFOLIO_MARGIN_DCA_POLICIES
             or pair not in self._portfolio_margin_risk["pairs"]
             or side not in ("buy", "sell")
             or time_in_force not in ("PO", "IOC")
@@ -540,7 +541,8 @@ class Binance(Exchange):
                         "Binance Portfolio Margin Chan risk policy must define exactly the "
                         "reviewed pair set and limits: chan_multi_pair uses five pairs with "
                         "100/500 USDT pair/total caps; chan_dca4_56_v1 uses 56 pairs with "
-                        "75/950 USDT caps. Both require long and short, 1x leverage, "
+                        "75/950 USDT caps; chan_dca4_56_2000_v1 uses 200/2000 USDT caps. "
+                        "All require long and short, 1x leverage, "
                         "a non-secret account namespace, disable "
                         "force-entry, and reject an explicit force-entry price."
                     )
@@ -1505,7 +1507,7 @@ class Binance(Exchange):
         if (
             risk is None
             or not self._portfolio_margin_chan_risk_policy_valid(risk)
-            or risk.get("policy") != _PORTFOLIO_MARGIN_DCA_POLICY
+            or risk.get("policy") not in _PORTFOLIO_MARGIN_DCA_POLICIES
             or pair not in risk["pairs"]
             or side not in ("buy", "sell")
             or isinstance(proposed_notional, bool)
@@ -1603,12 +1605,16 @@ class Binance(Exchange):
                 or target_evidence[0]["side"] != side
                 or target_position.get("side") != direction
                 or abs(float(target_position["contracts"])) + 1e-9 < target_evidence[0]["filled"]
-                or proposed_notional > 35 + 1e-9
+                or proposed_notional > _PORTFOLIO_MARGIN_DCA_LIMITS[risk["policy"]][3] + 1e-9
             ):
                 raise OperationalException(
                     "Portfolio Margin DCA add lacks one confirmed same-side entry."
                 )
-        elif pair in positions_by_pair or pair in pending_pairs or proposed_notional > 40 + 1e-9:
+        elif (
+            pair in positions_by_pair
+            or pair in pending_pairs
+            or proposed_notional > _PORTFOLIO_MARGIN_DCA_LIMITS[risk["policy"]][2] + 1e-9
+        ):
             raise OperationalException(
                 "Portfolio Margin DCA initial entry exceeds its fresh-position limit."
             )
@@ -2304,7 +2310,7 @@ class Binance(Exchange):
                 and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_CHAN_POLICIES
             )
             if chan_entry and self._portfolio_margin_risk is not None:
-                if self._portfolio_margin_risk.get("policy") == _PORTFOLIO_MARGIN_DCA_POLICY:
+                if self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES:
                     lease = self._require_portfolio_dca_entry_lease()
                     if (pair, side, rate, time_in_force) != (
                         lease.pair,
@@ -2911,7 +2917,7 @@ class Binance(Exchange):
         """
         if (
             self._portfolio_margin_risk is None
-            or self._portfolio_margin_risk.get("policy") != _PORTFOLIO_MARGIN_DCA_POLICY
+            or self._portfolio_margin_risk.get("policy") not in _PORTFOLIO_MARGIN_DCA_POLICIES
             or self._config["dry_run"]
         ):
             raise OperationalException("DCA partial settlement requires the live DCA adapter.")

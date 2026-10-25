@@ -36,7 +36,7 @@ from freqtrade.persistence import PairLocks, Trade
 from freqtrade.persistence.models import Order
 from freqtrade.rpc import RPC
 from freqtrade.rpc.rpc import RPCException
-from freqtrade.rpc.telegram import Telegram, authorized_only
+from freqtrade.rpc.telegram import MAX_MESSAGE_LENGTH, Telegram, authorized_only
 from freqtrade.util.datetime_helpers import dt_now
 from tests.conftest import (
     CURRENT_TEST_STRATEGY,
@@ -2703,6 +2703,75 @@ def test_send_msg_status_notification(default_conf, mocker) -> None:
     telegram, _, msg_mock = get_telegram_testobject(mocker, default_conf)
     telegram.send_msg({"type": RPCMessageType.STATUS, "status": "running"})
     assert msg_mock.call_args[0][0] == "*Status:* `running`"
+
+
+@pytest.mark.parametrize("body", ["trace line\n" * 1100, "trace \U0001f680_`[]\n" * 700])
+@pytest.mark.parametrize("silent", [False, True])
+async def test_send_long_exception_notification(default_conf, mocker, body, silent) -> None:
+    # Exercise the actual sending path, with only the Telegram transport mocked.
+    telegram = object.__new__(Telegram)
+    telegram._config = default_conf
+    telegram._config["telegram"].update(
+        topic_id=123,
+        notification_settings={"exception": "silent" if silent else "on"},
+    )
+    telegram._keyboard = [["/status"]]
+    telegram._loop = asyncio.get_running_loop()
+    telegram._app = MagicMock()
+    telegram._app.bot.send_message = AsyncMock()
+    pending = []
+    mocker.patch(
+        "asyncio.run_coroutine_threadsafe", side_effect=lambda coro, loop: pending.append(coro)
+    )
+    msg = {
+        "type": RPCMessageType.EXCEPTION,
+        "status": "*OperationalException:*\n```\n" + body + "ROOT_CAUSE -4411\n```\nStopped.",
+    }
+
+    telegram.send_msg(msg)
+    assert len(pending) == 1
+    await pending[0]
+
+    calls = telegram._app.bot.send_message.await_args_list
+    assert len(calls) > 1
+    chunks = []
+    for index, call in enumerate(calls, start=1):
+        text = call.kwargs["text"]
+        assert text.startswith(f"ERROR ({index}/{len(calls)})\n")
+        assert len(text.encode("utf-16-le")) // 2 <= MAX_MESSAGE_LENGTH
+        assert call.kwargs["parse_mode"] is None
+        assert call.kwargs["disable_notification"] == silent
+        assert call.kwargs["message_thread_id"] == 123
+        assert call.args[0] == default_conf["telegram"]["chat_id"]
+        chunks.append(text.split("\n", 1)[1])
+    assert "".join(chunks) == telegram.compose_message(msg)
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+async def test_exception_notification_length_boundary(default_conf, mocker, extra) -> None:
+    telegram = object.__new__(Telegram)
+    telegram._config = default_conf
+    telegram._loop = asyncio.get_running_loop()
+    telegram._send_msg = AsyncMock()
+    pending = []
+    mocker.patch(
+        "asyncio.run_coroutine_threadsafe", side_effect=lambda coro, loop: pending.append(coro)
+    )
+    msg = {"type": RPCMessageType.EXCEPTION, "status": ""}
+    overhead = len(telegram.compose_message(msg).encode("utf-16-le")) // 2
+    msg["status"] = "a" * (MAX_MESSAGE_LENGTH - overhead + extra)
+    telegram.send_msg(msg)
+    await pending.pop()
+    assert telegram._send_msg.await_count == (2 if extra else 1)
+    if not extra:
+        telegram._send_msg.assert_awaited_once_with(
+            telegram.compose_message(msg), disable_notification=False
+        )
+    telegram._send_msg.reset_mock()
+    telegram._config["telegram"]["notification_settings"] = {"exception": "off"}
+    telegram.send_msg(msg)
+    assert pending == []
+    telegram._send_msg.assert_not_called()
 
 
 async def test_warning_notification(default_conf, mocker) -> None:
