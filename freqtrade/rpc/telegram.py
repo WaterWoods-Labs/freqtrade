@@ -2200,7 +2200,7 @@ class Telegram(RPCHandler):
         msg: str,
         callback_path: str = "",
         reload_able: bool = False,
-        parse_mode: str = ParseMode.MARKDOWN,
+        parse_mode: str | None = ParseMode.MARKDOWN,
     ) -> None:
         if reload_able:
             reply_markup = InlineKeyboardMarkup(

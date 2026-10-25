@@ -112,13 +112,14 @@ def _portfolio_margin_chan_risk_policy_valid(risk: Any) -> bool:
     max_leverage = risk.get("max_leverage")
     max_total_notional = risk.get("max_total_entry_notional")
     account_namespace = risk.get("account_namespace")
-    if not isinstance(risk.get("policy"), str):
+    policy = risk.get("policy")
+    if not isinstance(policy, str):
         return False
-    dca = risk.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES
-    pair_cap, total_cap, *_ = _PORTFOLIO_MARGIN_DCA_LIMITS.get(risk.get("policy"), (100, 500, 0, 0))
+    dca = policy in _PORTFOLIO_MARGIN_DCA_POLICIES
+    pair_cap, total_cap, *_ = _PORTFOLIO_MARGIN_DCA_LIMITS.get(policy, (100, 500, 0, 0))
     pairs = _PORTFOLIO_MARGIN_DCA_PAIRS if dca else _PORTFOLIO_MARGIN_CHAN_PAIRS
     return (
-        risk.get("policy") in _PORTFOLIO_MARGIN_CHAN_POLICIES
+        policy in _PORTFOLIO_MARGIN_CHAN_POLICIES
         and isinstance(account_namespace, str)
         and _PORTFOLIO_MARGIN_ACCOUNT_NAMESPACE_PATTERN.fullmatch(account_namespace) is not None
         and isinstance(pair_limits, dict)
