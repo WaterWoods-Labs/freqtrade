@@ -673,8 +673,42 @@ class Telegram(RPCHandler):
 
         message = self.compose_message(deepcopy(msg))
         if message:
+            if (
+                msg["type"] == RPCMessageType.EXCEPTION
+                and len(message.encode("utf-16-le")) // 2 > MAX_MESSAGE_LENGTH
+            ):
+                asyncio.run_coroutine_threadsafe(
+                    self._send_long_exception(message, disable_notification=(noti == "silent")),
+                    self._loop,
+                )
+                return
             asyncio.run_coroutine_threadsafe(
                 self._send_msg(message, disable_notification=(noti == "silent")), self._loop
+            )
+
+    async def _send_long_exception(self, message: str, disable_notification: bool) -> None:
+        """Deliver the full traceback in ordered, bounded plain-text messages."""
+        # Reserve room for the part label. Count UTF-16 units conservatively so
+        # non-BMP characters fit too, without ever splitting a Unicode character.
+        chunks: list[str] = []
+        current: list[str] = []
+        length = 0
+        for character in message:
+            units = 2 if ord(character) > 0xFFFF else 1
+            if length + units > MAX_MESSAGE_LENGTH - 64:
+                chunks.append("".join(current))
+                current, length = [], 0
+            current.append(character)
+            length += units
+        if current:
+            chunks.append("".join(current))
+        for index, chunk in enumerate(chunks, start=1):
+            # Tracebacks can contain Markdown delimiters across chunk boundaries.
+            # Plain text preserves the entire exception without invalid entities.
+            await self._send_msg(
+                f"ERROR ({index}/{len(chunks)})\n{chunk}",
+                parse_mode=None,
+                disable_notification=disable_notification,
             )
 
     def _get_exit_emoji(self, msg):
@@ -2166,7 +2200,7 @@ class Telegram(RPCHandler):
         msg: str,
         callback_path: str = "",
         reload_able: bool = False,
-        parse_mode: str = ParseMode.MARKDOWN,
+        parse_mode: str | None = ParseMode.MARKDOWN,
     ) -> None:
         if reload_able:
             reply_markup = InlineKeyboardMarkup(
@@ -2195,7 +2229,7 @@ class Telegram(RPCHandler):
     async def _send_msg(
         self,
         msg: str,
-        parse_mode: str = ParseMode.MARKDOWN,
+        parse_mode: str | None = ParseMode.MARKDOWN,
         disable_notification: bool = False,
         keyboard: list[list[InlineKeyboardButton]] | None = None,
         callback_path: str = "",

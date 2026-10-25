@@ -69,15 +69,17 @@ CHAN_PAIR_LIMITS = {
 }
 
 
-def portfolio_margin_dca_conf(default_conf, tmp_path):
+def portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit=950):
     from freqtrade.exchange.binance_portfolio_policy import _PORTFOLIO_MARGIN_DCA_PAIRS
 
     conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
     conf["exchange"]["pair_whitelist"] = sorted(_PORTFOLIO_MARGIN_DCA_PAIRS)
     risk = conf["exchange"]["portfolio_margin_risk"]
-    risk["policy"] = "chan_dca4_56_v1"
-    risk["pairs"] = dict.fromkeys(_PORTFOLIO_MARGIN_DCA_PAIRS, 75)
-    risk["max_total_entry_notional"] = 950
+    risk["policy"] = "chan_dca4_56_2000_v1" if exposure_limit == 2000 else "chan_dca4_56_v1"
+    risk["pairs"] = dict.fromkeys(
+        _PORTFOLIO_MARGIN_DCA_PAIRS, 200 if exposure_limit == 2000 else 75
+    )
+    risk["max_total_entry_notional"] = exposure_limit
     return conf
 
 
@@ -100,12 +102,13 @@ def test_binance_portfolio_dca_policy_is_bounded_and_separate(default_conf, tmp_
 
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("exposure_limit,add_cap", [(950, 35), (2000, 100)])
 def test_binance_portfolio_dca_confirmed_add_and_second_add_rejection(
-    default_conf, mocker, tmp_path, side
+    default_conf, mocker, tmp_path, side, exposure_limit, add_cap
 ):
     from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
 
-    conf = portfolio_margin_dca_conf(default_conf, tmp_path)
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit)
     api = portfolio_margin_live_api_mock()
     api.fetch_open_orders.return_value = []
     api.fetch_positions.return_value = [
@@ -136,7 +139,7 @@ def test_binance_portfolio_dca_confirmed_add_and_second_add_rejection(
         },
     )
     exchange._validate_portfolio_margin_dca_projected_exposure(
-        "ETH/USDT:USDT", 35, "ftpm-add", side
+        "ETH/USDT:USDT", add_cap, "ftpm-add", side
     )
     with pytest.raises(OperationalException, match="confirmed same-side"):
         exchange._validate_portfolio_margin_dca_projected_exposure(
@@ -144,7 +147,7 @@ def test_binance_portfolio_dca_confirmed_add_and_second_add_rejection(
         )
     with pytest.raises(OperationalException):
         exchange._validate_portfolio_margin_dca_projected_exposure(
-            "ETH/USDT:USDT", 35.01, "ftpm-add", side
+            "ETH/USDT:USDT", add_cap + 0.01, "ftpm-add", side
         )
     exact.return_value["status"] = "open"
     with pytest.raises(OperationalException, match="confirmed same-side"):
@@ -196,19 +199,22 @@ def test_binance_portfolio_dca_missing_order_evidence_reserves_full_cap(
         exchange._validate_portfolio_margin_dca_projected_exposure(pairs[0], 1, "ftpm-next", "buy")
 
 
-def test_binance_portfolio_dca_limits_initial_size_and_twenty_slots(default_conf, mocker, tmp_path):
-    conf = portfolio_margin_dca_conf(default_conf, tmp_path)
+@pytest.mark.parametrize("exposure_limit,entry_cap", [(950, 40), (2000, 100)])
+def test_binance_portfolio_dca_limits_initial_size_and_twenty_slots(
+    default_conf, mocker, tmp_path, exposure_limit, entry_cap
+):
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit)
     api = portfolio_margin_live_api_mock()
     api.fetch_positions.return_value = []
     api.fetch_open_orders.return_value = []
     exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
     mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
     exchange._validate_portfolio_margin_dca_projected_exposure(
-        "ETH/USDT:USDT", 40, "ftpm-next", "buy"
+        "ETH/USDT:USDT", entry_cap, "ftpm-next", "buy"
     )
     with pytest.raises(OperationalException, match="fresh-position limit"):
         exchange._validate_portfolio_margin_dca_projected_exposure(
-            "ETH/USDT:USDT", 40.01, "ftpm-next", "buy"
+            "ETH/USDT:USDT", entry_cap + 0.01, "ftpm-next", "buy"
         )
     pairs = sorted(conf["exchange"]["pair_whitelist"])
     api.fetch_positions.return_value = [
@@ -217,6 +223,38 @@ def test_binance_portfolio_dca_limits_initial_size_and_twenty_slots(default_conf
     ]
     with pytest.raises(OperationalException, match="slot limit"):
         exchange._validate_portfolio_margin_dca_projected_exposure(pairs[20], 1, "ftpm-next", "buy")
+
+
+def test_binance_portfolio_dca_2000_pending_and_policy_limits(default_conf, mocker, tmp_path):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+    from freqtrade.exchange.binance_portfolio_policy import _portfolio_margin_chan_risk_policy_valid
+
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, 2000)
+    risk = conf["exchange"]["portfolio_margin_risk"]
+    assert _portfolio_margin_chan_risk_policy_valid(risk)
+    for changes in ({"max_total_entry_notional": 2000.01}, {"policy": "chan_dca4_56_v1"}):
+        assert not _portfolio_margin_chan_risk_policy_valid({**risk, **changes})
+    oversized = deepcopy(risk)
+    oversized["pairs"]["BTC/USDT:USDT"] = 200.01
+    assert not _portfolio_margin_chan_risk_policy_valid(oversized)
+    api = portfolio_margin_live_api_mock()
+    api.fetch_positions.return_value = []
+    api.fetch_open_orders.return_value = []
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_fetch_portfolio_entry_reservation_order", return_value=None)
+    store = exchange._portfolio_order_intent_store
+    pairs = sorted(risk["pairs"])
+    for i, pair in enumerate(pairs[:9]):
+        store.add(PortfolioOrderIntent(f"ftpm-reserved-{i}", pair, "regular"))
+        store.promote_to_entry_reservation(f"ftpm-reserved-{i}")
+    exchange._validate_portfolio_margin_dca_projected_exposure(pairs[9], 100, "ftpm-next", "buy")
+    store.add(PortfolioOrderIntent("ftpm-reserved-9", pairs[9], "regular"))
+    store.promote_to_entry_reservation("ftpm-reserved-9")
+    with pytest.raises(OperationalException, match="limit exceeded"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            pairs[10], 0.01, "ftpm-next", "buy"
+        )
 
 
 def portfolio_margin_chan_risk_conf(default_conf, *, dry_run: bool = True):
