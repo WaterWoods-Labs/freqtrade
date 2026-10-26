@@ -12,8 +12,11 @@ and return to that branch through their own pull requests, CI, and release proce
 PAPI change from `umx`, merge the product branches into each other, or publish PAPI functionality
 through a UMX image.
 
-UMX CI enforces this boundary. The standard Binance adapter must remain aligned with the official
-`develop` mirror, and WaterWoods PAPI markers are forbidden from UMX source and tests.
+UMX CI enforces this boundary. The standard Binance adapter must match the integrated official
+baseline, resolved as the common ancestor of the candidate and the official `develop` mirror.
+The daily mirror can advance before the weekly UMX integration; that lag is not a product-boundary
+violation. Missing mirror history or a missing common ancestor fails validation. WaterWoods PAPI
+markers remain forbidden from UMX source and tests.
 
 ## Branches
 
