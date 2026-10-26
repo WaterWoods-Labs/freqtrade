@@ -2060,8 +2060,8 @@ def test_binance_portfolio_margin_preserves_open_position(default_conf, mocker):
 
 
 def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets):
-    """Exercise CCXT 4.5.77 and record the raw endpoint requests without network access."""
-    assert ccxt.__version__ == "4.5.77"
+    """Exercise CCXT 4.5.85 and record the raw endpoint requests without network access."""
+    assert ccxt.__version__ == "4.5.85"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     route_params = exchange._portfolio_margin_params({"subType": "linear"})
@@ -2172,9 +2172,15 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
     assert all(routing_keys.isdisjoint(request) for _, request in recorded)
 
 
-def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, markets):
-    """Use CCXT 4.5.77 signing with a fake transport for the full Algo lifecycle."""
-    assert ccxt.__version__ == "4.5.77"
+@pytest.mark.parametrize("side, stop_price", [("sell", 1900), ("buy", 2100)])
+@pytest.mark.parametrize(
+    "stoploss_type, order_type", [("market", "STOP_MARKET"), ("limit", "STOP")]
+)
+def test_binance_portfolio_margin_ccxt_algo_raw_routes(
+    default_conf, mocker, markets, side, stop_price, stoploss_type, order_type
+):
+    """Use CCXT 4.5.85 signing with a fake transport for the full Algo lifecycle."""
+    assert ccxt.__version__ == "4.5.85"
     pair = "ETH/USDT:USDT"
     market = deepcopy(markets[pair])
     market["id"] = "ETHUSDT"
@@ -2207,14 +2213,14 @@ def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, mar
         "algoId": 73,
         "clientAlgoId": "ftpm-raw-stop",
         "algoType": "CONDITIONAL",
-        "orderType": "STOP_MARKET",
+        "orderType": order_type,
         "symbol": "ETHUSDT",
-        "side": "SELL",
+        "side": side.upper(),
         "positionSide": "BOTH",
         "timeInForce": "GTC",
         "quantity": "0.1",
         "algoStatus": "NEW",
-        "triggerPrice": "1900",
+        "triggerPrice": str(stop_price),
         "price": "0",
         "workingType": "MARK_PRICE",
         "priceProtect": False,
@@ -2260,12 +2266,12 @@ def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, mar
     created = exchange.create_stoploss(
         pair=pair,
         amount=1,
-        stop_price=1900,
+        stop_price=stop_price,
         order_types={
-            "stoploss": "market",
+            "stoploss": stoploss_type,
             "stoploss_price_type": PriceType.MARK,
         },
-        side="sell",
+        side=side,
         leverage=1,
     )
     assert created["id"] == "73"
@@ -2301,10 +2307,10 @@ def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, mar
     assert {
         "algoType": ["CONDITIONAL"],
         "symbol": ["ETHUSDT"],
-        "side": ["SELL"],
-        "type": ["STOP_MARKET"],
+        "side": [side.upper()],
+        "type": [order_type],
         "quantity": ["0.1"],
-        "triggerPrice": ["1900"],
+        "triggerPrice": [str(stop_price)],
         "clientAlgoId": ["ftpm-raw-stop"],
         "reduceOnly": ["true"],
         "workingType": ["MARK_PRICE"],
@@ -2317,11 +2323,12 @@ def test_binance_portfolio_margin_ccxt_algo_raw_routes(default_conf, mocker, mar
         "papi",
         "portfolioMargin",
         "maxRetriesOnFailure",
+        "isAlgoOrder",
     }.isdisjoint(post_params)
 
 
 def test_binance_portfolio_margin_ccxt_disables_transport_retry():
-    assert ccxt.__version__ == "4.5.77"
+    assert ccxt.__version__ == "4.5.85"
     api = ccxt.binance(
         {
             "enableRateLimit": False,
@@ -2356,7 +2363,7 @@ def test_binance_portfolio_margin_ccxt_disables_transport_retry():
 
 def test_binance_portfolio_margin_ccxt_market_loading_avoids_signed_sapi(default_conf, mocker):
     """Authenticated market loading must use only public linear-market metadata."""
-    assert ccxt.__version__ == "4.5.77"
+    assert ccxt.__version__ == "4.5.85"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     raw_ccxt_config = deep_merge_dicts(
@@ -2384,8 +2391,8 @@ def test_binance_portfolio_margin_ccxt_market_loading_avoids_signed_sapi(default
 def test_binance_portfolio_margin_ccxt_public_bid_ask_routes(
     default_conf, mocker, markets, single_symbol
 ):
-    """Keep CCXT 4.5.77 futures quotes public for single-symbol and bulk responses."""
-    assert ccxt.__version__ == "4.5.77"
+    """Keep CCXT 4.5.85 futures quotes public for single-symbol and bulk responses."""
+    assert ccxt.__version__ == "4.5.85"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     raw_ccxt_config = deep_merge_dicts(
