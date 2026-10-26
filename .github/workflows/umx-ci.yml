@@ -48,13 +48,17 @@ jobs:
             exit 1
           fi
 
-          if ! git diff --quiet origin/develop -- freqtrade/exchange/binance.py; then
-            echo "::error title=UMX product boundary violation::freqtrade/exchange/binance.py differs from origin/develop"
-            git diff --stat origin/develop -- freqtrade/exchange/binance.py
+          # Compare against the official history actually integrated into this candidate.
+          # The daily mirror may advance independently of the weekly product integration.
+          upstream_baseline="$(git merge-base HEAD origin/develop)"
+          if ! git diff --quiet "$upstream_baseline" -- freqtrade/exchange/binance.py; then
+            echo "::error title=UMX product boundary violation::freqtrade/exchange/binance.py differs from the integrated official baseline"
+            git diff --stat "$upstream_baseline" -- freqtrade/exchange/binance.py
             {
               echo "## UMX product boundary violation"
               echo
-              echo '`freqtrade/exchange/binance.py` must remain identical to `origin/develop`.'
+              echo '`freqtrade/exchange/binance.py` must remain identical to the integrated official baseline.'
+              echo "Official baseline: $upstream_baseline"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
@@ -77,7 +81,8 @@ jobs:
           {
             echo "### UMX product boundary"
             echo
-            echo '- `freqtrade/exchange/binance.py` matches `origin/develop`.'
+            echo "- Official baseline: $upstream_baseline"
+            echo '- `freqtrade/exchange/binance.py` matches the integrated official baseline.'
             echo '- No WaterWoods Binance PAPI markers were found.'
           } >> "$GITHUB_STEP_SUMMARY"
 
