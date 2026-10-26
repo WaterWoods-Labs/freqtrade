@@ -97,6 +97,25 @@ explicit supported policy. The adapter and RPC share Chan validation in
 | --- | --- |
 | Single-pair canary | Exact supported fields; one whitelisted pair, long side, 1x leverage, positive entry notional at most 100 USDT, market force-entry, and rejection of a supplied force-entry price. |
 | `chan_multi_pair` | Exact five-pair set: BTC, ETH, BNB, SOL, and SPY as `/USDT:USDT`; matching whitelist; long and short sides; 1x leverage; positive per-pair limits at most 100 USDT and total at most 500 USDT; valid account namespace; force-entry disabled and supplied force-entry prices rejected. |
+| `chan_dca4_56_v1` | Frozen 56-pair DCA4 universe and matching whitelist; long/short, 1x, initial entry at most 40 USDT, one confirmed same-side add at most 35 USDT, pair cap 75 USDT, aggregate cap 950 USDT and at most 20 occupied pairs. Force-entry remains disabled. |
+| `chan_dca4_56_2000_v1` | Same 56-pair universe, lease, recovery and protection rules; initial entry and the single add are each at most 100 USDT, pair cap 200 USDT, aggregate cap 2000 USDT, 1x and at most 20 occupied pairs. The original policy retains its original limits. |
+
+The DCA policy additionally requires an entry lease from the reviewed strategy router. It binds
+pair, side, exact price, PO/IOC routing and the closed candle's 60-second signal window. Both
+wall-clock and monotonic deadlines are checked at CCXT signing, after throttling and before HTTP.
+Expired leases cannot be retried or reused. Protective reduce-only exits remain available.
+
+An add requires a terminal, filled first entry, observed same-direction position, no pending
+entry and no reduction of the original quantity. Durable reservations survive restarts; exact
+order evidence reserves confirmed or pending notional, while missing evidence retains the full
+pair cap. The legacy five-pair policy retains its original one-reservation-per-pair limits.
+
+Observed Maker partial fills are settled through `settle_portfolio_dca_partial_entry`: the
+reservation is atomically converted into a pending intent before cancelling the remainder.
+Only exact terminal order evidence permits normal continuation. Ambiguous cancellation uses the
+existing late-fill containment and leaves trading latched stopped. A crash during cancellation
+therefore cannot erase the uncertain entry. The runtime owns fixed-anchor stop replacement and
+actual-fee accounting; these adapter tests alone do not certify a complete live strategy.
 
 Chan entries must be limit orders. Before submission, projected positions, open orders, and local
 reservations are checked against the configured entry limits. Reduce-only exits are not blocked

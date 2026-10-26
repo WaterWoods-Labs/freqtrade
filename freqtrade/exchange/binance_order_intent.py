@@ -66,10 +66,15 @@ class PortfolioOrderIntentStore:
         allowed_pairs: set[str],
         *,
         reservations_enabled: bool = False,
+        dca_enabled: bool = False,
     ) -> None:
         self.path = path
         self._allowed_pairs = allowed_pairs
         self._reservations_enabled = reservations_enabled
+        if type(dca_enabled) is not bool or (dca_enabled and not reservations_enabled):
+            raise OperationalException("DCA requires explicit durable entry reservations.")
+        self._max_pair_entries = 2 if dca_enabled else 1
+        self._max_reserved_pairs = 20 if dca_enabled else _MAX_ENTRY_RESERVATIONS
         self._intents: dict[str, PortfolioOrderIntent] = {}
         self._reservations: dict[str, PortfolioEntryReservation] = {}
         self._file_lock = FileLock(f"{path}.lock") if path is not None else None
@@ -172,7 +177,10 @@ class PortfolioOrderIntentStore:
                     "Binance Portfolio Margin could not promote the exact confirmed entry "
                     "intent to a reservation. Trading remains stopped."
                 )
-            if any(item.pair == intent.pair for item in current_reservations.values()):
+            if (
+                sum(item.pair == intent.pair for item in current_reservations.values())
+                >= self._max_pair_entries
+            ):
                 raise OperationalException(
                     "Binance Portfolio Margin found an existing entry reservation for this "
                     "pair. Trading remains stopped."
@@ -193,6 +201,23 @@ class PortfolioOrderIntentStore:
             self._atomic_write(new_intents, new_reservations)
             self._intents = new_intents
             self._reservations = new_reservations
+
+    def begin_entry_reconciliation(self, client_order_id: str) -> None:
+        """Persist a partial-entry cancellation before its first exchange request."""
+        if self.path is None or self._max_pair_entries != 2:
+            raise OperationalException("Partial entry reconciliation requires the DCA policy.")
+        with self._locked():
+            intents, reservations = self._load()
+            reservation = reservations.get(client_order_id)
+            if intents or reservation is None:
+                raise OperationalException("DCA partial entry has conflicting or missing evidence.")
+            intents = {
+                client_order_id: PortfolioOrderIntent(client_order_id, reservation.pair, "regular")
+            }
+            reservations = {k: v for k, v in reservations.items() if k != client_order_id}
+            self._validate_or_raise(intents, reservations)
+            self._atomic_write(intents, reservations)
+            self._intents, self._reservations = intents, reservations
 
     def mark_reservation_exposure_seen(self, client_order_id: str) -> None:
         if self.path is None or not self._reservations_enabled:
@@ -413,13 +438,18 @@ class PortfolioOrderIntentStore:
 
         if reservations and not self._reservations_enabled:
             raise ValueError("reservations disabled")
-        if len(reservations) > _MAX_ENTRY_RESERVATIONS:
+        if len(reservations) > self._max_reserved_pairs * self._max_pair_entries:
             raise ValueError("too many entry reservations")
         reservation_ids = {reservation.client_order_id for reservation in reservations}
         if len(reservation_ids) != len(reservations) or client_ids & reservation_ids:
             raise ValueError("duplicate local order evidence")
         reservation_pairs = {reservation.pair for reservation in reservations}
-        if len(reservation_pairs) != len(reservations):
+        if len(reservation_pairs) > self._max_reserved_pairs:
+            raise ValueError("too many reserved pairs")
+        if any(
+            sum(item.pair == pair for item in reservations) > self._max_pair_entries
+            for pair in reservation_pairs
+        ):
             raise ValueError("multiple reservations for one pair")
         now = datetime.now(UTC)
         for reservation in reservations:

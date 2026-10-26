@@ -730,6 +730,44 @@ def test_validate_portfolio_margin_chan_risk_schema(default_conf) -> None:
             validate_config_schema(conf)
 
 
+def test_validate_portfolio_margin_dca_risk_schema(default_conf) -> None:
+    from freqtrade.exchange.binance_portfolio_policy import _PORTFOLIO_MARGIN_DCA_PAIRS
+
+    risk = {
+        "account_namespace": "chan-live-account",
+        "policy": "chan_dca4_56_v1",
+        "pairs": dict.fromkeys(_PORTFOLIO_MARGIN_DCA_PAIRS, 75),
+        "allowed_sides": ["long", "short"],
+        "max_leverage": 1,
+        "max_total_entry_notional": 950,
+        "force_entry_order_type": "disabled",
+        "reject_force_entry_price": True,
+    }
+    conf = deepcopy(default_conf)
+    conf["exchange"]["portfolio_margin_risk"] = risk
+    validate_config_schema(conf)
+
+    invalid_risks = [
+        {**risk, "max_total_entry_notional": 950.01},
+        {**risk, "max_total_entry_notional": 0},
+        {**risk, "max_leverage": True},
+        {**risk, "allowed_sides": ["long"]},
+        {**risk, "policy": "chan_multi_pair"},
+        {**risk, "force_entry_order_type": "market"},
+        {**risk, "unexpected": True},
+    ]
+    for pair in _PORTFOLIO_MARGIN_DCA_PAIRS:
+        invalid_risks.append({**risk, "pairs": {**risk["pairs"], pair: 75.01}})
+        missing = dict(risk["pairs"])
+        del missing[pair]
+        invalid_risks.append({**risk, "pairs": missing})
+        invalid_risks.append({**risk, "pairs": {**missing, "UNKNOWN/USDT:USDT": 75}})
+    for invalid in invalid_risks:
+        conf["exchange"]["portfolio_margin_risk"] = invalid
+        with pytest.raises(ConfigurationError):
+            validate_config_schema(conf)
+
+
 @pytest.mark.parametrize("fiat", ["EUR", "USD", "", None])
 def test_validate_fiat_currency_options(default_conf, fiat) -> None:
     # Validate via our validator - we allow setting defaults!

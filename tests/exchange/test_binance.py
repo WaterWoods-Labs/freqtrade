@@ -69,6 +69,194 @@ CHAN_PAIR_LIMITS = {
 }
 
 
+def portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit=950):
+    from freqtrade.exchange.binance_portfolio_policy import _PORTFOLIO_MARGIN_DCA_PAIRS
+
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    conf["exchange"]["pair_whitelist"] = sorted(_PORTFOLIO_MARGIN_DCA_PAIRS)
+    risk = conf["exchange"]["portfolio_margin_risk"]
+    risk["policy"] = "chan_dca4_56_2000_v1" if exposure_limit == 2000 else "chan_dca4_56_v1"
+    risk["pairs"] = dict.fromkeys(
+        _PORTFOLIO_MARGIN_DCA_PAIRS, 200 if exposure_limit == 2000 else 75
+    )
+    risk["max_total_entry_notional"] = exposure_limit
+    return conf
+
+
+def test_binance_portfolio_dca_policy_is_bounded_and_separate(default_conf, tmp_path):
+    from freqtrade.exchange.binance_portfolio_policy import _portfolio_margin_chan_risk_policy_valid
+
+    risk = portfolio_margin_dca_conf(default_conf, tmp_path)["exchange"]["portfolio_margin_risk"]
+    assert len(risk["pairs"]) == 56
+    assert _portfolio_margin_chan_risk_policy_valid(risk)
+    for changes in (
+        {"policy": "chan_multi_pair"},
+        {"max_total_entry_notional": 951},
+        {"max_leverage": 2},
+        {"policy": []},
+        {"force_entry_order_type": "market"},
+    ):
+        assert not _portfolio_margin_chan_risk_policy_valid({**risk, **changes})
+    risk["pairs"]["ETH/USDT:USDT"] = 75.001
+    assert not _portfolio_margin_chan_risk_policy_valid(risk)
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("exposure_limit,add_cap", [(950, 35), (2000, 100)])
+def test_binance_portfolio_dca_confirmed_add_and_second_add_rejection(
+    default_conf, mocker, tmp_path, side, exposure_limit, add_cap
+):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit)
+    api = portfolio_margin_live_api_mock()
+    api.fetch_open_orders.return_value = []
+    api.fetch_positions.return_value = [
+        {
+            "symbol": "ETH/USDT:USDT",
+            "contracts": 0.02,
+            "notional": 40,
+            "side": "long" if side == "buy" else "short",
+            "leverage": 1,
+        }
+    ]
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "get_contract_size", return_value=1.0)
+    store = exchange._portfolio_order_intent_store
+    store.add(PortfolioOrderIntent("ftpm-first", "ETH/USDT:USDT", "regular"))
+    store.promote_to_entry_reservation("ftpm-first")
+    store.mark_reservation_exposure_seen("ftpm-first")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    exact = mocker.patch.object(
+        exchange,
+        "_fetch_portfolio_entry_reservation_order",
+        return_value={
+            "status": "closed",
+            "filled": 0.02,
+            "amount": 0.02,
+            "price": 2000.0,
+            "side": side,
+        },
+    )
+    exchange._validate_portfolio_margin_dca_projected_exposure(
+        "ETH/USDT:USDT", add_cap, "ftpm-add", side
+    )
+    with pytest.raises(OperationalException, match="confirmed same-side"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            "ETH/USDT:USDT", 10, "ftpm-add", "sell" if side == "buy" else "buy"
+        )
+    with pytest.raises(OperationalException):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            "ETH/USDT:USDT", add_cap + 0.01, "ftpm-add", side
+        )
+    exact.return_value["status"] = "open"
+    with pytest.raises(OperationalException, match="confirmed same-side"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            "ETH/USDT:USDT", 10, "ftpm-add", side
+        )
+    exact.return_value["status"] = "closed"
+    store.add(PortfolioOrderIntent("ftpm-add", "ETH/USDT:USDT", "regular"))
+    store.promote_to_entry_reservation("ftpm-add")
+    with pytest.raises(OperationalException, match="confirmed same-side"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            "ETH/USDT:USDT", 1, "ftpm-third", side
+        )
+    # A restarted process retains both reservations and cannot perform a third entry.
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntentStore
+
+    restarted = PortfolioOrderIntentStore(
+        store.path,
+        set(conf["exchange"]["pair_whitelist"]),
+        reservations_enabled=True,
+        dca_enabled=True,
+    )
+    assert len(restarted.reservations) == 2
+
+
+def test_binance_portfolio_dca_missing_order_evidence_reserves_full_cap(
+    default_conf, mocker, tmp_path
+):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path)
+    api = portfolio_margin_live_api_mock()
+    api.fetch_positions.return_value = []
+    api.fetch_open_orders.return_value = []
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_fetch_portfolio_entry_reservation_order", return_value=None)
+    store = exchange._portfolio_order_intent_store
+    pairs = sorted(conf["exchange"]["pair_whitelist"])
+    for i, pair in enumerate(pairs[:12]):
+        store.add(PortfolioOrderIntent(f"ftpm-reserved-{i}", pair, "regular"))
+        store.promote_to_entry_reservation(f"ftpm-reserved-{i}")
+    exchange._validate_portfolio_margin_dca_projected_exposure(pairs[12], 40, "ftpm-next", "buy")
+    store.add(PortfolioOrderIntent("ftpm-reserved-12", pairs[12], "regular"))
+    store.promote_to_entry_reservation("ftpm-reserved-12")
+    with pytest.raises(OperationalException, match="limit exceeded"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(pairs[13], 1, "ftpm-next", "buy")
+    with pytest.raises(OperationalException, match="confirmed same-side"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(pairs[0], 1, "ftpm-next", "buy")
+
+
+@pytest.mark.parametrize("exposure_limit,entry_cap", [(950, 40), (2000, 100)])
+def test_binance_portfolio_dca_limits_initial_size_and_twenty_slots(
+    default_conf, mocker, tmp_path, exposure_limit, entry_cap
+):
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit)
+    api = portfolio_margin_live_api_mock()
+    api.fetch_positions.return_value = []
+    api.fetch_open_orders.return_value = []
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    exchange._validate_portfolio_margin_dca_projected_exposure(
+        "ETH/USDT:USDT", entry_cap, "ftpm-next", "buy"
+    )
+    with pytest.raises(OperationalException, match="fresh-position limit"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            "ETH/USDT:USDT", entry_cap + 0.01, "ftpm-next", "buy"
+        )
+    pairs = sorted(conf["exchange"]["pair_whitelist"])
+    api.fetch_positions.return_value = [
+        {"symbol": p, "contracts": 1, "notional": 10, "side": "long", "leverage": 1}
+        for p in pairs[:20]
+    ]
+    with pytest.raises(OperationalException, match="slot limit"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(pairs[20], 1, "ftpm-next", "buy")
+
+
+def test_binance_portfolio_dca_2000_pending_and_policy_limits(default_conf, mocker, tmp_path):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+    from freqtrade.exchange.binance_portfolio_policy import _portfolio_margin_chan_risk_policy_valid
+
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, 2000)
+    risk = conf["exchange"]["portfolio_margin_risk"]
+    assert _portfolio_margin_chan_risk_policy_valid(risk)
+    for changes in ({"max_total_entry_notional": 2000.01}, {"policy": "chan_dca4_56_v1"}):
+        assert not _portfolio_margin_chan_risk_policy_valid({**risk, **changes})
+    oversized = deepcopy(risk)
+    oversized["pairs"]["BTC/USDT:USDT"] = 200.01
+    assert not _portfolio_margin_chan_risk_policy_valid(oversized)
+    api = portfolio_margin_live_api_mock()
+    api.fetch_positions.return_value = []
+    api.fetch_open_orders.return_value = []
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_fetch_portfolio_entry_reservation_order", return_value=None)
+    store = exchange._portfolio_order_intent_store
+    pairs = sorted(risk["pairs"])
+    for i, pair in enumerate(pairs[:9]):
+        store.add(PortfolioOrderIntent(f"ftpm-reserved-{i}", pair, "regular"))
+        store.promote_to_entry_reservation(f"ftpm-reserved-{i}")
+    exchange._validate_portfolio_margin_dca_projected_exposure(pairs[9], 100, "ftpm-next", "buy")
+    store.add(PortfolioOrderIntent("ftpm-reserved-9", pairs[9], "regular"))
+    store.promote_to_entry_reservation("ftpm-reserved-9")
+    with pytest.raises(OperationalException, match="limit exceeded"):
+        exchange._validate_portfolio_margin_dca_projected_exposure(
+            pairs[10], 0.01, "ftpm-next", "buy"
+        )
+
+
 def portfolio_margin_chan_risk_conf(default_conf, *, dry_run: bool = True):
     conf = portfolio_margin_conf(default_conf, dry_run=dry_run)
     conf["exchange"]["pair_whitelist"] = list(CHAN_PAIR_LIMITS)
@@ -5514,3 +5702,184 @@ def test__get_spot_delist_schedule_binance(default_conf_usdt, mocker):
         "sapi_get_spot_delist_schedule",
         retries=1,
     )
+
+
+def test_binance_portfolio_dca_signing_lease_expires_and_is_single_use(
+    default_conf, mocker, tmp_path
+):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 24, 1, 0, 10, tzinfo=UTC)
+
+    mocker.patch("freqtrade.exchange.binance.datetime", Clock)
+    timer = mocker.patch("freqtrade.exchange.binance.monotonic", return_value=100.0)
+    api = portfolio_margin_live_api_mock()
+    signed = api.sign
+    exchange = get_patched_exchange(
+        mocker, portfolio_margin_dca_conf(default_conf, tmp_path), api, exchange="binance"
+    )
+    mocker.patch.object(exchange, "price_to_precision", side_effect=lambda pair, rate: rate)
+    exchange._portfolio_active_client_order_id = "ftpm-lease"
+    params = {
+        "symbol": "ETHUSDT",
+        "side": "BUY",
+        "type": "LIMIT",
+        "timeInForce": "GTX",
+        "price": "2000.0",
+        "newClientOrderId": "ftpm-lease",
+    }
+    at = Clock(2026, 10, 24, 1, 0, tzinfo=UTC)
+    with pytest.raises(InvalidOrderException, match="expired"):
+        api.sign("um/order", "papi", "POST", params)
+    exchange.arm_portfolio_dca_entry("ETH/USDT:USDT", "buy", 2000.0, "PO", at)
+    timer.return_value = 151.0
+    with pytest.raises(InvalidOrderException, match="expired"):
+        api.sign("um/order", "papi", "POST", params)
+    signed.assert_not_called()
+    timer.return_value = 100.0
+    exchange.arm_portfolio_dca_entry("ETH/USDT:USDT", "buy", 2000.0, "PO", at)
+    with pytest.raises(InvalidOrderException, match="differs"):
+        api.sign("um/order", "papi", "POST", {**params, "price": "2001.0"})
+    signed.assert_not_called()
+    api.sign("um/order", "papi", "POST", params)
+    assert signed.call_count == 1
+    with pytest.raises(InvalidOrderException, match="expired"):
+        api.sign("um/order", "papi", "POST", params)
+    # Protective exits do not depend on a stale entry signal.
+    api.sign("um/order", "papi", "POST", {"reduceOnly": True})
+    assert signed.call_count == 2
+
+
+def test_binance_portfolio_dca_expiry_after_intent_never_submits(default_conf, mocker, tmp_path):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 24, 1, 0, 10, tzinfo=UTC)
+
+    mocker.patch("freqtrade.exchange.binance.datetime", Clock)
+    timer = mocker.patch("freqtrade.exchange.binance.monotonic", return_value=100.0)
+    api = portfolio_margin_live_api_mock()
+    signed = api.sign
+    exchange = get_patched_exchange(
+        mocker, portfolio_margin_dca_conf(default_conf, tmp_path), api, exchange="binance"
+    )
+    mocker.patch.object(exchange, "_validate_portfolio_margin_dca_projected_exposure")
+    store = exchange._portfolio_order_intent_store
+
+    def delayed_submission(**kwargs):
+        assert len(store.intents) == 1
+        timer.return_value = 151.0
+        api.sign("um/order", "papi", "POST", {"side": "BUY"})
+
+    submit = mocker.patch(EXMS + ".create_order", side_effect=delayed_submission)
+    recover = mocker.patch.object(exchange, "_recover_portfolio_order")
+    exchange.arm_portfolio_dca_entry(
+        "ETH/USDT:USDT", "buy", 2000.0, "PO", Clock(2026, 10, 24, 1, 0, tzinfo=UTC)
+    )
+    with pytest.raises(InvalidOrderException, match="expired"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=0.02,
+            rate=2000.0,
+            leverage=1.0,
+            time_in_force="PO",
+        )
+    submit.assert_called_once()
+    signed.assert_not_called()
+    recover.assert_not_called()
+    assert not store.intents and not store.reservations
+    assert exchange._portfolio_dca_entry_lease is None
+    assert not exchange.portfolio_margin_unknown_order_latched
+
+
+def test_binance_portfolio_dca_reservation_capacity_restart_and_partial_kill_point(tmp_path):
+    from freqtrade.exchange.binance_order_intent import (
+        PortfolioOrderIntent,
+        PortfolioOrderIntentStore,
+    )
+    from freqtrade.exchange.binance_portfolio_policy import _PORTFOLIO_MARGIN_DCA_PAIRS
+
+    pairs = sorted(_PORTFOLIO_MARGIN_DCA_PAIRS)
+    path = tmp_path / "intents.json"
+    store = PortfolioOrderIntentStore(path, set(pairs), reservations_enabled=True, dca_enabled=True)
+    for i, pair in enumerate(pairs[:20]):
+        for entry in range(2):
+            cid = f"ftpm-{i}-{entry}"
+            store.add(PortfolioOrderIntent(cid, pair, "regular"))
+            store.promote_to_entry_reservation(cid)
+    restored = PortfolioOrderIntentStore(
+        path, set(pairs), reservations_enabled=True, dca_enabled=True
+    )
+    assert len(restored.reservations) == 40
+    restored.add(PortfolioOrderIntent("ftpm-slot-21", pairs[20], "regular"))
+    with pytest.raises(OperationalException, match="unsafe local"):
+        restored.promote_to_entry_reservation("ftpm-slot-21")
+    restored.remove("ftpm-slot-21")
+    with pytest.raises(OperationalException, match="could not safely load"):
+        PortfolioOrderIntentStore(path, set(pairs), reservations_enabled=True)
+    restored.begin_entry_reconciliation("ftpm-0-1")
+    restarted = PortfolioOrderIntentStore(
+        path, set(pairs), reservations_enabled=True, dca_enabled=True
+    )
+    assert len(restarted.reservations) == 39
+    assert restarted.intents[0].client_order_id == "ftpm-0-1"
+    with pytest.raises(OperationalException, match="another operation"):
+        restarted.add(PortfolioOrderIntent("ftpm-new", pairs[21], "regular"))
+    restarted.promote_to_entry_reservation("ftpm-0-1")
+    assert len(restarted.reservations) == 40
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_binance_portfolio_dca_partial_entry_persists_before_cancel(
+    default_conf, mocker, tmp_path, ambiguous
+):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    api = portfolio_margin_live_api_mock()
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path)
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "get_contract_size", return_value=1.0)
+    raw = {
+        "id": "123",
+        "clientOrderId": "ftpm-partial",
+        "symbol": "ETH/USDT:USDT",
+        "status": "open",
+        "side": "buy",
+        "type": "limit",
+        "amount": 0.02,
+        "filled": 0.01,
+        "remaining": 0.01,
+        "price": 2000.0,
+        "average": 2000.0,
+    }
+    terminal = {**raw, "status": "canceled", "remaining": 0.01}
+    api.fetch_order.side_effect = [raw] + [raw if ambiguous else terminal] * 3
+    store = exchange._portfolio_order_intent_store
+    store.add(PortfolioOrderIntent("ftpm-partial", "ETH/USDT:USDT", "regular"))
+    store.promote_to_entry_reservation("ftpm-partial")
+
+    def cancel(*args, **kwargs):
+        assert store.intents[0].client_order_id == "ftpm-partial"
+        assert not store.reservations
+        raise ccxt.RequestTimeout("response lost after cancel")
+
+    api.cancel_order.side_effect = cancel
+    containment = mocker.patch.object(exchange, "_contain_unknown_portfolio_order")
+    if ambiguous:
+        with pytest.raises(OperationalException, match="ambiguous"):
+            exchange.settle_portfolio_dca_partial_entry(raw, "ETH/USDT:USDT")
+        containment.assert_called_once_with("ETH/USDT:USDT", "ftpm-partial")
+        assert exchange.portfolio_margin_unknown_order_latched
+        restarted = get_patched_exchange(
+            mocker, conf, portfolio_margin_live_api_mock(), exchange="binance"
+        )
+        assert restarted.portfolio_margin_unknown_order_latched
+    else:
+        result = exchange.settle_portfolio_dca_partial_entry(raw, "ETH/USDT:USDT")
+        assert result["status"] == "canceled" and result["filled"] == 0.01
+        assert not store.intents and len(store.reservations) == 1
+        containment.assert_not_called()
