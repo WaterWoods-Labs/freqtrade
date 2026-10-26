@@ -108,6 +108,27 @@ def test_entry_transports_attached_stop_in_the_same_request(stop_api, side, stop
     assert "tpslOrder" not in stop_api.client.place_order.call_args.args[0]
 
 
+def test_limit_ioc_entry_transports_attached_stop(stop_api):
+    stop_api.entry_stoploss = -0.03
+    stop_api._market = Mock(
+        return_value={"precision": {"price": 2}, "info": {"quantityPrecision": 4}}
+    )
+    stop_api.fetch_leverage = Mock(return_value={"longLeverage": 1})
+    stop_api.client.place_order.return_value = {"ts": 1000000, "data": {"orderId": "entry-ioc"}}
+    stop_api.create_order(PAIR, "limit", "buy", 1, 1500.01, {"timeInForce": "IOC"})
+    body = stop_api.client.place_order.call_args.args[0]
+    assert body["orderType"] == "limit" and body["timeInForce"] == "ioc"
+    assert body["tpslOrder"]["stopLoss"] == "1455.01"
+
+
+@pytest.mark.parametrize("time_in_force", ["GTC", "FOK"])
+def test_unverified_limit_entry_cannot_attach_protection(stop_api, time_in_force):
+    stop_api.entry_stoploss = -0.03
+    with pytest.raises(ccxt.InvalidOrder, match="PO or limit IOC"):
+        stop_api.create_order(PAIR, "limit", "buy", 1, 1500.01, {"timeInForce": time_in_force})
+    stop_api.client.place_order.assert_not_called()
+
+
 def test_attached_stop_is_adopted_without_duplicate_after_better_entry_fill(stop_api):
     create(stop_api)
     row = stop_api._test_rows[0]

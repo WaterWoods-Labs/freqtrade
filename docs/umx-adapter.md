@@ -20,7 +20,7 @@ of its unfilled remainder without applying the extra entry reserve. These change
 not by themselves guarantee timely signals or prove live fills. Version 3 also adds the
 position-bound stop transport described below; its live exchange acceptance is pending.
 `exchange.umx_entry_stoploss=-0.03` attaches a last-price market stop to every non-reduce-only
-PO perpetual entry. `exchange.umx_order_read_only=true` blocks every non-GET request before
+PO or limit-IOC perpetual entry. `exchange.umx_order_read_only=true` blocks every non-GET request before
 HTTP transport. Unapproved `UMXChanB1S1Maker` configurations force that read-only setting after
 generic client overrides; they may be deployed STOPPED without enabling account writes.
 
@@ -125,7 +125,7 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
   response, and reads back accepted parameters. A triggered TPSL resolves to its execution order;
   trigger status alone never supplies a fill. Cancellation reads back the resulting state.
   Spot, take-profit and limit-stop variants remain unsupported. Full live TPSL acceptance is
-  still pending. Attached entry stops are sent atomically with PO entries
+  still pending. Attached entry stops are sent atomically with PO or limit-IOC entries
   when configured; adoption requires the actual position quantity and an equal or tighter trigger.
   Venue activation during partial fills and remainder cancellation still require live evidence.
 - Observed attached stops (`ftsa` client IDs) use `untrigger` while waiting, and report the
