@@ -51,7 +51,7 @@ USER ftuser
 COPY --from=runtime-source --chown=ftuser:ftuser /freqtrade/ /freqtrade/
 
 RUN pip install -e . --user --no-cache-dir \
-  && mkdir /freqtrade/user_data/ \
+  && mkdir -p /freqtrade/user_data/ \
   && freqtrade install-ui
 
 ENTRYPOINT ["freqtrade"]
