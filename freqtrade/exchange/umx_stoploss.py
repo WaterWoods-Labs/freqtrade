@@ -17,20 +17,26 @@ class UMXStoploss:
         loss = getattr(self, "entry_stoploss", None)
         if loss is None or params.get("reduceOnly") is True:
             return params
+        protected_type = order_type == "post_only" or (
+            order_type == "limit"
+            and str(params.get("timeInForce") or params.get("time_in_force") or "").lower() == "ioc"
+        )
         if (
             loss != -0.03
             or not self._is_futures_symbol(symbol)
-            or order_type != "post_only"
+            or not protected_type
             or side not in {"buy", "sell"}
             or price is None
             or not math.isfinite(price)
             or price <= 0
             or "tpslOrder" in params
         ):
-            raise ccxt.InvalidOrder("Maker protection requires a PO perpetual entry and 3% stop")
+            raise ccxt.InvalidOrder(
+                "Entry protection requires a PO or limit IOC perpetual entry and 3% stop"
+            )
         decimals = self._market(symbol).get("precision", {}).get("price")
         if not isinstance(decimals, int) or not 0 <= decimals <= 16:
-            raise ccxt.InvalidOrder("Maker protection requires verified price precision")
+            raise ccxt.InvalidOrder("Entry protection requires verified price precision")
         tick = Decimal(1).scaleb(-decimals)
         factor = Decimal("0.97") if side == "buy" else Decimal("1.03")
         stop = (Decimal(str(price)) * factor).quantize(
@@ -39,8 +45,8 @@ class UMXStoploss:
         if stop <= 0 or (
             stop >= Decimal(str(price)) if side == "buy" else stop <= Decimal(str(price))
         ):
-            raise ccxt.InvalidOrder("Maker stop cannot be represented at market price precision")
-        # The protection travels with the PO order; it never waits for the bot's fill callback.
+            raise ccxt.InvalidOrder("Entry stop cannot be represented at market price precision")
+        # The protection travels with the entry; it never waits for the bot's fill callback.
         # Actual venue activation on partial fills remains a live-acceptance requirement.
         return {
             **params,
