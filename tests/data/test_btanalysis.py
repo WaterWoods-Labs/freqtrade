@@ -367,8 +367,8 @@ def test_backtest_strategy_dir(tmp_path, default_conf):
 
     with backtest_strategy_dir(zip_file, "StrategyTestV3") as directory:
         assert sorted(x.name for x in directory.iterdir()) == [
-            f"{zip_file.stem}_StrategyTestV3.json",
-            f"{zip_file.stem}_StrategyTestV3.py",
+            "strategy.json",
+            "strategy.py",
         ]
         default_conf["strategy_path"] = str(directory)
         strategy = StrategyResolver.load_strategy(default_conf)
@@ -383,7 +383,7 @@ def test_backtest_strategy_dir(tmp_path, default_conf):
     # Without stored parameters, the strategy's own buy_params apply
     zip_file = _store_strategy_zip(tmp_path, "2024_01_01_15_05_26")
     with backtest_strategy_dir(zip_file, "StrategyTestV3") as directory:
-        assert [x.name for x in directory.iterdir()] == [f"{zip_file.stem}_StrategyTestV3.py"]
+        assert [x.name for x in directory.iterdir()] == ["strategy.py"]
         default_conf["strategy_path"] = str(directory)
         strategy = StrategyResolver.load_strategy(default_conf)
     assert strategy._ft_params_from_file == {}

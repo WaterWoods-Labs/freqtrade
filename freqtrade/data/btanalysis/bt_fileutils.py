@@ -18,7 +18,7 @@ import pandas as pd
 from freqtrade.constants import LAST_BT_RESULT_FN
 from freqtrade.exceptions import ConfigurationError, OperationalException
 from freqtrade.ft_types import BacktestHistoryEntryType, BacktestResultType
-from freqtrade.misc import file_dump_json, is_path_in_dir, json_load
+from freqtrade.misc import file_dump_json, json_load
 from freqtrade.optimize.backtest_caching import get_backtest_metadata_filename
 from freqtrade.persistence import LocalTrade, Trade, init_db
 
@@ -368,8 +368,8 @@ def backtest_strategy_dir(filename: Path, strategy_name: str) -> Iterator[Path]:
     """
     Extract the strategy and its parameter file from a backtest result zip into a
     temporary directory - which can then be used as `strategy_path`.
-    The archived filenames are kept, so the parameter file remains a sibling of the
-    strategy file, and is picked up by the strategy as usual.
+    The extracted strategy and its parameter file use fixed names, preserving normal
+    parameter loading without using user-provided path components.
     :param filename: Path to the backtest result zip file
     :param strategy_name: Name of the strategy to extract
     :return: Context manager yielding the directory the strategy was extracted to.
@@ -384,17 +384,12 @@ def backtest_strategy_dir(filename: Path, strategy_name: str) -> Iterator[Path]:
     strategy_code = load_file_from_zip(filename, strategy_file)
 
     with tempfile.TemporaryDirectory(prefix="ft_bt_strategy") as tmpdir:
-        directory = Path(tmpdir).resolve()
-        strategy_path = directory / strategy_file
-        if not is_path_in_dir(strategy_path, directory):
-            raise ValueError("Invalid backtest strategy output path")
-        strategy_path.write_bytes(strategy_code)
-        params_file = f"{filename.stem}_{strategy_name}.json"
-        params_path = directory / params_file
-        if not is_path_in_dir(params_path, directory):
-            raise ValueError("Invalid backtest parameter output path")
+        directory = Path(tmpdir)
+        (directory / "strategy.py").write_bytes(strategy_code)
         try:
-            params_path.write_bytes(load_file_from_zip(filename, params_file))
+            params_file = f"{filename.stem}_{strategy_name}.json"
+            params = load_file_from_zip(filename, params_file)
+            (directory / "strategy.json").write_bytes(params)
         except ValueError:
             logger.info(f"No parameters stored for {strategy_name} in {filename}.")
 
