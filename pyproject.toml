@@ -227,9 +227,6 @@ reportTypedDictNotRequiredAccess = false  # 27
 exclude-newer = "1 week"
 
 [tool.uv.exclude-newer-package]
-# One-off review for certifi==2026.10.19 in #66; remove this cutoff on the next upgrade.
-# Admit only artifacts uploaded by this release's final PyPI upload, not future releases.
-certifi = "2026-10-20T02:24:17Z"
 ccxt = false
 virtualenv = "5 days"
 certifi = "2 days"
