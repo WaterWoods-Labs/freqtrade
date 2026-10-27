@@ -232,6 +232,7 @@ exclude-newer = "1 week"
 certifi = "2026-10-20T02:24:17Z"
 ccxt = false
 virtualenv = "5 days"
+certifi = "2 days"
 
 [tool.ruff]
 line-length = 100
@@ -259,6 +260,7 @@ extend-select = [
   "RUF",    # ruff
   "ASYNC",  # flake8-async
   "NPY",    # numpy
+  "DTZ",    # flake8-datetimez
 ]
 
 extend-ignore = [

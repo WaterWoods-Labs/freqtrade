@@ -932,7 +932,7 @@ class LocalTrade:
             return
 
         logger.info(f"Updating trade (id={self.id}) ...")
-        if order.ft_order_side != "stoploss" and order.funding_fee is None:
+        if order.safe_filled > 0 and order.funding_fee is None:
             order.funding_fee = (
                 self.funding_fee_running if self.funding_fee_running is not None else 0.0
             )
@@ -1293,7 +1293,7 @@ class LocalTrade:
         max_stake_amount = FtPrecise(0.0)
         total_stake = 0.0  # Total stake after all buy orders (does not subtract!)
         avg_price = FtPrecise(0.0)
-        close_profit = 0.0
+        close_profit = None
         close_profit_abs = 0.0
         # Reset funding fees
         self.funding_fees = 0.0
@@ -1339,7 +1339,7 @@ class LocalTrade:
         self.funding_fees = total_funding_fees
         self.max_stake_amount = float(max_stake_amount) / (self.leverage or 1.0)
 
-        if close_profit:
+        if close_profit is not None:
             self.close_profit = close_profit
             self.realized_profit = close_profit_abs
             self.close_profit_abs = prof.profit_abs
@@ -2300,7 +2300,7 @@ class Trade(ModelBase, LocalTrade):
                             resp[i] = {
                                 "mix_tag": mix_tag,
                                 "profit_ratio": profit + resp[i]["profit_ratio"],
-                                "profit_pct": round(profit + resp[i]["profit_ratio"] * 100, 2),
+                                "profit_pct": round((profit + resp[i]["profit_ratio"]) * 100, 2),
                                 "profit_abs": profit_abs + resp[i]["profit_abs"],
                                 "count": 1 + resp[i]["count"],
                             }
