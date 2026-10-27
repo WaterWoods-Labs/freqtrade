@@ -397,3 +397,11 @@ def test_backtest_strategy_dir(tmp_path, default_conf):
     with pytest.raises(ValueError, match=r"does not contain strategies"):
         with backtest_strategy_dir(tmp_path / "backtest-result.json", "StrategyTestV3"):
             pass
+
+
+@pytest.mark.parametrize("strategy_name", ["../outside", "..\\outside", "/tmp/outside"])
+def test_backtest_strategy_dir_rejects_path_names(tmp_path, strategy_name):
+    with pytest.raises(ValueError, match="Invalid backtest strategy name"):
+        with backtest_strategy_dir(tmp_path / "backtest-result.zip", strategy_name):
+            pass
+    assert list(tmp_path.iterdir()) == []
