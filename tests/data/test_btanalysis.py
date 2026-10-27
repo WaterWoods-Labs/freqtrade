@@ -399,9 +399,18 @@ def test_backtest_strategy_dir(tmp_path, default_conf):
             pass
 
 
-@pytest.mark.parametrize("strategy_name", ["../outside", "..\\outside", "/tmp/outside"])
+@pytest.mark.parametrize("strategy_name", ["../outside", "..\\outside"])
 def test_backtest_strategy_dir_rejects_path_names(tmp_path, strategy_name):
     with pytest.raises(ValueError, match="Invalid backtest strategy name"):
         with backtest_strategy_dir(tmp_path / "backtest-result.zip", strategy_name):
+            pass
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_backtest_strategy_dir_rejects_absolute_path(tmp_path):
+    with pytest.raises(ValueError, match="Invalid backtest strategy name"):
+        with backtest_strategy_dir(
+            tmp_path / "backtest-result.zip", str(tmp_path / "outside")
+        ):
             pass
     assert list(tmp_path.iterdir()) == []
