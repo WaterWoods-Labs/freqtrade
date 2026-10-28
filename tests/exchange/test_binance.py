@@ -69,7 +69,7 @@ CHAN_PAIR_LIMITS = {
 }
 
 
-def portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit=950):
+def portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit=950, expanded=False):
     from freqtrade.exchange.binance_portfolio_policy import _PORTFOLIO_MARGIN_DCA_PAIRS
 
     conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
@@ -80,6 +80,13 @@ def portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit=950):
         _PORTFOLIO_MARGIN_DCA_PAIRS, 200 if exposure_limit == 2000 else 75
     )
     risk["max_total_entry_notional"] = exposure_limit
+    if expanded:
+        from freqtrade.binance_portfolio_usdt235 import PAIRS
+
+        assert exposure_limit == 2000
+        conf["exchange"]["pair_whitelist"] = sorted(PAIRS)
+        risk["policy"] = "chan_dca4_235_2000_v1"
+        risk["pairs"] = dict.fromkeys(PAIRS, 200)
     return conf
 
 
@@ -102,13 +109,15 @@ def test_binance_portfolio_dca_policy_is_bounded_and_separate(default_conf, tmp_
 
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
-@pytest.mark.parametrize("exposure_limit,add_cap", [(950, 35), (2000, 100)])
+@pytest.mark.parametrize(
+    "exposure_limit,add_cap,expanded", [(950, 35, False), (2000, 100, False), (2000, 100, True)]
+)
 def test_binance_portfolio_dca_confirmed_add_and_second_add_rejection(
-    default_conf, mocker, tmp_path, side, exposure_limit, add_cap
+    default_conf, mocker, tmp_path, side, exposure_limit, add_cap, expanded
 ):
     from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
 
-    conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit)
+    conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit, expanded)
     api = portfolio_margin_live_api_mock()
     api.fetch_open_orders.return_value = []
     api.fetch_positions.return_value = [

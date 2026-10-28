@@ -1,6 +1,7 @@
 # Required json-schema for user specified config
 
 
+from freqtrade.binance_portfolio_usdt235 import PAIRS as USDT235_PAIRS
 from freqtrade.constants import (
     AVAILABLE_DATAHANDLERS,
     AVAILABLE_PAIRLISTS,
@@ -1193,8 +1194,12 @@ CONF_SCHEMA = {
                                     },
                                     "pairs": {
                                         "type": "object",
-                                        "minProperties": 56,
-                                        "maxProperties": 56,
+                                        "minProperties": 235
+                                        if dca_policy == "chan_dca4_235_2000_v1"
+                                        else 56,
+                                        "maxProperties": 235
+                                        if dca_policy == "chan_dca4_235_2000_v1"
+                                        else 56,
                                         "properties": {
                                             f"{symbol}/USDT:USDT": {
                                                 "type": "number",
@@ -1260,6 +1265,17 @@ CONF_SCHEMA = {
                                                 "XRP",
                                                 "UNI",
                                             )
+                                            if dca_policy != "chan_dca4_235_2000_v1"
+                                        }
+                                        | {
+                                            pair: {
+                                                "type": "number",
+                                                "minimum": 0,
+                                                "exclusiveMinimum": True,
+                                                "maximum": pair_cap,
+                                            }
+                                            for pair in sorted(USDT235_PAIRS)
+                                            if dca_policy == "chan_dca4_235_2000_v1"
                                         },
                                         "additionalProperties": False,
                                     },
@@ -1301,6 +1317,7 @@ CONF_SCHEMA = {
                             for dca_policy, pair_cap, total_cap in (
                                 ("chan_dca4_56_v1", 75, 950),
                                 ("chan_dca4_56_2000_v1", 200, 2000),
+                                ("chan_dca4_235_2000_v1", 200, 2000),
                             )
                         ],
                     ],
