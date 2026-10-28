@@ -4,18 +4,23 @@ import re
 from math import isfinite
 from typing import Any
 
+from freqtrade.binance_portfolio_usdt235 import PAIRS as USDT235_PAIRS
+
 
 _PORTFOLIO_MARGIN_CHAN_POLICY = "chan_multi_pair"
 _PORTFOLIO_MARGIN_DCA_POLICY = "chan_dca4_56_v1"
 _PORTFOLIO_MARGIN_DCA_2000_POLICY = "chan_dca4_56_2000_v1"
+_PORTFOLIO_MARGIN_DCA_235_POLICY = "chan_dca4_235_2000_v1"
 _PORTFOLIO_MARGIN_DCA_POLICIES = (
     _PORTFOLIO_MARGIN_DCA_POLICY,
     _PORTFOLIO_MARGIN_DCA_2000_POLICY,
+    _PORTFOLIO_MARGIN_DCA_235_POLICY,
 )
 # Pair, aggregate, initial entry and single-add notional ceilings, in USDT.
 _PORTFOLIO_MARGIN_DCA_LIMITS = {
     _PORTFOLIO_MARGIN_DCA_POLICY: (75, 950, 40, 35),
     _PORTFOLIO_MARGIN_DCA_2000_POLICY: (200, 2000, 100, 100),
+    _PORTFOLIO_MARGIN_DCA_235_POLICY: (200, 2000, 100, 100),
 }
 _PORTFOLIO_MARGIN_CHAN_POLICIES = frozenset(
     {_PORTFOLIO_MARGIN_CHAN_POLICY, *_PORTFOLIO_MARGIN_DCA_POLICIES}
@@ -118,6 +123,8 @@ def _portfolio_margin_chan_risk_policy_valid(risk: Any) -> bool:
     dca = policy in _PORTFOLIO_MARGIN_DCA_POLICIES
     pair_cap, total_cap, *_ = _PORTFOLIO_MARGIN_DCA_LIMITS.get(policy, (100, 500, 0, 0))
     pairs = _PORTFOLIO_MARGIN_DCA_PAIRS if dca else _PORTFOLIO_MARGIN_CHAN_PAIRS
+    if policy == _PORTFOLIO_MARGIN_DCA_235_POLICY:
+        pairs = USDT235_PAIRS
     return (
         policy in _PORTFOLIO_MARGIN_CHAN_POLICIES
         and isinstance(account_namespace, str)

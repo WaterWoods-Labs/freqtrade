@@ -2368,6 +2368,1490 @@
                 "reject_force_entry_price"
               ],
               "additionalProperties": false
+            },
+            {
+              "properties": {
+                "account_namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$"
+                },
+                "policy": {
+                  "type": "string",
+                  "const": "chan_dca4_235_2000_v1",
+                  "enum": [
+                    "chan_dca4_235_2000_v1"
+                  ]
+                },
+                "pairs": {
+                  "type": "object",
+                  "minProperties": 235,
+                  "maxProperties": 235,
+                  "properties": {
+                    "AAOI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AAPL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ABBV/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ACN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ADBE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AGPU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AKAM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ALAB/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AMAT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AMC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AMD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AMZN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ANET/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ANTHROPIC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "APLD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "APP/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ARM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ASML/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ASTS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AVGO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "AXTI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BABA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BAC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BBX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BITO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BMNR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BNB/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BNC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BOT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BRKB/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BSP/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BTC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BWET/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BYD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "BZ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CAT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CBRS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CEG/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CIEN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "COHR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "COIN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "COPPER/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "COST/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CRCL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CRDO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CRM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CRML/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CRWD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CRWV/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CSCO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CSOPSAMSUNG2L/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CSOPSKHYNIX2L/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CVNA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CXMT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "CYPH/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "DDOG/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "DELL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "DIS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "DJT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "DKNG/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "DRAM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EBAY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EIDO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EQT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ETH/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EWJ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EWT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EWY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "EWZ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "FLEX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "FLNC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "FWDI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GDX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GEV/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GIGADEV/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GLW/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GME/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GOOGL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GPRO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "GTLB/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HANMI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HIMS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HK0625/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HK0700/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HK0992/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HK1810/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HOOD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HPE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HUT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HYPE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "HYUNDAI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "IBKR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "IBM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "INTC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "INTW/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "IONQ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "IREN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "IWM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "JPM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "KLAC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "KO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "KODEX200/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "KORU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "KSTR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "KUAISHOU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "LGELECTRONICS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "LITE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "LLY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "LRCX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "LYTE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MARA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MCD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MDB/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MDT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MEITUAN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "META/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MINIMAX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MOONSHOT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MP/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MRK/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MRNA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MRVL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MSFT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MSTR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MSTU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MUU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "MVLL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NATGAS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NAVER/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NBIS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NET/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NFLX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NKE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NOK/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NOW/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NVDA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NVDL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "NVO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "OKLO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ONDS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "OPENAI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ORCL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "OURA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PANW/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PATH/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PAYP/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PDD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PENG/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PLTR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "POPMART/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "PYPL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "QCOM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "QNTX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "QQQ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "RAM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "RDDT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "RDW/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "RIVN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "RKLB/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "RUM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SAMSUNG/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SAMSUNGEM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SECZ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SHAZ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SHOP/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SKDD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SKHY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SKHYNIX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SKUU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SMCI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SMH/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SNDK/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SNOW/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SNPS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SNXX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SOFI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SOL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SONY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SOXL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SOXS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SPCX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SPY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "SQQQ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "STM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "STRC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "STXX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TBT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TEAM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TEM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TENCENT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TER/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TMF/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TQQQ/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TSLA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TSLL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TSM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TTWO/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TWST/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TXN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "TZA/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "UBER/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "UNH/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "UNI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "UNITREE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "URNM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "USAR/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "USDBRL/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "USDEX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "UVXY/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "V/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "VKTX/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "VRT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "VST/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "WDC/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "WEN/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "WMT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XAG/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XAU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XBI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XLE/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XOM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XPD/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XPT/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "XRP/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ZCSH/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ZHIPU/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ZHONGJI/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ZM/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    },
+                    "ZS/USDT:USDT": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 200
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "allowed_sides": {
+                  "type": "array",
+                  "const": [
+                    "long",
+                    "short"
+                  ],
+                  "enum": [
+                    [
+                      "long",
+                      "short"
+                    ]
+                  ]
+                },
+                "max_leverage": {
+                  "type": "number",
+                  "const": 1,
+                  "enum": [
+                    1
+                  ]
+                },
+                "max_total_entry_notional": {
+                  "type": "number",
+                  "minimum": 0,
+                  "exclusiveMinimum": true,
+                  "maximum": 2000
+                },
+                "force_entry_order_type": {
+                  "type": "string",
+                  "const": "disabled",
+                  "enum": [
+                    "disabled"
+                  ]
+                },
+                "reject_force_entry_price": {
+                  "type": "boolean",
+                  "const": true,
+                  "enum": [
+                    true
+                  ]
+                }
+              },
+              "required": [
+                "account_namespace",
+                "policy",
+                "pairs",
+                "allowed_sides",
+                "max_leverage",
+                "max_total_entry_notional",
+                "force_entry_order_type",
+                "reject_force_entry_price"
+              ],
+              "additionalProperties": false
             }
           ]
         }

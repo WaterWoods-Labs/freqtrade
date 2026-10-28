@@ -7,6 +7,12 @@ acceptance, and recovery are in the
 
 ## Supported scope
 
+The separate `chan_dca4_235_2000_v1` policy admits the reviewed 2026-10-28 catalog
+of 235 USDT-quoted and USDT-settled contracts. It retains the 2000 USDT aggregate,
+200 USDT per-symbol, 100 USDT initial/add, 1x leverage and 20 occupied-symbol limits.
+Short price histories do not remove an admitted symbol; the strategy owns its
+unchanged signal warmup. The original 56-symbol policies retain their exact scope.
+
 The adapter extends Freqtrade's existing `Binance` exchange through CCXT. It supports standard
 Portfolio Margin accounts, linear USD-M perpetuals, `futures` trading, `cross` margin, and one-way
 positions. Spot/margin trading, inverse/COIN-M trading, hedge mode, Portfolio Margin Pro, and
