@@ -55,6 +55,8 @@ jobs:
       - name: Run focused configuration, Binance, bot, RPC, and PAPI tests
         run: |
           pytest -q \
+            tests/test_bot_risk.py \
+            tests/exchange/test_binance_bot_risk.py \
             tests/test_binance_portfolio_margin_boundary.py \
             tests/test_configuration.py \
             tests/exchange/test_binance.py \

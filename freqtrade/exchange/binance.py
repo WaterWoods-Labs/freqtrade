@@ -40,9 +40,9 @@ from freqtrade.exchange.binance_order_intent import (
 from freqtrade.exchange.binance_portfolio_policy import (
     _PORTFOLIO_MARGIN_CHAN_POLICIES,
     _PORTFOLIO_MARGIN_CHAN_RISK_KEYS,
-    _PORTFOLIO_MARGIN_DCA_LIMITS,
     _PORTFOLIO_MARGIN_DCA_POLICIES,
     _portfolio_margin_chan_risk_policy_valid,
+    dca_order_limits,
 )
 from freqtrade.exchange.binance_public_data import (
     concat_safe,
@@ -78,6 +78,8 @@ class _PortfolioDcaEntryLease:
 
 
 class Binance(Exchange):
+    bot_risk_contract_version = 1
+
     _portfolio_order_recovery_attempts = 3
     _portfolio_order_recovery_delay = 1.0
     _portfolio_stop_order_recovery_attempts = 1
@@ -158,6 +160,18 @@ class Binance(Exchange):
             isinstance(options, dict) and options.get("portfolioMargin") is True
         )
         risk_config = exchange_config.get("portfolio_margin_risk")
+        if "bot_risk" in config:
+            from freqtrade.bot_risk import validate_bot_config
+            from freqtrade.exchange.binance_portfolio_policy import portfolio_policy
+
+            try:
+                expected = portfolio_policy(validate_bot_config(config))
+                if not self._portfolio_margin or risk_config != expected:
+                    raise ValueError("Derived Portfolio Margin policy differs from bot_risk")
+            except (ValueError, TypeError, KeyError) as exc:
+                raise OperationalException(str(exc)) from exc
+        elif isinstance(risk_config, dict) and risk_config.get("policy") == "bot_config_v1":
+            raise OperationalException("bot_config_v1 requires the canonical bot_risk config")
         self._portfolio_margin_risk = risk_config if isinstance(risk_config, dict) else None
         self._portfolio_create_lock: Any = (
             Lock() if self._portfolio_margin and not config.get("dry_run", True) else None
@@ -528,7 +542,10 @@ class Binance(Exchange):
                         "pair, 1x leverage, at most 100 USDT entry notional, market force-entry, "
                         "and explicit-price rejection."
                     )
-            elif risk_keys == _PORTFOLIO_MARGIN_CHAN_RISK_KEYS:
+            elif (
+                risk_keys == _PORTFOLIO_MARGIN_CHAN_RISK_KEYS
+                or risk_config.get("policy") == "bot_config_v1"
+            ):
                 pair_whitelist = exchange_config.get("pair_whitelist", [])
                 if (
                     not Binance._portfolio_margin_chan_risk_policy_valid(risk_config)
@@ -1591,6 +1608,10 @@ class Binance(Exchange):
                 )
 
         effective = {item: max(exposure[item], reserved[item]) for item in limits}
+        if risk["policy"] == "bot_config_v1":
+            order_cap = dca_order_limits(risk)[1 if target_reservations else 0]
+            if proposed_notional > order_cap + 1e-9:
+                raise InvalidOrderException("Configured initial/add entry limit exceeded.")
         if target_reservations:
             target_position = positions_by_pair.get(pair)
             direction = "long" if side == "buy" else "short"
@@ -1605,7 +1626,7 @@ class Binance(Exchange):
                 or target_evidence[0]["side"] != side
                 or target_position.get("side") != direction
                 or abs(float(target_position["contracts"])) + 1e-9 < target_evidence[0]["filled"]
-                or proposed_notional > _PORTFOLIO_MARGIN_DCA_LIMITS[risk["policy"]][3] + 1e-9
+                or proposed_notional > dca_order_limits(risk)[1] + 1e-9
             ):
                 raise OperationalException(
                     "Portfolio Margin DCA add lacks one confirmed same-side entry."
@@ -1613,7 +1634,7 @@ class Binance(Exchange):
         elif (
             pair in positions_by_pair
             or pair in pending_pairs
-            or proposed_notional > _PORTFOLIO_MARGIN_DCA_LIMITS[risk["policy"]][2] + 1e-9
+            or proposed_notional > dca_order_limits(risk)[0] + 1e-9
         ):
             raise OperationalException(
                 "Portfolio Margin DCA initial entry exceeds its fresh-position limit."
@@ -1621,14 +1642,17 @@ class Binance(Exchange):
 
         occupied = sum(value > 1e-9 for value in effective.values())
         if (
-            (effective[pair] <= 1e-9 and occupied >= 20)
+            (effective[pair] <= 1e-9 and occupied >= risk.get("max_occupied_symbols", 20))
             or effective[pair] + proposed_notional > float(limits[pair]) + 1e-9
             or sum(effective.values()) + proposed_notional
             > float(risk["max_total_entry_notional"]) + 1e-9
         ):
-            raise OperationalException(
-                "Portfolio Margin DCA projected pair, total or slot limit exceeded."
+            error = (
+                InvalidOrderException
+                if risk.get("policy") == "bot_config_v1"
+                else OperationalException
             )
+            raise error("Portfolio Margin DCA projected pair, total or slot limit exceeded.")
 
     def validate_config(self, config) -> None:
         super().validate_config(config)
