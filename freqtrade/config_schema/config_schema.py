@@ -1,6 +1,7 @@
 # Required json-schema for user specified config
 
 
+from freqtrade.bot_risk import BOT_RISK_SCHEMA
 from freqtrade.constants import (
     AVAILABLE_DATAHANDLERS,
     AVAILABLE_PAIRLISTS,
@@ -35,6 +36,7 @@ __VIA_ENV = "Recommended to be set via environment variable"
 CONF_SCHEMA = {
     "type": "object",
     "properties": {
+        "bot_risk": BOT_RISK_SCHEMA,
         "max_open_trades": {
             "description": "Maximum number of open trades. -1 for unlimited.",
             "type": ["integer", "number"],

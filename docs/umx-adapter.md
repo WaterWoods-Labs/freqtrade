@@ -212,3 +212,7 @@ for gaps in current documentation, not proof of current behavior.
 
 The reference repository is a development source only. Installing or running this adapter does
 not require its checkout or access to documentation webpages.
+# Optional configurable bot budgets
+
+See [bot risk contract v1](bot-risk-contract.md) for the opt-in capital, reservation and recovery
+contract. Existing profiles without `bot_risk` retain their current behavior.

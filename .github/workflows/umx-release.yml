@@ -94,6 +94,14 @@ jobs:
           fi
           echo "file=$recipe" >> "$GITHUB_OUTPUT"
 
+      - name: Read reviewed release platforms
+        id: platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          platforms=$(jq -cer '.platforms | select(type == "array" and length > 0 and length <= 2) | select(index("linux/amd64") != null) | select(all(.[]; . == "linux/amd64" or . == "linux/arm64")) | select(length == (unique | length)) | join(",")' .github/release-platforms.json)
+          echo "value=$platforms" >> "$GITHUB_OUTPUT"
+          echo "Reviewed platforms: $platforms" >> "$GITHUB_STEP_SUMMARY"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
@@ -113,7 +121,9 @@ jobs:
         with:
           context: .
           file: ${{ steps.recipe.outputs.file }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.value }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
           push: true
           provenance: mode=max
           sbom: true

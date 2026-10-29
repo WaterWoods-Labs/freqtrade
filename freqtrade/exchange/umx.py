@@ -1,8 +1,11 @@
 """UMX exchange subclass using the native UMX REST API."""
 
+import hashlib
 import os
+import uuid
 from decimal import Decimal, InvalidOperation
-from math import isclose
+from math import isclose, isfinite
+from pathlib import Path
 from typing import Any
 
 from freqtrade.constants import ExchangeConfig
@@ -31,6 +34,131 @@ class UMX(Exchange):
 
     umx_maker_contract_version = 3
     umx_opportunity_contract_version = 1
+    bot_risk_contract_version = 1
+
+    def validate_config(self, config):
+        super().validate_config(config)
+        if "bot_risk" in config:
+            from freqtrade.bot_risk import validate_bot_config
+
+            try:
+                validate_bot_config(config)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise OperationalException(str(exc)) from exc
+
+    def _bot_risk_ledger(self):
+        from freqtrade.bot_risk import validate_bot_config
+        from freqtrade.exchange.bot_risk_ledger import EntryLedger
+
+        risk = validate_bot_config(self._config)
+        namespace = hashlib.sha256(risk["account_namespace"].encode()).hexdigest()[:24]
+        return EntryLedger(
+            Path(self._config["user_data_dir"]) / f".bot-risk-{namespace}.json", risk
+        )
+
+    def _bot_risk_snapshot(self, target_pair=None, target_side=None):
+        from freqtrade.bot_risk import positive
+
+        risk = self._config["bot_risk"]
+        exposure = dict.fromkeys(risk["pair_limits"], 0.0)
+        pending = set()
+        positions, orders = self.opportunity_account_snapshot()
+        # Reject conditional entries outside ordinary orders.
+        self.opportunity_conditional_snapshot()
+        seen = set()
+        for row in positions:
+            amount = row.get("contracts")
+            if type(amount) not in (int, float) or not isfinite(amount) or amount < 0:
+                raise OperationalException("Invalid position size")
+            if not amount:
+                continue
+            pair = row.get("symbol")
+            if (
+                pair not in exposure
+                or pair in seen
+                or row.get("side") not in {"long", "short"}
+                or row.get("leverage") != 1
+            ):
+                raise OperationalException("Unowned or ambiguous account position")
+            seen.add(pair)
+            if pair == target_pair and row["side"] != ("long" if target_side == "buy" else "short"):
+                raise OperationalException(
+                    "Add direction conflicts with the actual account position"
+                )
+            mark, size = row.get("markPrice"), self.get_contract_size(pair)
+            if not positive(mark) or not positive(size):
+                raise OperationalException("Missing position mark or contract size")
+            exposure[pair] += amount * size * mark
+        for row in orders:
+            if row.get("reduceOnly") is True or (row.get("info") or {}).get("reduceOnly") is True:
+                continue
+            pair = row.get("symbol")
+            amount, price = row.get("amount"), row.get("price")
+            if pair not in exposure or not positive(amount) or not positive(price):
+                raise OperationalException("Unowned or unpriced open entry order")
+            # Full order size deliberately over-reserves partial fills during snapshot lag.
+            exposure[pair] += amount * price
+            pending.add(pair)
+        return exposure, pending
+
+    def create_order(
+        self,
+        *,
+        pair,
+        ordertype,
+        side,
+        amount,
+        rate,
+        leverage,
+        time_in_force="GTC",
+        reduceOnly=False,
+        initial_order=True,
+        client_order_id=None,
+    ):
+        arguments = {
+            "pair": pair,
+            "ordertype": ordertype,
+            "side": side,
+            "amount": amount,
+            "rate": rate,
+            "leverage": leverage,
+            "time_in_force": time_in_force,
+            "reduceOnly": reduceOnly,
+            "initial_order": initial_order,
+            "client_order_id": client_order_id,
+        }
+        create = super().create_order
+        # Exits and protection remain available when budgets are lowered or recovery is pending.
+        if "bot_risk" not in self._config or reduceOnly or self._config["dry_run"]:
+            return create(**arguments)
+        from freqtrade.bot_risk import positive
+
+        if (
+            ordertype != "limit"
+            or time_in_force not in {"PO", "IOC"}
+            or type(leverage) not in (int, float)
+            or leverage != 1
+            or not positive(amount)
+            or not positive(rate)
+        ):
+            raise OperationalException("Bot risk contract requires bounded 1x PO/IOC entries")
+        ledger = self._bot_risk_ledger()
+        ledger.reconcile_flat(self.fetch_order_by_client_id, self._bot_risk_snapshot)
+        # Reserve the exact venue-rounded notional, including contract conversion.
+        contracts = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
+        rounded_amount = self._contracts_to_amount(pair, contracts)
+        rounded_rate = self.price_to_precision(pair, rate)
+        arguments.update(amount=rounded_amount, rate=rounded_rate)
+        arguments["client_order_id"] = client_order_id or "ftbr-" + uuid.uuid4().hex[:24]
+        return ledger.submit(
+            pair=pair,
+            side=side,
+            notional=rounded_amount * rounded_rate,
+            initial=initial_order,
+            client_id=arguments["client_order_id"],
+            snapshot=lambda: self._bot_risk_snapshot(pair, side),
+            send=lambda: create(**arguments),
+        )
 
     def fetch_order_by_client_id(self, client_order_id, pair):
         """GET-only recovery of a durable entry intent; a miss never authorizes retry."""

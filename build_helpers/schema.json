@@ -1,6 +1,72 @@
 {
   "type": "object",
   "properties": {
+    "bot_risk": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1
+          ]
+        },
+        "account_namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"
+        },
+        "capital_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "reserve_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "exclusiveMaximum": true
+        },
+        "max_total_notional_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "pair_limits": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          }
+        },
+        "max_initial_notional_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "max_add_notional_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "max_occupied_symbols": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "account_namespace",
+        "capital_usdt",
+        "reserve_ratio",
+        "max_total_notional_usdt",
+        "pair_limits",
+        "max_initial_notional_usdt",
+        "max_add_notional_usdt",
+        "max_occupied_symbols"
+      ],
+      "additionalProperties": false
+    },
     "max_open_trades": {
       "description": "Maximum number of open trades. -1 for unlimited.",
       "type": [
