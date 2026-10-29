@@ -12,6 +12,7 @@ _PORTFOLIO_MARGIN_DCA_POLICY = "chan_dca4_56_v1"
 _PORTFOLIO_MARGIN_DCA_2000_POLICY = "chan_dca4_56_2000_v1"
 _PORTFOLIO_MARGIN_DCA_235_POLICY = "chan_dca4_235_2000_v1"
 _PORTFOLIO_MARGIN_DCA_POLICIES = (
+    "bot_config_v1",
     _PORTFOLIO_MARGIN_DCA_POLICY,
     _PORTFOLIO_MARGIN_DCA_2000_POLICY,
     _PORTFOLIO_MARGIN_DCA_235_POLICY,
@@ -111,6 +112,8 @@ _PORTFOLIO_MARGIN_ACCOUNT_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-
 
 
 def _portfolio_margin_chan_risk_policy_valid(risk: Any) -> bool:
+    if isinstance(risk, dict) and risk.get("policy") == "bot_config_v1":
+        return _config_risk_valid(risk)
     if not isinstance(risk, dict) or set(risk) != _PORTFOLIO_MARGIN_CHAN_RISK_KEYS:
         return False
     pair_limits = risk.get("pairs")
@@ -150,3 +153,53 @@ def _portfolio_margin_chan_risk_policy_valid(risk: Any) -> bool:
         and risk.get("force_entry_order_type") == "disabled"
         and risk.get("reject_force_entry_price") is True
     )
+
+
+def _config_risk_valid(risk: dict) -> bool:
+    from freqtrade.bot_risk import validate_bot_risk
+
+    try:
+        # Capital is validated at config loading; this policy verifies submission invariants.
+        candidate = validate_bot_risk(
+            {
+                "schema_version": 1,
+                "account_namespace": risk["account_namespace"],
+                "capital_usdt": risk["max_total_entry_notional"],
+                "reserve_ratio": 0,
+                "max_total_notional_usdt": risk["max_total_entry_notional"],
+                "pair_limits": risk["pairs"],
+                "max_initial_notional_usdt": risk["max_initial_entry_notional"],
+                "max_add_notional_usdt": risk["max_add_entry_notional"],
+                "max_occupied_symbols": risk["max_occupied_symbols"],
+            }
+        )
+        return type(risk.get("max_leverage")) in (int, float) and risk == portfolio_policy(
+            candidate
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def dca_order_limits(risk: dict) -> tuple[float, float]:
+    if risk.get("policy") == "bot_config_v1":
+        return risk["max_initial_entry_notional"], risk["max_add_entry_notional"]
+    return _PORTFOLIO_MARGIN_DCA_LIMITS[risk["policy"]][2:]
+
+
+def portfolio_policy(risk):
+    from freqtrade.bot_risk import validate_bot_risk
+
+    risk = validate_bot_risk(risk)
+    return {
+        "policy": "bot_config_v1",
+        "account_namespace": risk["account_namespace"],
+        "pairs": dict(risk["pair_limits"]),
+        "allowed_sides": ["long", "short"],
+        "max_leverage": 1,
+        "max_total_entry_notional": risk["max_total_notional_usdt"],
+        "max_initial_entry_notional": risk["max_initial_notional_usdt"],
+        "max_add_entry_notional": risk["max_add_notional_usdt"],
+        "max_occupied_symbols": risk["max_occupied_symbols"],
+        "force_entry_order_type": "disabled",
+        "reject_force_entry_price": True,
+    }

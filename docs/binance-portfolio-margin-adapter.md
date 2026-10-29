@@ -141,3 +141,7 @@ are maintained with the shared runtime and workspace artifacts, not on this adap
 
 API documentation describes the exchange surface. Supported behavior for this product is the
 narrower contract above, implemented by the product branch and covered by its regression tests.
+# Optional configurable bot budgets
+
+See [bot risk contract v1](bot-risk-contract.md) for the versioned configuration-driven policy.
+Legacy policies remain supported with their existing behavior and limits.

@@ -2,6 +2,7 @@
 
 
 from freqtrade.binance_portfolio_usdt235 import PAIRS as USDT235_PAIRS
+from freqtrade.bot_risk import BOT_RISK_SCHEMA
 from freqtrade.constants import (
     AVAILABLE_DATAHANDLERS,
     AVAILABLE_PAIRLISTS,
@@ -35,6 +36,7 @@ __VIA_ENV = "Recommended to be set via environment variable"
 CONF_SCHEMA = {
     "type": "object",
     "properties": {
+        "bot_risk": BOT_RISK_SCHEMA,
         "max_open_trades": {
             "description": "Maximum number of open trades. -1 for unlimited.",
             "type": ["integer", "number"],
@@ -1073,6 +1075,50 @@ CONF_SCHEMA = {
                     ),
                     "type": "object",
                     "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "policy": {"enum": ["bot_config_v1"]},
+                                "account_namespace": BOT_RISK_SCHEMA["properties"][
+                                    "account_namespace"
+                                ],
+                                "pairs": BOT_RISK_SCHEMA["properties"]["pair_limits"],
+                                "allowed_sides": {"enum": [["long", "short"]]},
+                                "max_leverage": {"enum": [1]},
+                                "max_total_entry_notional": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": True,
+                                },
+                                "max_initial_entry_notional": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": True,
+                                },
+                                "max_add_entry_notional": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": True,
+                                },
+                                "max_occupied_symbols": {"type": "integer", "minimum": 1},
+                                "force_entry_order_type": {"enum": ["disabled"]},
+                                "reject_force_entry_price": {"enum": [True]},
+                            },
+                            "required": [
+                                "policy",
+                                "account_namespace",
+                                "pairs",
+                                "allowed_sides",
+                                "max_leverage",
+                                "max_total_entry_notional",
+                                "max_initial_entry_notional",
+                                "max_add_entry_notional",
+                                "max_occupied_symbols",
+                                "force_entry_order_type",
+                                "reject_force_entry_price",
+                            ],
+                            "additionalProperties": False,
+                        },
                         {
                             "properties": {
                                 "pair": {"type": "string"},

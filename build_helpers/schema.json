@@ -1,6 +1,72 @@
 {
   "type": "object",
   "properties": {
+    "bot_risk": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1
+          ]
+        },
+        "account_namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"
+        },
+        "capital_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "reserve_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "exclusiveMaximum": true
+        },
+        "max_total_notional_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "pair_limits": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          }
+        },
+        "max_initial_notional_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "max_add_notional_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": true
+        },
+        "max_occupied_symbols": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "account_namespace",
+        "capital_usdt",
+        "reserve_ratio",
+        "max_total_notional_usdt",
+        "pair_limits",
+        "max_initial_notional_usdt",
+        "max_add_notional_usdt",
+        "max_occupied_symbols"
+      ],
+      "additionalProperties": false
+    },
     "max_open_trades": {
       "description": "Maximum number of open trades. -1 for unlimited.",
       "type": [
@@ -1408,6 +1474,85 @@
           "description": "Optional fail-closed entry policy for the initial Binance Portfolio Margin adapter.",
           "type": "object",
           "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "policy": {
+                  "enum": [
+                    "bot_config_v1"
+                  ]
+                },
+                "account_namespace": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"
+                },
+                "pairs": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  }
+                },
+                "allowed_sides": {
+                  "enum": [
+                    [
+                      "long",
+                      "short"
+                    ]
+                  ]
+                },
+                "max_leverage": {
+                  "enum": [
+                    1
+                  ]
+                },
+                "max_total_entry_notional": {
+                  "type": "number",
+                  "minimum": 0,
+                  "exclusiveMinimum": true
+                },
+                "max_initial_entry_notional": {
+                  "type": "number",
+                  "minimum": 0,
+                  "exclusiveMinimum": true
+                },
+                "max_add_entry_notional": {
+                  "type": "number",
+                  "minimum": 0,
+                  "exclusiveMinimum": true
+                },
+                "max_occupied_symbols": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "force_entry_order_type": {
+                  "enum": [
+                    "disabled"
+                  ]
+                },
+                "reject_force_entry_price": {
+                  "enum": [
+                    true
+                  ]
+                }
+              },
+              "required": [
+                "policy",
+                "account_namespace",
+                "pairs",
+                "allowed_sides",
+                "max_leverage",
+                "max_total_entry_notional",
+                "max_initial_entry_notional",
+                "max_add_entry_notional",
+                "max_occupied_symbols",
+                "force_entry_order_type",
+                "reject_force_entry_price"
+              ],
+              "additionalProperties": false
+            },
             {
               "properties": {
                 "pair": {
