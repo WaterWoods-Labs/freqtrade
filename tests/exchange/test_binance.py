@@ -22,6 +22,7 @@ from freqtrade.exceptions import (
     TemporaryError,
 )
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_seconds
+from freqtrade.freqtradebot import FreqtradeBot
 from freqtrade.misc import deep_merge_dicts
 from freqtrade.persistence import Trade
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts, dt_utc
@@ -2561,6 +2562,80 @@ def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
     api_mock.request.side_effect = ccxt.BaseError("unexpected")
     with pytest.raises(OperationalException, match="unexpected"):
         exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+
+
+@pytest.mark.parametrize("history_missing", [[], ccxt.OrderNotFound("not indexed yet")])
+def test_binance_portfolio_margin_stoploss_visibility_does_not_duplicate(
+    default_conf, mocker, history_missing
+):
+    api_mock = portfolio_margin_live_api_mock()
+    order = portfolio_algo_order("73", "ftpm-stop")
+    api_mock.request.side_effect = [
+        ccxt.OrderNotFound("not indexed yet"),
+        history_missing,
+        ccxt.OrderNotFound("still not indexed"),
+        history_missing,
+        order,
+    ]
+    exchange = get_patched_exchange(
+        mocker, portfolio_margin_conf(default_conf, dry_run=False), api_mock, exchange="binance"
+    )
+    trade = SimpleNamespace(
+        pair="ETH/USDT:USDT",
+        open_sl_orders=[SimpleNamespace(order_id="73")],
+        has_open_position=True,
+        is_open=True,
+        has_open_orders=False,
+        stoploss_or_liquidation=1900.0,
+    )
+    bot = SimpleNamespace(
+        exchange=exchange,
+        update_trade_state=MagicMock(),
+        create_stoploss_order=MagicMock(return_value=False),
+        manage_trade_stoploss_orders=MagicMock(),
+    )
+
+    # Query absence is not cancellation evidence. Even several missing snapshots
+    # must leave the existing protection alone, rather than placing another stop.
+    for _ in range(2):
+        with pytest.raises(TemporaryError, match="conditional order not found"):
+            FreqtradeBot.handle_stoploss_on_exchange(bot, trade)
+        bot.create_stoploss_order.assert_not_called()
+        bot.update_trade_state.assert_not_called()
+        bot.manage_trade_stoploss_orders.assert_not_called()
+
+    assert FreqtradeBot.handle_stoploss_on_exchange(bot, trade) is False
+    bot.create_stoploss_order.assert_not_called()
+    bot.update_trade_state.assert_called_once()
+    bot.manage_trade_stoploss_orders.assert_called_once()
+    assert all(call.args[2] == "GET" for call in api_mock.request.call_args_list)
+
+
+def test_binance_portfolio_margin_confirmed_canceled_stop_can_be_replaced(default_conf, mocker):
+    api_mock = portfolio_margin_live_api_mock()
+    order = portfolio_algo_order("73", "ftpm-stop", status="canceled")
+    api_mock.request.side_effect = [ccxt.OrderNotFound("not open"), [order]]
+    exchange = get_patched_exchange(
+        mocker, portfolio_margin_conf(default_conf, dry_run=False), api_mock, exchange="binance"
+    )
+    trade = SimpleNamespace(
+        pair="ETH/USDT:USDT",
+        open_sl_orders=[SimpleNamespace(order_id="73")],
+        has_open_position=True,
+        is_open=True,
+        has_open_orders=False,
+        stoploss_or_liquidation=1900.0,
+    )
+    bot = SimpleNamespace(
+        exchange=exchange,
+        update_trade_state=MagicMock(),
+        create_stoploss_order=MagicMock(return_value=True),
+    )
+    bot.manage_trade_stoploss_orders = lambda trade, orders: (
+        FreqtradeBot.manage_trade_stoploss_orders(bot, trade, orders)
+    )
+    assert FreqtradeBot.handle_stoploss_on_exchange(bot, trade) is False
+    bot.create_stoploss_order.assert_called_once_with(trade=trade, stop_price=1900.0)
 
 
 def test_binance_portfolio_margin_stoploss_query_triggered(default_conf, mocker):
