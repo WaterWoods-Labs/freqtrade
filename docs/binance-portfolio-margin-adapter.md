@@ -81,6 +81,13 @@ recovers by client order ID and exchange evidence before permitting another writ
 corrupt state blocks further trading rather than blindly resubmitting. Order intents, locks, and
 entry reservations are runtime functionality, not stored test results.
 
+A successful Algo stop acknowledgement can precede visibility in the direct and history queries.
+If neither query finds an already acknowledged stop, the adapter raises a temporary query error
+and defers the current processing cycle. It must not classify that absence as an invalid order,
+because the bot would then create a duplicate stop. Later queries reconcile the original ID;
+confirmed canceled orders retain the existing replacement behavior. This does not treat missing
+query evidence as proof that protection is active.
+
 `Exchange.validate_existing_positions` is an exchange-neutral, default no-op hook. Freqtrade calls
 it after startup order recovery and wallet refresh, and after a completed exit only when no
 remaining trade has a pending order. PAPI reconciliation stays in the Binance override; generic

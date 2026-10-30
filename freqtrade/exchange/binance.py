@@ -26,7 +26,6 @@ from freqtrade.exceptions import (
     InsufficientFundsError,
     InvalidOrderException,
     OperationalException,
-    RetryableOrderError,
     TemporaryError,
 )
 from freqtrade.exchange import Exchange
@@ -3045,12 +3044,16 @@ class Binance(Exchange):
                 None,
             )
             if order is None:
-                raise RetryableOrderError(
+                # Algo create acknowledgements can precede query visibility.
+                # RetryableOrderError is an InvalidOrderException, which the bot
+                # treats as missing protection and replaces with a new stop.
+                # Defer this cycle instead: absence is not cancellation evidence.
+                raise TemporaryError(
                     f"Portfolio Margin conditional order not found (pair: {pair} id: {order_id})."
                 )
             return order
         except ccxt.OrderNotFound as e:
-            raise RetryableOrderError(
+            raise TemporaryError(
                 f"Portfolio Margin conditional order not found (pair: {pair} id: {order_id})."
             ) from e
         except ccxt.InvalidOrder as e:
