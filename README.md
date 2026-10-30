@@ -1,4 +1,23 @@
-# WaterWoods Binance Portfolio Margin
+# WaterWoods Freqtrade integrations
+
+WaterWoods maintains two independent Freqtrade products in this repository: UMX and Binance
+Portfolio Margin (PAPI). Choose the product below for its source, configuration, and releases.
+
+## Choose a product
+
+| Entry | UMX | Binance Portfolio Margin (PAPI) |
+| --- | --- | --- |
+| Source | [`umx`](https://github.com/WaterWoods-Labs/freqtrade/tree/umx) | [`binance-portfolio-margin`](https://github.com/WaterWoods-Labs/freqtrade/tree/binance-portfolio-margin) |
+| Adapter and configuration | [UMX guide](https://github.com/WaterWoods-Labs/freqtrade/blob/umx/docs/umx-adapter.md) | [PAPI guide](https://github.com/WaterWoods-Labs/freqtrade/blob/binance-portfolio-margin/docs/binance-portfolio-margin-adapter.md) |
+| Maintenance and contribution routing | [UMX maintenance](https://github.com/WaterWoods-Labs/freqtrade/blob/umx/docs/umx-maintenance.md) | [PAPI maintenance](https://github.com/WaterWoods-Labs/freqtrade/blob/binance-portfolio-margin/docs/binance-portfolio-margin-maintenance.md) |
+| Releases | [`umx-*`](https://github.com/WaterWoods-Labs/freqtrade/releases?q=umx-&expanded=true) | [`binance-portfolio-margin-*`](https://github.com/WaterWoods-Labs/freqtrade/releases?q=binance-portfolio-margin-&expanded=true) |
+
+The default branch is `umx`, so the repository homepage and a clone without an explicit branch
+show the UMX product. For PAPI, select `binance-portfolio-margin` when cloning or opening a pull
+request. Each product has its own CI, releases, and images; `develop` and `stable` remain official
+upstream mirrors. The implementation details below describe Binance Portfolio Margin (PAPI) only.
+
+## WaterWoods Binance Portfolio Margin
 
 Binance Portfolio Margin (PAPI) support for Freqtrade, maintained on the
 `binance-portfolio-margin` branch of `WaterWoods-Labs/freqtrade`.
