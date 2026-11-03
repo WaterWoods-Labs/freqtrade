@@ -9,7 +9,7 @@ from hashlib import sha256
 from math import floor, isclose, isfinite
 from pathlib import Path
 from threading import Lock
-from time import monotonic, sleep
+from time import monotonic, perf_counter, sleep
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -1346,7 +1346,7 @@ class Binance(Exchange):
     def _portfolio_entry_reservation_release_window(
         self, reservation: PortfolioEntryReservation
     ) -> bool:
-        """Use the full bounded window before releasing a terminal, flat reservation."""
+        """Require stable clean snapshots within a bounded release window."""
         store = self._portfolio_order_intent_store
         if store is None:
             raise OperationalException(
@@ -1354,6 +1354,7 @@ class Binance(Exchange):
             )
         stable_clean_snapshots = 0
         exposure_seen = reservation.exposure_seen
+        started = perf_counter()
         for attempt in range(self._portfolio_containment_attempts):
             order = self._fetch_portfolio_entry_reservation_order(reservation)
             terminal = False
@@ -1384,13 +1385,24 @@ class Binance(Exchange):
                 and (filled == 0 or exposure_seen)
             )
             stable_clean_snapshots = stable_clean_snapshots + 1 if clean else 0
+            if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
+                break
             if attempt + 1 < self._portfolio_containment_attempts:
                 sleep(self._portfolio_order_recovery_delay)
 
-        if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
+        released = stable_clean_snapshots >= self._portfolio_containment_stable_snapshots
+        if released:
             store.remove_reservation(reservation.client_order_id)
-            return True
-        return False
+        logger.info(
+            "PAPI_RESERVATION_RELEASE pair=%s released=%s attempts=%d stable_snapshots=%d "
+            "elapsed_ms=%.3f",
+            reservation.pair,
+            released,
+            attempt + 1,
+            stable_clean_snapshots,
+            (perf_counter() - started) * 1000,
+        )
+        return released
 
     def _reconcile_portfolio_entry_reservations(self) -> None:
         """Refresh durable Chan reservations while the account-wide operation lock is held."""
@@ -2747,51 +2759,21 @@ class Binance(Exchange):
             ) from cancellation_error
 
     def get_balances(self, params: dict | None = None):
-        balances = super().get_balances(self._portfolio_margin_params(params))
-        if self._portfolio_margin:
-            self._map_unified_collateral_balance(balances)
-        return balances
+        params = self._portfolio_margin_params(params)
+        if not self._portfolio_margin:
+            return super().get_balances(params)
+        return self._get_portfolio_balances(params)
 
-    def _map_unified_collateral_balance(self, balances: dict) -> None:
-        """Surface unified cross-margin collateral when the UM wallet is unfunded.
-
-        CCXT's linear Portfolio Margin balance mapping takes USDT ``free`` from the raw
-        ``umWalletBalance``. Unified accounts that hold collateral only in the shared
-        cross-margin pool (for example unified-account sub-accounts, which have no
-        separately fundable UM wallet) therefore report a zero USDT balance while being
-        fully funded; fee and loss settlement can additionally push the UM wallet slightly
-        negative. When the mapped USDT balance is not positive, re-read the raw PAPI
-        balance and fall back to ``crossMarginFree`` (covering any negative UM residue) and
-        ``crossMarginLocked``. A positive UM wallet keeps CCXT's mapping untouched and adds
-        no extra request.
-        """
-        usdt = balances.get("USDT")
-        if not isinstance(usdt, dict):
-            return
+    @retrier
+    def _get_portfolio_balances(self, params: dict):
         try:
-            mapped_free = float(usdt.get("free") or 0)
-        except (TypeError, ValueError):
-            return
-        if mapped_free > 0:
-            return
-        collateral = self._fetch_unified_collateral_usdt()
-        if collateral is None:
-            return
-        free_value, locked = collateral
-        if free_value <= 0:
-            return
-        usdt["free"] = free_value
-        usdt["used"] = locked
-        usdt["total"] = free_value + locked
-        logger.info(
-            "Binance Portfolio Margin UM wallet is unfunded; reporting the unified "
-            "cross-margin collateral as the USDT balance."
-        )
-
-    def _fetch_unified_collateral_usdt(self) -> tuple[float, float] | None:
-        """Raw USDT cross-margin free/locked collateral, minus any negative UM residue."""
-        try:
-            records = self._api.papiGetBalance({})
+            balances = self._api.fetch_balance(params)
+            # Reuse the same PAPI snapshot before the base adapter removes its raw fields.
+            self._map_unified_collateral_balance(balances, balances.get("info"))
+            for key in ("info", "free", "total", "used"):
+                balances.pop(key, None)
+            self._log_exchange_response("fetch_balance", balances, add_info=params)
+            return balances
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
@@ -2800,6 +2782,45 @@ class Binance(Exchange):
             ) from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
+
+    def _map_unified_collateral_balance(self, balances: dict, records: Any) -> None:
+        """Surface shared collateral even after the UM settlement wallet becomes positive.
+
+        CCXT's linear Portfolio Margin balance mapping takes USDT ``free`` from the raw
+        ``umWalletBalance``. Unified accounts that hold collateral only in the shared
+        cross-margin pool (for example unified-account sub-accounts, which have no
+        separately fundable UM wallet) therefore report a zero USDT balance while being
+        fully funded. Profit settlement can leave a small positive UM balance, which must
+        not hide the shared pool. Use the larger of the mapped UM free balance and shared
+        free collateral after negative UM residue. Do not sum the pools, count unrealized
+        gains or include borrowed funds. The original fetch supplies both views.
+        """
+        usdt = balances.get("USDT")
+        if not isinstance(usdt, dict):
+            return
+        try:
+            mapped_free = float(usdt.get("free") or 0)
+        except (TypeError, ValueError):
+            return
+        if not isfinite(mapped_free):
+            return
+        collateral = self._unified_collateral_usdt(records)
+        if collateral is None:
+            return
+        free_value, locked = collateral
+        if free_value <= max(0.0, mapped_free):
+            return
+        usdt["free"] = free_value
+        usdt["used"] = locked
+        usdt["total"] = free_value + locked
+        logger.info(
+            "Binance Portfolio Margin balance includes the larger shared USDT collateral "
+            "pool; configured strategy exposure limits remain unchanged."
+        )
+
+    @staticmethod
+    def _unified_collateral_usdt(records: Any) -> tuple[float, float] | None:
+        """Raw USDT cross-margin free/locked collateral, minus any negative UM residue."""
         if not isinstance(records, list):
             return None
         for record in records:
@@ -2812,7 +2833,18 @@ class Binance(Exchange):
                 free = float(raw_free)
                 locked = float(record.get("crossMarginLocked") or 0)
                 um_value = float(record.get("umWalletBalance") or 0)
+                liabilities = [
+                    float(record.get(field) or 0)
+                    for field in ("crossMarginBorrowed", "crossMarginInterest", "negativeBalance")
+                ]
             except (TypeError, ValueError):
+                return None
+            if (
+                not all(isfinite(value) for value in (free, locked, um_value, *liabilities))
+                or free < 0
+                or locked < 0
+                or any(value != 0 for value in liabilities)
+            ):
                 return None
             return free + min(um_value, 0.0), locked
         return None

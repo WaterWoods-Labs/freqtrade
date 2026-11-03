@@ -1535,89 +1535,78 @@ def test_binance_portfolio_margin_private_routes(default_conf, mocker):
     api_mock.fetch_trading_fees.assert_not_called()
 
 
-def test_binance_portfolio_margin_unified_collateral_balance_mapping(default_conf, mocker):
-    api_mock = MagicMock()
-    api_mock.fetch_leverage_tiers.return_value = {}
-    api_mock.papiGetUmPositionSideDual.return_value = {"dualSidePosition": False}
-    api_mock.papiGetUmAccountConfig.return_value = {"canTrade": True}
-    api_mock.fetch_positions.return_value = []
-    api_mock.fetch_balance.return_value = {"USDT": {"free": 0.0, "used": 0.0}}
-    api_mock.papiGetBalance.return_value = [
-        {
-            "asset": "USDT",
-            "totalWalletBalance": "1099.43174479",
-            "crossMarginAsset": "1099.43174479",
-            "crossMarginFree": "1099.43174479",
-            "crossMarginLocked": "0",
-            "crossMarginBorrowed": "0",
-            "crossMarginInterest": "0",
-            "umWalletBalance": "0.0",
-            "cmWalletBalance": "0",
-            "negativeBalance": "0",
-        }
-    ]
+@pytest.mark.parametrize(
+    "um,shared,locked,expected_free,expected_used",
+    [
+        (0, 1100, 0, 1100, 0),
+        (12, 20070, 0, 20070, 0),
+        (60, 0, 0, 60, 2),
+        (60, 10, 0, 60, 2),
+        (0, 0, 0, 0, 2),
+        (-0.06, 2100, 0, 2099.94, 0),
+        (-20, 10, 0, -20, 2),
+        (12, 100, 30, 100, 30),
+    ],
+)
+def test_binance_portfolio_margin_unified_collateral_balance_mapping(
+    default_conf, mocker, um, shared, locked, expected_free, expected_used
+):
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_balance.return_value = {
+        "USDT": {"free": um, "used": 2, "total": um + 2},
+        "info": [
+            {
+                "asset": "USDT",
+                "crossMarginFree": str(shared),
+                "crossMarginLocked": str(locked),
+                "umWalletBalance": str(um),
+                "umUnrealizedPNL": "999999",
+            }
+        ],
+        "free": {"USDT": um},
+        "used": {"USDT": 2},
+        "total": {"USDT": um + 2},
+    }
     exchange = get_patched_exchange(
-        mocker,
-        portfolio_margin_conf(default_conf, dry_run=False),
-        api_mock,
-        exchange="binance",
+        mocker, portfolio_margin_conf(default_conf, dry_run=False), api_mock, exchange="binance"
     )
-
     balances = exchange.get_balances()
-    assert balances["USDT"]["free"] == 1099.43174479
-    assert balances["USDT"]["used"] == 0.0
-    assert balances["USDT"]["total"] == 1099.43174479
-
-    # A funded UM wallet keeps the CCXT mapping untouched and adds no extra request.
-    api_mock.fetch_balance.return_value = {"USDT": {"free": 60.0, "used": 0.0}}
-    api_mock.papiGetBalance.reset_mock()
-    balances = exchange.get_balances()
-    assert balances["USDT"]["free"] == 60.0
-    assert "total" not in balances["USDT"]
+    assert balances["USDT"]["free"] == pytest.approx(expected_free)
+    assert balances["USDT"]["used"] == expected_used
+    assert balances["USDT"]["total"] == pytest.approx(expected_free + expected_used)
+    assert not {"info", "free", "used", "total"}.intersection(balances)
+    api_mock.fetch_balance.assert_called_once()
     api_mock.papiGetBalance.assert_not_called()
 
-    # No fallback when the shared pool is empty as well.
-    api_mock.fetch_balance.return_value = {"USDT": {"free": 0.0, "used": 0.0}}
-    api_mock.papiGetBalance.return_value = [
-        {"asset": "USDT", "crossMarginFree": "0", "umWalletBalance": "0"}
-    ]
-    balances = exchange.get_balances()
-    assert balances["USDT"]["free"] == 0.0
 
-    # A malformed raw record fails closed and keeps the zero mapping.
-    api_mock.papiGetBalance.return_value = [
-        {"asset": "USDT", "crossMarginFree": "lots", "umWalletBalance": "0"}
-    ]
-    balances = exchange.get_balances()
-    assert balances["USDT"]["free"] == 0.0
-
-    # Post-trade fee residue settles the UM wallet slightly negative; the shared pool
-    # covers it and the reported free balance is reduced by the residue.
-    api_mock.fetch_balance.return_value = {"USDT": {"free": -0.06538858, "used": 0.0}}
-    api_mock.papiGetBalance.return_value = [
-        {
-            "asset": "USDT",
-            "crossMarginFree": "2099.43174479",
-            "crossMarginLocked": "0",
-            "umWalletBalance": "-0.06538858",
-        }
-    ]
-    balances = exchange.get_balances()
-    assert balances["USDT"]["free"] == pytest.approx(2099.36635621)
-    assert balances["USDT"]["total"] == pytest.approx(2099.36635621)
-
-    # A negative UM wallet larger than the pool fails closed.
-    api_mock.papiGetBalance.return_value = [
-        {
-            "asset": "USDT",
-            "crossMarginFree": "10",
-            "crossMarginLocked": "0",
-            "umWalletBalance": "-20",
-        }
-    ]
-    api_mock.fetch_balance.return_value = {"USDT": {"free": -20.0, "used": 0.0}}
-    balances = exchange.get_balances()
-    assert balances["USDT"]["free"] == -20.0
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("crossMarginFree", "lots"),
+        ("crossMarginFree", "NaN"),
+        ("crossMarginFree", "Infinity"),
+        ("crossMarginLocked", "-1"),
+        ("umWalletBalance", "NaN"),
+        ("crossMarginBorrowed", "1"),
+        ("crossMarginInterest", "1"),
+        ("negativeBalance", "1"),
+    ],
+)
+def test_binance_portfolio_margin_invalid_shared_collateral_keeps_um_mapping(
+    default_conf, mocker, field, value
+):
+    api_mock = portfolio_margin_live_api_mock()
+    record = {"asset": "USDT", "crossMarginFree": "20070", "umWalletBalance": "12"}
+    record[field] = value
+    api_mock.fetch_balance.return_value = {
+        "USDT": {"free": 12.0, "used": 0.0, "total": 12.0},
+        "info": [record],
+    }
+    exchange = get_patched_exchange(
+        mocker, portfolio_margin_conf(default_conf, dry_run=False), api_mock, exchange="binance"
+    )
+    assert exchange.get_balances()["USDT"] == {"free": 12.0, "used": 0.0, "total": 12.0}
+    api_mock.papiGetBalance.assert_not_called()
 
 
 def test_binance_portfolio_margin_entry_risk_guard(default_conf, mocker):
@@ -4786,10 +4775,10 @@ def test_binance_portfolio_margin_chan_promotion_kill_point_recovers_as_unknown_
     recovery_api.create_order.assert_not_called()
 
 
-def test_binance_portfolio_margin_chan_zero_fill_reservation_uses_full_release_window(
+def test_binance_portfolio_margin_chan_zero_fill_reservation_releases_after_stable_snapshots(
     default_conf, mocker, tmp_path
 ):
-    mocker.patch("freqtrade.exchange.binance.sleep")
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
     conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
     api_mock = portfolio_margin_live_api_mock()
     api_mock.fetch_positions.return_value = []
@@ -4814,15 +4803,82 @@ def test_binance_portfolio_margin_chan_zero_fill_reservation_uses_full_release_w
         exchange._reconcile_portfolio_entry_reservations()
 
     assert exchange._portfolio_order_intent_store.reservations == ()
-    assert api_mock.fetch_order.call_count == 11
-    assert api_mock.fetch_open_orders.call_count == 10
-    assert api_mock.fetch_positions.call_count == 11
+    assert api_mock.fetch_order.call_count == 4
+    assert api_mock.fetch_open_orders.call_count == 3
+    assert api_mock.fetch_positions.call_count == 4
+    assert sleep_mock.call_count == 2
+
+
+@pytest.mark.parametrize("interruption", ["missing_order", "position", "open_order"])
+def test_binance_portfolio_margin_release_requires_three_clean_snapshots_after_interruption(
+    default_conf, mocker, tmp_path, interruption
+):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    order = {
+        "id": "zero-fill-entry",
+        "clientOrderId": "ftpm-zero-fill",
+        "symbol": "ETH/USDT:USDT",
+        "status": "canceled",
+        "filled": 0.0,
+        "info": {},
+    }
+    api_mock.fetch_order.return_value = order
+    api_mock.fetch_positions.return_value = []
+    api_mock.fetch_open_orders.return_value = []
+    if interruption == "missing_order":
+        api_mock.fetch_order.side_effect = [
+            order,
+            order,
+            ccxt.OrderNotFound("not visible"),
+            order,
+            order,
+            order,
+        ]
+    elif interruption == "position":
+        api_mock.fetch_positions.side_effect = [[], [], [portfolio_margin_position()], [], [], []]
+    else:
+        api_mock.fetch_open_orders.side_effect = [[], [], [{}], [], [], []]
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT", client_order_id="ftpm-zero-fill", order_kind="regular"
+    )
+    exchange._promote_portfolio_entry_reservation("ftpm-zero-fill")
+    reservation = exchange._portfolio_order_intent_store.reservations[0]
+    with exchange._get_portfolio_create_lock():
+        assert exchange._portfolio_entry_reservation_release_window(reservation)
+    assert api_mock.fetch_order.call_count == 6
+    assert sleep_mock.call_count == 5
+    assert exchange._portfolio_order_intent_store.reservations == ()
+    api_mock.create_order.assert_not_called()
+
+
+def test_binance_portfolio_margin_release_query_failure_retains_reservation(
+    default_conf, mocker, tmp_path
+):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_order.side_effect = ccxt.NetworkError("unavailable")
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT", client_order_id="ftpm-zero-fill", order_kind="regular"
+    )
+    exchange._promote_portfolio_entry_reservation("ftpm-zero-fill")
+    reservation = exchange._portfolio_order_intent_store.reservations[0]
+    with exchange._get_portfolio_create_lock():
+        with pytest.raises(OperationalException, match="could not query"):
+            exchange._portfolio_entry_reservation_release_window(reservation)
+    assert exchange._portfolio_order_intent_store.reservations == (reservation,)
+    sleep_mock.assert_not_called()
+    api_mock.create_order.assert_not_called()
 
 
 def test_binance_portfolio_margin_chan_filled_reservation_requires_seen_then_flat(
     default_conf, mocker, tmp_path
 ):
-    mocker.patch("freqtrade.exchange.binance.sleep")
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
     conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
     api_mock = portfolio_margin_live_api_mock()
     api_mock.fetch_open_orders.return_value = []
@@ -4862,9 +4918,51 @@ def test_binance_portfolio_margin_chan_filled_reservation_requires_seen_then_fla
         exchange._reconcile_portfolio_entry_reservations()
 
     assert exchange._portfolio_order_intent_store.reservations == ()
-    assert api_mock.fetch_order.call_count == 11
-    assert api_mock.fetch_open_orders.call_count == 10
-    assert api_mock.fetch_positions.call_count == 11
+    assert api_mock.fetch_order.call_count == 4
+    assert api_mock.fetch_open_orders.call_count == 3
+    assert api_mock.fetch_positions.call_count == 4
+    assert sleep_mock.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("open_order_snapshots", "attempts", "expected_sleeps", "released"),
+    [
+        ([[], [], [{}], [], [], []], 6, 5, True),
+        ([[{}]] * 10, 10, 9, False),
+    ],
+)
+def test_binance_portfolio_margin_chan_release_window_resets_on_unclean_snapshots(
+    default_conf, mocker, tmp_path, open_order_snapshots, attempts, expected_sleeps, released
+):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_positions.return_value = []
+    api_mock.fetch_open_orders.side_effect = open_order_snapshots
+    api_mock.fetch_order.return_value = {
+        "id": "zero-fill-entry",
+        "clientOrderId": "ftpm-zero-fill",
+        "symbol": "ETH/USDT:USDT",
+        "status": "canceled",
+        "filled": 0.0,
+        "info": {},
+    }
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT",
+        client_order_id="ftpm-zero-fill",
+        order_kind="regular",
+    )
+    exchange._promote_portfolio_entry_reservation("ftpm-zero-fill")
+
+    with exchange._get_portfolio_create_lock():
+        exchange._reconcile_portfolio_entry_reservations()
+
+    assert bool(exchange._portfolio_order_intent_store.reservations) is not released
+    assert api_mock.fetch_order.call_count == attempts + 1
+    assert api_mock.fetch_open_orders.call_count == attempts
+    assert api_mock.fetch_positions.call_count == attempts + 1
+    assert sleep_mock.call_count == expected_sleeps
 
 
 def test_binance_portfolio_margin_chan_position_sync_marks_exposure_before_close(
