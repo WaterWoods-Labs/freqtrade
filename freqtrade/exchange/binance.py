@@ -1913,7 +1913,7 @@ class Binance(Exchange):
         self, pair: str
     ) -> list[tuple[dict[str, Any], float]]:
         """Return validated active PAPI positions for one pair's safety reconciliation."""
-        positions = self.fetch_positions(pair)
+        positions = self._fetch_portfolio_positions_once(pair)
         if not isinstance(positions, list) or any(
             not isinstance(position, dict) for position in positions
         ):
@@ -2919,10 +2919,32 @@ class Binance(Exchange):
             normalized_positions.append(normalized)
         return normalized_positions
 
+    def _observe_portfolio_entry_reservations(self, positions: list[dict[str, Any]]) -> None:
+        store = self._portfolio_order_intent_store
+        risk = self._portfolio_margin_risk
+        if (
+            store is None
+            or risk is None
+            or risk.get("policy") not in _PORTFOLIO_MARGIN_CHAN_POLICIES
+        ):
+            return
+        active_pairs = {
+            position.get("symbol")
+            for position in positions
+            if abs(float(position.get("contracts") or 0.0)) > 0
+        }
+        if not active_pairs:
+            return
+        for reservation in store.reservations:
+            if not reservation.exposure_seen and reservation.pair in active_pairs:
+                store.mark_reservation_exposure_seen(reservation.client_order_id)
+
     def fetch_positions(self, pair: str | None = None, params: dict | None = None):
         if not self._portfolio_margin:
             return super().fetch_positions(pair, params)
-        return self._fetch_portfolio_positions_once(pair, params)
+        positions = self._fetch_portfolio_positions_once(pair, params)
+        self._observe_portfolio_entry_reservations(positions)
+        return positions
 
     def is_portfolio_margin_position_flat(self, pair: str) -> bool:
         """Read PAPI positionRisk once and report whether the requested pair is flat."""
