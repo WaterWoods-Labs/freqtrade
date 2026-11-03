@@ -121,7 +121,9 @@ Expired leases cannot be retried or reused. Protective reduce-only exits remain 
 An add requires a terminal, filled first entry, observed same-direction position, no pending
 entry and no reduction of the original quantity. Durable reservations survive restarts; exact
 order evidence reserves confirmed or pending notional, while missing evidence retains the full
-pair cap. The legacy five-pair policy retains its original one-reservation-per-pair limits.
+pair cap. Routine position snapshots record observed exposure for matching reservations before
+a later terminal, flat release window. The legacy five-pair policy retains its original
+one-reservation-per-pair limits.
 
 Observed Maker partial fills are settled through `settle_portfolio_dca_partial_entry`: the
 reservation is atomically converted into a pending intent before cancelling the remainder.

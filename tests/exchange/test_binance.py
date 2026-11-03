@@ -4867,6 +4867,40 @@ def test_binance_portfolio_margin_chan_filled_reservation_requires_seen_then_fla
     assert api_mock.fetch_positions.call_count == 11
 
 
+def test_binance_portfolio_margin_chan_position_sync_marks_exposure_before_close(
+    default_conf, mocker, tmp_path
+):
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_positions.return_value = [portfolio_margin_position()]
+    api_mock.fetch_order.return_value = {
+        "id": "filled-entry",
+        "clientOrderId": "ftpm-filled-entry",
+        "symbol": "ETH/USDT:USDT",
+        "status": "closed",
+        "filled": 0.025,
+        "info": {},
+    }
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT",
+        client_order_id="ftpm-filled-entry",
+        order_kind="regular",
+    )
+    exchange._promote_portfolio_entry_reservation("ftpm-filled-entry")
+
+    exchange.fetch_positions()
+
+    reservation = exchange._portfolio_order_intent_store.reservations[0]
+    assert reservation.exposure_seen is True
+
+    api_mock.fetch_positions.return_value = []
+    exchange.validate_existing_positions({}, [])
+
+    assert exchange._portfolio_order_intent_store.reservations == ()
+
+
 def test_binance_portfolio_margin_containment_cleanup_kill_point_is_recoverable(
     default_conf, mocker, tmp_path
 ):
