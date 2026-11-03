@@ -1346,7 +1346,7 @@ class Binance(Exchange):
     def _portfolio_entry_reservation_release_window(
         self, reservation: PortfolioEntryReservation
     ) -> bool:
-        """Use the full bounded window before releasing a terminal, flat reservation."""
+        """Require stable clean snapshots within a bounded release window."""
         store = self._portfolio_order_intent_store
         if store is None:
             raise OperationalException(
@@ -1384,6 +1384,8 @@ class Binance(Exchange):
                 and (filled == 0 or exposure_seen)
             )
             stable_clean_snapshots = stable_clean_snapshots + 1 if clean else 0
+            if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
+                break
             if attempt + 1 < self._portfolio_containment_attempts:
                 sleep(self._portfolio_order_recovery_delay)
 
