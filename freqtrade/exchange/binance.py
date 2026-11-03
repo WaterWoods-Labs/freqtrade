@@ -9,7 +9,7 @@ from hashlib import sha256
 from math import floor, isclose, isfinite
 from pathlib import Path
 from threading import Lock
-from time import monotonic, sleep
+from time import monotonic, perf_counter, sleep
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -1354,6 +1354,7 @@ class Binance(Exchange):
             )
         stable_clean_snapshots = 0
         exposure_seen = reservation.exposure_seen
+        started = perf_counter()
         for attempt in range(self._portfolio_containment_attempts):
             order = self._fetch_portfolio_entry_reservation_order(reservation)
             terminal = False
@@ -1389,10 +1390,19 @@ class Binance(Exchange):
             if attempt + 1 < self._portfolio_containment_attempts:
                 sleep(self._portfolio_order_recovery_delay)
 
-        if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
+        released = stable_clean_snapshots >= self._portfolio_containment_stable_snapshots
+        if released:
             store.remove_reservation(reservation.client_order_id)
-            return True
-        return False
+        logger.info(
+            "PAPI_RESERVATION_RELEASE pair=%s released=%s attempts=%d stable_snapshots=%d "
+            "elapsed_ms=%.3f",
+            reservation.pair,
+            released,
+            attempt + 1,
+            stable_clean_snapshots,
+            (perf_counter() - started) * 1000,
+        )
+        return released
 
     def _reconcile_portfolio_entry_reservations(self) -> None:
         """Refresh durable Chan reservations while the account-wide operation lock is held."""

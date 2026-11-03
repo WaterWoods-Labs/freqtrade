@@ -4820,6 +4820,72 @@ def test_binance_portfolio_margin_chan_zero_fill_reservation_releases_after_stab
     assert sleep_mock.call_count == 2
 
 
+@pytest.mark.parametrize("interruption", ["missing_order", "position", "open_order"])
+def test_binance_portfolio_margin_release_requires_three_clean_snapshots_after_interruption(
+    default_conf, mocker, tmp_path, interruption
+):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    order = {
+        "id": "zero-fill-entry",
+        "clientOrderId": "ftpm-zero-fill",
+        "symbol": "ETH/USDT:USDT",
+        "status": "canceled",
+        "filled": 0.0,
+        "info": {},
+    }
+    api_mock.fetch_order.return_value = order
+    api_mock.fetch_positions.return_value = []
+    api_mock.fetch_open_orders.return_value = []
+    if interruption == "missing_order":
+        api_mock.fetch_order.side_effect = [
+            order,
+            order,
+            ccxt.OrderNotFound("not visible"),
+            order,
+            order,
+            order,
+        ]
+    elif interruption == "position":
+        api_mock.fetch_positions.side_effect = [[], [], [portfolio_margin_position()], [], [], []]
+    else:
+        api_mock.fetch_open_orders.side_effect = [[], [], [{}], [], [], []]
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT", client_order_id="ftpm-zero-fill", order_kind="regular"
+    )
+    exchange._promote_portfolio_entry_reservation("ftpm-zero-fill")
+    reservation = exchange._portfolio_order_intent_store.reservations[0]
+    with exchange._get_portfolio_create_lock():
+        assert exchange._portfolio_entry_reservation_release_window(reservation)
+    assert api_mock.fetch_order.call_count == 6
+    assert sleep_mock.call_count == 5
+    assert exchange._portfolio_order_intent_store.reservations == ()
+    api_mock.create_order.assert_not_called()
+
+
+def test_binance_portfolio_margin_release_query_failure_retains_reservation(
+    default_conf, mocker, tmp_path
+):
+    sleep_mock = mocker.patch("freqtrade.exchange.binance.sleep")
+    conf = persistent_portfolio_margin_chan_conf(default_conf, tmp_path)
+    api_mock = portfolio_margin_live_api_mock()
+    api_mock.fetch_order.side_effect = ccxt.NetworkError("unavailable")
+    exchange = get_patched_exchange(mocker, conf, api_mock, exchange="binance")
+    exchange._record_portfolio_order_intent(
+        pair="ETH/USDT:USDT", client_order_id="ftpm-zero-fill", order_kind="regular"
+    )
+    exchange._promote_portfolio_entry_reservation("ftpm-zero-fill")
+    reservation = exchange._portfolio_order_intent_store.reservations[0]
+    with exchange._get_portfolio_create_lock():
+        with pytest.raises(OperationalException, match="could not query"):
+            exchange._portfolio_entry_reservation_release_window(reservation)
+    assert exchange._portfolio_order_intent_store.reservations == (reservation,)
+    sleep_mock.assert_not_called()
+    api_mock.create_order.assert_not_called()
+
+
 def test_binance_portfolio_margin_chan_filled_reservation_requires_seen_then_flat(
     default_conf, mocker, tmp_path
 ):
