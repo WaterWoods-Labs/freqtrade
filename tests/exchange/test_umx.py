@@ -515,6 +515,7 @@ def test_umx_client_uses_only_canonical_host():
         UMXClient({"base_url": "https://api.xcoin.com/api"})
 
 
+@pytest.mark.parametrize("status", [200, 400])
 @pytest.mark.parametrize(
     ("code", "exception"),
     [
@@ -522,15 +523,27 @@ def test_umx_client_uses_only_canonical_host():
         ("14001", ccxt.DDoSProtection),
         ("10112", ccxt.AuthenticationError),
         ("40013", ccxt.OrderNotFound),
+        (40013, ccxt.OrderNotFound),
+        ("20010", ccxt.OrderNotFound),
+        ("40015", ccxt.InvalidOrder),
         ("50006", ccxt.InvalidOrder),
         ("60101", ccxt.InsufficientFunds),
         ("20001", ccxt.ExchangeNotAvailable),
         ("60117", ccxt.InvalidOrder),
+        ("99999", ccxt.ExchangeError),
     ],
 )
-def test_umx_client_error_mapping(code, exception):
-    with pytest.raises(exception):
-        UMXClient()._handle_response({"code": code, "msg": "boom"})
+def test_umx_client_error_mapping(mocker, status, code, exception):
+    client = UMXClient({"apiKey": "key", "secret": "secret"})
+    payload = {"code": code, "msg": "boom", "data": ""}
+    response = SimpleNamespace(status_code=status, text=str(payload), json=lambda: payload)
+    request = mocker.patch.object(client._http, "request", return_value=response)
+
+    with pytest.raises(exception, match="boom") as exc:
+        client.order_info({"symbol": "BTC-USDT", "clientOrderId": "testorder1"})
+    assert type(exc.value) is exception
+    assert not getattr(exc.value, "umx_definitive_rejection", False)
+    request.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -540,6 +553,8 @@ def test_umx_client_error_mapping(code, exception):
         (403, "text/html", "<html>WAF access too frequent</html>", ccxt.DDoSProtection),
         (403, "application/json", '{"code":"10114"}', ccxt.AuthenticationError),
         (401, "application/json", '{"code":"10101"}', ccxt.AuthenticationError),
+        (500, "application/json", '{"code":"40015"}', ccxt.ExchangeNotAvailable),
+        (503, "text/html", "<html>Service unavailable</html>", ccxt.ExchangeNotAvailable),
     ],
 )
 def test_umx_http_protection_mapping(mocker, status, content_type, body, exception):
@@ -548,12 +563,107 @@ def test_umx_http_protection_mapping(mocker, status, content_type, body, excepti
         status_code=status,
         text=body,
         headers={"Content-Type": content_type},
-        json=lambda: {"code": "0"},
+        json=mocker.Mock(return_value={"code": "40015", "msg": "invalid order"}),
     )
     request = mocker.patch.object(client._http, "request", return_value=response)
 
-    with pytest.raises(exception):
-        client.request("GET", "/v1/account/balance", private=True)
+    with pytest.raises(exception) as exc:
+        client.place_order({"symbol": "BTC-USDT", "qty": "1"})
+    assert type(exc.value) is exception
+    assert not getattr(exc.value, "umx_definitive_rejection", False)
+    response.json.assert_not_called()
+    request.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [200, 400])
+@pytest.mark.parametrize(
+    ("code", "message", "exception", "definitive"),
+    [
+        ("40015", "clientOrderId parameter is invalid", ccxt.InvalidOrder, True),
+        ("60101", "insufficient balance", ccxt.InsufficientFunds, True),
+        ("40015", "duplicate clientOrderId", ccxt.InvalidOrder, False),
+        ("40015", "clientOrderId already exists", ccxt.InvalidOrder, False),
+        ("40013", "Order not found", ccxt.OrderNotFound, False),
+        ("20010", "Order not found", ccxt.OrderNotFound, False),
+        ("10008", "too many requests", ccxt.DDoSProtection, False),
+        ("20001", "temporarily unavailable", ccxt.ExchangeNotAvailable, False),
+        ("99999", "unknown error", ccxt.ExchangeError, False),
+    ],
+)
+def test_umx_order_rejection_classification(mocker, status, code, message, exception, definitive):
+    client = UMXClient({"apiKey": "key", "secret": "secret"})
+    payload = {"code": code, "msg": message, "data": ""}
+    response = SimpleNamespace(status_code=status, text=str(payload), json=lambda: payload)
+    request = mocker.patch.object(client._http, "request", return_value=response)
+
+    with pytest.raises(exception, match=message) as exc:
+        client.place_order({"symbol": "BTC-USDT", "qty": "1", "clientOrderId": "testorder1"})
+    assert type(exc.value) is exception
+    assert getattr(exc.value, "umx_definitive_rejection", False) is definitive
+    request.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        "error",
+        {},
+        {"code": "0"},
+        {"code": 0},
+        {"code": None},
+        {"code": ""},
+        {"code": True},
+        {"code": "400proxy"},
+        {"code": 400.13},
+    ],
+)
+def test_umx_http_bad_request_without_business_error(mocker, payload):
+    client = UMXClient({"apiKey": "key", "secret": "secret"})
+    response = SimpleNamespace(status_code=400, text="unrecognized body", json=lambda: payload)
+    request = mocker.patch.object(client._http, "request", return_value=response)
+
+    with pytest.raises(ccxt.ExchangeError, match="UMX HTTP 400") as exc:
+        client.place_order({"symbol": "BTC-USDT", "qty": "1"})
+    assert type(exc.value) is ccxt.ExchangeError
+    assert not getattr(exc.value, "umx_definitive_rejection", False)
+    request.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [200, 400])
+def test_umx_invalid_json_response(mocker, status):
+    client = UMXClient({"apiKey": "key", "secret": "secret"})
+    response = SimpleNamespace(
+        status_code=status,
+        text="<html>Bad request</html>",
+        json=mocker.Mock(side_effect=ValueError("invalid JSON")),
+    )
+    request = mocker.patch.object(client._http, "request", return_value=response)
+
+    message = "invalid JSON" if status == 200 else "UMX HTTP 400"
+    with pytest.raises(ccxt.ExchangeError, match=message) as exc:
+        client.place_order({"symbol": "BTC-USDT", "qty": "1"})
+    assert type(exc.value) is ccxt.ExchangeError
+    assert not getattr(exc.value, "umx_definitive_rejection", False)
+    request.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [201, 302, 404, 408])
+def test_umx_other_http_errors_are_not_definitive_rejections(mocker, status):
+    client = UMXClient({"apiKey": "key", "secret": "secret"})
+    response = SimpleNamespace(
+        status_code=status,
+        text="unexpected HTTP status",
+        json=mocker.Mock(return_value={"code": "40015", "msg": "invalid order"}),
+    )
+    request = mocker.patch.object(client._http, "request", return_value=response)
+
+    with pytest.raises(ccxt.ExchangeError, match=f"UMX HTTP {status}") as exc:
+        client.place_order({"symbol": "BTC-USDT", "qty": "1"})
+    assert type(exc.value) is ccxt.ExchangeError
+    assert not getattr(exc.value, "umx_definitive_rejection", False)
+    response.json.assert_not_called()
     request.assert_called_once()
 
 

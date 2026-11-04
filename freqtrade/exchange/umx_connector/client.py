@@ -111,6 +111,15 @@ class UMXClient:
         except requests.RequestException as e:
             raise ccxt.NetworkError(str(e)) from e
 
+        if response.status_code != 200:
+            self._handle_http_error(response, method, path)
+        try:
+            payload = response.json()
+        except ValueError as e:
+            raise ccxt.ExchangeError("UMX returned invalid JSON") from e
+        return self._handle_request_payload(payload, method, path)
+
+    def _handle_http_error(self, response: requests.Response, method: str, path: str) -> None:
         if response.status_code == 429:
             raise ccxt.DDoSProtection(f"UMX HTTP {response.status_code}: {response.text}")
         if response.status_code == 403 and self._is_waf_response(response):
@@ -119,24 +128,30 @@ class UMXClient:
             raise ccxt.AuthenticationError(f"UMX HTTP {response.status_code}: {response.text}")
         if response.status_code >= 500:
             raise ccxt.ExchangeNotAvailable(f"UMX HTTP {response.status_code}")
-        if response.status_code != 200:
-            raise ccxt.ExchangeError(f"UMX HTTP {response.status_code}: {response.text}")
-        try:
-            payload = response.json()
-        except ValueError as e:
-            raise ccxt.ExchangeError("UMX returned invalid JSON") from e
-        return self._handle_request_payload(payload, method, path)
+        if response.status_code == 400:
+            # UMX also returns business errors with HTTP 400. Keep transport/auth failures
+            # above authoritative, and never accept a success-shaped HTTP error as success.
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                code = str(payload.get("code", ""))
+                if code.isdecimal() and int(code) != 0:
+                    self._handle_request_payload(payload, method, path)
+        raise ccxt.ExchangeError(f"UMX HTTP {response.status_code}: {response.text}")
 
     def _handle_request_payload(self, payload, method, path):
         try:
             return self._handle_response(payload)
         except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as error:
             # Only a parsed venue rejection of this POST is definitive. Transport failures,
-            # throttles, duplicate IDs and other ambiguous outcomes must be recovered by GET.
+            # throttles, missing orders, duplicate IDs and other ambiguous outcomes need GET.
             message = str(error).lower()
             if (
                 method == "POST"
                 and path == "/v2/trade/order"
+                and not isinstance(error, ccxt.OrderNotFound)
                 and not any(word in message for word in ("duplicate", "already", "重复", "已存在"))
             ):
                 error.umx_definitive_rejection = True

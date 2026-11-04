@@ -120,6 +120,12 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
 - Dry-run liquidation prices use an approximation based on wallet collateral and `riskEngineRate`;
   unavailable inputs can produce `None`. This is simulation compatibility, not an exchange quote.
 - The REST connector submits an order once and does not automatically retry an uncertain write.
+  HTTP 400 responses with a nonzero numeric UMX business code use the same exception mapping as
+  HTTP 200 responses: `40013`/`20010` raise `OrderNotFound`, allowing callers to reconcile by GET
+  when a newly accepted order is not yet visible. A missing order is not proof of a failed write.
+  Rate limits, WAF blocks, HTTP authentication failures and server errors retain their transport
+  classifications. Malformed or success-shaped HTTP 400 bodies remain generic HTTP errors;
+  they cannot confirm an order rejection or trigger a write retry.
 - The Maker version 3 candidate supports last-price market stops on existing net perpetual
   positions. It checks direction and quantity, adopts a matching owned TPSL after an uncertain
   response, and reads back accepted parameters. A triggered TPSL resolves to its execution order;
