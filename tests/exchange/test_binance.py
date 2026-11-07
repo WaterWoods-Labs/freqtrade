@@ -4775,6 +4775,159 @@ def test_binance_portfolio_margin_chan_promotion_kill_point_recovers_as_unknown_
     recovery_api.create_order.assert_not_called()
 
 
+def dca_reservation_retry_exchange(default_conf, mocker, tmp_path, side="buy", configured=False):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+
+    if configured:
+        from tests.exchange.test_binance_bot_risk import configured as bot_config
+
+        conf = bot_config(default_conf, tmp_path)
+    else:
+        conf = portfolio_margin_dca_conf(default_conf, tmp_path, exposure_limit=2000)
+    api = portfolio_margin_live_api_mock()
+    api.fetch_positions.return_value = [
+        {
+            **portfolio_margin_position(contracts=0.02, side="long" if side == "buy" else "short"),
+            "notional": 40.0,
+        }
+    ]
+    orders = {
+        cid: {
+            "id": cid,
+            "clientOrderId": cid,
+            "symbol": "ETH/USDT:USDT",
+            "side": side,
+            "status": "closed" if cid == "ftpm-first" else "canceled",
+            "filled": 0.02 if cid == "ftpm-first" else 0.0,
+            "amount": 0.02,
+            "price": 2000.0,
+            "info": {},
+        }
+        for cid in ("ftpm-first", "ftpm-canceled-add")
+    }
+    api.fetch_order.side_effect = lambda cid, *args, **kwargs: deepcopy(orders[cid])
+    exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(exchange, "get_contract_size", return_value=1.0)
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    store = exchange._portfolio_order_intent_store
+    for cid in orders:
+        store.add(PortfolioOrderIntent(cid, "ETH/USDT:USDT", "regular"))
+        store.promote_to_entry_reservation(cid)
+        # Existing position snapshots also mark an unfilled add as exposure_seen.
+        store.mark_reservation_exposure_seen(cid)
+    return conf, exchange, api, orders
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("status", ["canceled", "expired", "rejected"])
+def test_binance_portfolio_dca_zero_fill_add_releases_with_first_position(
+    default_conf, mocker, tmp_path, side, configured, status
+):
+    conf, exchange, api, orders = dca_reservation_retry_exchange(
+        default_conf, mocker, tmp_path, side, configured
+    )
+    orders["ftpm-canceled-add"]["status"] = status
+    # A restart must resolve the persisted canceled add without altering its first entry.
+    restarted = get_patched_exchange(mocker, conf, api, exchange="binance")
+    mocker.patch.object(restarted, "get_contract_size", return_value=1.0)
+    before = exchange._portfolio_order_intent_store.reservations
+    with restarted._get_portfolio_create_lock():
+        restarted._validate_portfolio_margin_dca_projected_exposure(
+            "ETH/USDT:USDT", 35.0, "ftpm-retry", side
+        )
+    assert restarted._portfolio_order_intent_store.reservations == (before[0],)
+    assert exchange._portfolio_order_intent_store.reservations == (before[0],)
+    add_queries = [
+        call for call in api.fetch_order.call_args_list if call.args[0] == "ftpm-canceled-add"
+    ]
+    assert len(add_queries) == 4  # Discovery plus three consecutive exact zero-fill snapshots.
+    api.create_order.assert_not_called()
+    api.cancel_order.assert_not_called()
+    api.request.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["late_fill", "missing", "open", "pending", "query_error"])
+def test_binance_portfolio_dca_zero_fill_add_keeps_uncertain_reservation(
+    default_conf, mocker, tmp_path, change
+):
+    _, exchange, api, orders = dca_reservation_retry_exchange(default_conf, mocker, tmp_path)
+    original = deepcopy(orders["ftpm-canceled-add"])
+    calls = 0
+
+    def exact(cid, *args, **kwargs):
+        nonlocal calls
+        if cid != "ftpm-canceled-add":
+            return deepcopy(orders[cid])
+        calls += 1
+        if calls >= 3:
+            if change == "missing":
+                raise ccxt.OrderNotFound("not visible")
+            if change == "query_error":
+                raise ccxt.NetworkError("unavailable")
+            if change == "late_fill":
+                return {**original, "filled": 0.005}
+            if change == "open":
+                return {**original, "status": "open"}
+        return deepcopy(original)
+
+    api.fetch_order.side_effect = exact
+    if change == "pending":
+        api.fetch_open_orders.return_value = [{}]
+    before = exchange._portfolio_order_intent_store.reservations
+    with exchange._get_portfolio_create_lock():
+        if change == "query_error":
+            with pytest.raises(OperationalException, match="could not query"):
+                exchange._reconcile_portfolio_entry_reservations()
+        else:
+            exchange._reconcile_portfolio_entry_reservations()
+    assert exchange._portfolio_order_intent_store.reservations == before
+    api.create_order.assert_not_called()
+    api.cancel_order.assert_not_called()
+    api.request.assert_not_called()
+
+
+def test_binance_portfolio_dca_zero_fill_add_restarts_stability_count(
+    default_conf, mocker, tmp_path
+):
+    _, exchange, api, orders = dca_reservation_retry_exchange(default_conf, mocker, tmp_path)
+    calls = 0
+
+    def exact(cid, *args, **kwargs):
+        nonlocal calls
+        if cid == "ftpm-canceled-add":
+            calls += 1
+            if calls == 4:
+                raise ccxt.OrderNotFound("temporary gap after two clean snapshots")
+        return deepcopy(orders[cid])
+
+    api.fetch_order.side_effect = exact
+    with exchange._get_portfolio_create_lock():
+        exchange._reconcile_portfolio_entry_reservations()
+    assert calls == 7
+    assert [r.client_order_id for r in exchange._portfolio_order_intent_store.reservations] == [
+        "ftpm-first"
+    ]
+
+
+def test_binance_portfolio_dca_zero_fill_add_late_fill_cannot_revert_to_zero(
+    default_conf, mocker, tmp_path
+):
+    _, exchange, api, orders = dca_reservation_retry_exchange(default_conf, mocker, tmp_path)
+    original = orders["ftpm-canceled-add"]
+    api.fetch_order.side_effect = [original, {**original, "filled": 0.005}, original, original]
+    api.fetch_positions.return_value = []
+    before = exchange._portfolio_order_intent_store.reservations
+    with exchange._get_portfolio_create_lock():
+        assert not exchange._portfolio_entry_reservation_release_window(
+            before[1], zero_fill_only=True
+        )
+    assert api.fetch_order.call_count == 2
+    assert exchange._portfolio_order_intent_store.reservations == before
+    api.create_order.assert_not_called()
+    api.cancel_order.assert_not_called()
+
+
 def test_binance_portfolio_margin_chan_zero_fill_reservation_releases_after_stable_snapshots(
     default_conf, mocker, tmp_path
 ):

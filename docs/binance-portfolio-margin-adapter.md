@@ -125,6 +125,13 @@ pair cap. Routine position snapshots record observed exposure for matching reser
 a later terminal, flat release window. The legacy five-pair policy retains its original
 one-reservation-per-pair limits.
 
+A DCA order confirmed terminal with zero fills can release its own reservation while the first
+entry remains open. Release still requires three consecutive exact zero-fill, terminal-order
+snapshots with no pending entry order. Missing or open-order evidence resets the window; a late
+fill aborts this zero-fill release. The filled first entry retains its reservation until the
+ordinary observed-then-flat release checks pass. This reconciliation never cancels protection
+orders or changes positions, and the legacy five-pair policy keeps its flat-position requirement.
+
 Observed Maker partial fills are settled through `settle_portfolio_dca_partial_entry`: the
 reservation is atomically converted into a pending intent before cancelling the remainder.
 Only exact terminal order evidence permits normal continuation. Ambiguous cancellation uses the

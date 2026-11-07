@@ -1344,7 +1344,7 @@ class Binance(Exchange):
         return status != "open", filled
 
     def _portfolio_entry_reservation_release_window(
-        self, reservation: PortfolioEntryReservation
+        self, reservation: PortfolioEntryReservation, *, zero_fill_only: bool = False
     ) -> bool:
         """Require stable clean snapshots within a bounded release window."""
         store = self._portfolio_order_intent_store
@@ -1377,12 +1377,20 @@ class Binance(Exchange):
                 store.mark_reservation_exposure_seen(reservation.client_order_id)
                 exposure_seen = True
 
+            if zero_fill_only and filled > 0:
+                # A late fill invalidates this release path even if a later position snapshot
+                # is flat. Keep its durable evidence for ordinary filled-order reconciliation.
+                stable_clean_snapshots = 0
+                break
+
             clean = (
                 order is not None
                 and terminal
                 and not entry_order_visible
-                and not active_positions
-                and (filled == 0 or exposure_seen)
+                and (
+                    (zero_fill_only and filled == 0)
+                    or (not active_positions and (filled == 0 or exposure_seen))
+                )
             )
             stable_clean_snapshots = stable_clean_snapshots + 1 if clean else 0
             if stable_clean_snapshots >= self._portfolio_containment_stable_snapshots:
@@ -1428,12 +1436,22 @@ class Binance(Exchange):
                     created_at=reservation.created_at,
                     exposure_seen=True,
                 )
-            if active_positions or not terminal:
+            zero_fill_dca = (
+                terminal
+                and filled == 0
+                and self._portfolio_margin_risk is not None
+                and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES
+            )
+            if not terminal or (active_positions and not zero_fill_dca):
                 continue
             if filled > 0 and not reservation.exposure_seen:
                 # A filled order whose position was never observed is not safe to forget.
                 continue
-            self._portfolio_entry_reservation_release_window(reservation)
+            # An existing first entry must not pin a canceled, unfilled add forever. Only
+            # that exact zero-fill order may be released; filled reservations still need flatness.
+            self._portfolio_entry_reservation_release_window(
+                reservation, zero_fill_only=zero_fill_dca
+            )
 
     def _validate_portfolio_margin_chan_projected_exposure(
         self, pair: str, proposed_notional: float, client_order_id: str
