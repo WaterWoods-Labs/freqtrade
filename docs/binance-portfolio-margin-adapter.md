@@ -76,6 +76,15 @@ validating these contracts again.
 
 ## Order recovery and reconciliation
 
+Ordinary entry cancellation keeps the native next-loop order query and retry behavior.
+An initial nonterminal `open` response logs confirmation pending at INFO. A repeated
+nonterminal observation, missing/unexpected status, or failed follow-up query warns.
+Records contain the order ID, pair, status, observed fill/remainder, elapsed monotonic
+time and observation count. A terminal query or cancel response logs reconciliation
+completion with its actual status, including fills racing cancellation. This diagnostics
+state is process-local and never changes order status, retry policy, reservations, or
+protection; it neither adds API calls nor blocks the trading loop.
+
 Persistent order intents distinguish a failed request from an unknown exchange result. The adapter
 recovers by client order ID and exchange evidence before permitting another write; ambiguous or
 corrupt state blocks further trading rather than blindly resubmitting. Order intents, locks, and
