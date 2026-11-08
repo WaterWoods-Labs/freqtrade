@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
 from threading import Lock
-from time import sleep
+from time import monotonic, sleep
 from typing import Any, NamedTuple
 
 from cachetools import TTLCache
@@ -98,6 +98,7 @@ class FreqtradeBot(LoggingMixin):
         to get the config dict.
         """
         self.active_pair_whitelist: list[str] = []
+        self._pending_entry_cancels: dict[tuple[str, str], tuple[float, int]] = {}
 
         # Init bot state
         self.state = State.STOPPED
@@ -1937,6 +1938,10 @@ class FreqtradeBot(LoggingMixin):
                     order = self.exchange.fetch_order(open_order.order_id, trade.pair)
 
                 except ExchangeError:
+                    if (trade.pair, open_order.order_id) in self._pending_entry_cancels:
+                        self._report_entry_cancel_pending(
+                            trade.pair, open_order.order_id, {"status": "query_failed"}
+                        )
                     logger.info(
                         "Cannot query order for %s due to %s", trade, traceback.format_exc()
                     )
@@ -2248,7 +2253,9 @@ class FreqtradeBot(LoggingMixin):
             # Simply bailing here is the only safe way - as this order will then be
             # handled in the next iteration.
             if corder.get("status") not in constants.NON_OPEN_EXCHANGE_STATES:
-                logger.warning(f"Order {order_id} for {trade.pair} not cancelled.")
+                self._report_entry_cancel_pending(
+                    trade.pair, order_id, corder, force_warning=replacing is True
+                )
                 return False
         else:
             # Order was cancelled already, so we can reuse the existing dict
@@ -2256,6 +2263,7 @@ class FreqtradeBot(LoggingMixin):
             if order_obj.ft_cancel_reason is None:
                 order_obj.ft_cancel_reason = constants.CANCEL_REASON["CANCELLED_ON_EXCHANGE"]
 
+        self._report_entry_cancel_resolved(trade.pair, order_id, corder)
         logger.info(f"{side} order {order_obj.ft_cancel_reason} for {trade}.")
 
         # Using filled to determine the filled amount
@@ -2289,6 +2297,48 @@ class FreqtradeBot(LoggingMixin):
             trade, order_type=self.strategy.order_types["entry"], reason=order_obj.ft_cancel_reason
         )
         return was_trade_fully_canceled
+
+    def _report_entry_cancel_pending(
+        self, pair: str, order_id: str, order: dict, *, force_warning: bool = False
+    ) -> None:
+        """Observe native reconciliation without delaying or changing order handling."""
+        now = monotonic()
+        started, checks = self._pending_entry_cancels.get((pair, order_id), (now, 0))
+        checks += 1
+        self._pending_entry_cancels[(pair, order_id)] = (started, checks)
+        log = (
+            logger.info
+            if checks == 1 and order.get("status") == "open" and not force_warning
+            else logger.warning
+        )
+        log(
+            "Order %s for %s not cancelled yet; confirmation pending. "
+            "status=%s filled=%s remaining=%s elapsed_s=%.3f checks=%s",
+            order_id,
+            pair,
+            order.get("status"),
+            order.get("filled"),
+            order.get("remaining"),
+            now - started,
+            checks,
+        )
+
+    def _report_entry_cancel_resolved(self, pair: str, order_id: str, order: dict) -> None:
+        if order.get("status") not in constants.NON_OPEN_EXCHANGE_STATES:
+            return
+        pending = self._pending_entry_cancels.pop((pair, order_id), None)
+        if pending is not None:
+            logger.info(
+                "Entry cancel reconciliation completed for order %s on %s: "
+                "status=%s filled=%s remaining=%s elapsed_s=%.3f checks=%s",
+                order_id,
+                pair,
+                order.get("status"),
+                order.get("filled"),
+                order.get("remaining"),
+                monotonic() - pending[0],
+                pending[1],
+            )
 
     def handle_cancel_exit(
         self, trade: Trade, order: CcxtOrder, order_obj: Order, reason: str
@@ -2717,6 +2767,8 @@ class FreqtradeBot(LoggingMixin):
             logger.warning("Unable to fetch order %s: %s", order_id, exception)
             return False
 
+        if not stoploss_order:
+            self._report_entry_cancel_resolved(trade.pair, order_id, order)
         trade.update_order(order)
 
         if self.exchange.check_order_canceled_empty(order):
