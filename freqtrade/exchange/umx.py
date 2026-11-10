@@ -2,15 +2,18 @@
 
 import hashlib
 import os
+import re
 import uuid
 from decimal import Decimal, InvalidOperation
 from math import isclose, isfinite
 from pathlib import Path
 from typing import Any
 
+import ccxt
+
 from freqtrade.constants import ExchangeConfig
 from freqtrade.enums import MarginMode, PriceType, TradingMode
-from freqtrade.exceptions import OperationalException
+from freqtrade.exceptions import InvalidOrderException, OperationalException, TemporaryError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
 from freqtrade.exchange.umx_api import UMXAsync, UMXSync
@@ -142,6 +145,13 @@ class UMX(Exchange):
             or not positive(rate)
         ):
             raise OperationalException("Bot risk contract requires bounded 1x PO/IOC entries")
+        client_order_id = (
+            "ftbr" + uuid.uuid4().hex[:24] if client_order_id is None else client_order_id
+        )
+        if not isinstance(client_order_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9]{1,32}", client_order_id
+        ):
+            raise InvalidOrderException("UMX clientOrderId requires 1-32 ASCII letters or digits")
         ledger = self._bot_risk_ledger()
         ledger.reconcile_flat(self.fetch_order_by_client_id, self._bot_risk_snapshot)
         # Reserve the exact venue-rounded notional, including contract conversion.
@@ -149,7 +159,7 @@ class UMX(Exchange):
         rounded_amount = self._contracts_to_amount(pair, contracts)
         rounded_rate = self.price_to_precision(pair, rate)
         arguments.update(amount=rounded_amount, rate=rounded_rate)
-        arguments["client_order_id"] = client_order_id or "ftbr-" + uuid.uuid4().hex[:24]
+        arguments["client_order_id"] = client_order_id
         return ledger.submit(
             pair=pair,
             side=side,
@@ -167,7 +177,17 @@ class UMX(Exchange):
                 if order.get("clientOrderId") == client_order_id:
                     return self.fetch_dry_run_order(order["id"])
             raise OperationalException("Unknown simulated entry; private recovery is prohibited")
-        order = self._api.fetch_order_by_client_id(client_order_id, pair)
+        try:
+            order = self._api.fetch_order_by_client_id(client_order_id, pair)
+        except ccxt.InvalidOrder as exc:
+            raise InvalidOrderException(
+                "UMX exact-order recovery unavailable; entry reservation retained"
+            ) from exc
+        except ccxt.BaseError as exc:
+            raise TemporaryError(
+                f"UMX exact-order recovery failed ({type(exc).__name__}); "
+                "entry reservation retained"
+            ) from exc
         return self._order_contracts_to_amount(order)
 
     def opportunity_funding_history(self, since, now):

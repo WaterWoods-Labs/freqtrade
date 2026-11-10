@@ -1,8 +1,10 @@
+import re
 from unittest.mock import Mock
 
+import ccxt
 import pytest
 
-from freqtrade.exceptions import InvalidOrderException, OperationalException
+from freqtrade.exceptions import InvalidOrderException, OperationalException, TemporaryError
 from freqtrade.exchange.bot_risk_ledger import EntryLedger
 from tests.test_bot_risk import risk
 
@@ -40,7 +42,7 @@ def test_write_ahead_unknown_survives_restart(tmp_path):
         submit(ledger, "one", flat, timeout)
     restarted = EntryLedger(path, risk(500))
     send = Mock()
-    with pytest.raises(OperationalException, match="Unknown submission"):
+    with pytest.raises(InvalidOrderException, match="Unknown submission"):
         submit(restarted, "two", flat, send, amount=20)
     send.assert_not_called()
 
@@ -197,3 +199,82 @@ def test_adapter_reserves_venue_rounded_notional(mocker):
         time_in_force="PO",
     )
     assert ledger.submit.call_args.kwargs["notional"] == pytest.approx(100.08)
+    assert re.fullmatch(r"[A-Za-z0-9]{1,32}", ledger.submit.call_args.kwargs["client_id"])
+
+
+@pytest.mark.parametrize("client_id", ["ftbr-bad", "", 123, "a" * 33, "订单", " id"])
+def test_invalid_client_id_is_rejected_before_reservation_or_submission(mocker, client_id):
+    from freqtrade.exchange import Exchange
+    from freqtrade.exchange.umx import UMX
+
+    exchange = object.__new__(UMX)
+    exchange._exchange_ws = None
+    exchange._config = {"bot_risk": risk(), "dry_run": False}
+    ledger = mocker.patch.object(exchange, "_bot_risk_ledger")
+    create = mocker.patch.object(Exchange, "create_order")
+    with pytest.raises(InvalidOrderException, match="ASCII letters or digits"):
+        exchange.create_order(
+            pair="BTC/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=100,
+            leverage=1,
+            time_in_force="PO",
+            client_order_id=client_id,
+        )
+    ledger.assert_not_called()
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (ccxt.InvalidOrder("invalid client id"), InvalidOrderException),
+        (ccxt.OrderNotFound("not found"), InvalidOrderException),
+        (ccxt.RequestTimeout("timeout"), TemporaryError),
+        (ccxt.DDoSProtection("rate limited"), TemporaryError),
+        (ccxt.ExchangeError("identity unavailable"), TemporaryError),
+    ],
+)
+def test_recovery_errors_preserve_unknown_reservation_and_allow_exits(
+    tmp_path, mocker, failure, expected
+):
+    from freqtrade.exchange import Exchange
+    from freqtrade.exchange.umx import UMX
+
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    with pytest.raises(TimeoutError):
+        submit(ledger, "unknown", flat, Mock(side_effect=TimeoutError()))
+    before = ledger.path.read_bytes()
+    exchange = object.__new__(UMX)
+    exchange._exchange_ws = None
+    exchange._config = {"bot_risk": risk(), "dry_run": False}
+    exchange._api = Mock()
+    exchange._api.fetch_order_by_client_id.side_effect = failure
+    mocker.patch.object(exchange, "_bot_risk_ledger", return_value=ledger)
+    mocker.patch.object(exchange, "_bot_risk_snapshot", return_value=flat())
+    create = mocker.patch.object(Exchange, "create_order", return_value={"id": "exit"})
+    with pytest.raises(expected, match="entry reservation retained") as caught:
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=100,
+            leverage=1,
+            time_in_force="PO",
+        )
+    assert caught.value.__cause__ is failure
+    assert ledger.path.read_bytes() == before
+    create.assert_not_called()
+    assert exchange.create_order(
+        pair="BTC/USDT:USDT",
+        ordertype="market",
+        side="sell",
+        amount=1,
+        rate=100,
+        leverage=1,
+        reduceOnly=True,
+    ) == {"id": "exit"}
+    create.assert_called_once()

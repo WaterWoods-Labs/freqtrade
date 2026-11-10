@@ -12,6 +12,14 @@ not evidence of cancellation. Releasing a reservation requires its exact termina
 flat observations at least 60 seconds apart; partial fills and unresolved submissions retain capacity.
 The second entry requires a terminal filled first entry of the same direction; no third add is allowed.
 
+UMX entry client IDs contain only 1-32 ASCII letters or digits, as required by the
+[order endpoint](https://www.umx.com/docs/coin-apis/trading/regular-trading/place-order).
+Generated budget IDs use `ftbr` followed by 24 hexadecimal characters. Invalid supplied IDs
+are rejected before reserving capacity or sending an order. Exact-order lookup failures and
+unresolved submissions use the native entry-error path: they retain the reservation and block
+new entries while normal exit processing remains available. A query miss never clears an intent
+or authorizes another submission.
+
 Budgets may be lowered without changing or deleting the namespace/state. Entry-limit rejection
 uses the native invalid-order path so normal exit processing remains available. Reduce-only exits
 and protection bypass admission checks. Missing account evidence or an unknown submission remains
