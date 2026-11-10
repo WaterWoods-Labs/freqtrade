@@ -80,7 +80,7 @@ class EntryLedger:
                     "Entry client id already reserved; reconcile instead of retrying"
                 )
             if any(entry.get("outcome") != "confirmed" for entry in state["entries"].values()):
-                raise OperationalException(
+                raise InvalidOrderException(
                     "Unknown submission outcome; entries blocked pending reconciliation"
                 )
             exposure, pending = snapshot()
