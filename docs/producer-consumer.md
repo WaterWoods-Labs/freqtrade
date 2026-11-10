@@ -45,12 +45,13 @@ Enable subscribing to an instance by adding the `external_message_consumer` sect
 | `producers.port` | **Required.** The port matching the above host.<br>*Defaults to `8080`.*<br> **Datatype:** Integer
 | `producers.secure` | **Optional.**  Use ssl in websockets connection. Default False.<br> **Datatype:** string
 | `producers.ws_token` | **Required.**  `ws_token` as configured on the producer.<br> **Datatype:** string
+| `producers.request_full_dataframe` | **Optional.** Receive the full analyzed dataframe (up to 1500 candles) from this producer on every update, instead of only the latest candle. Useful if the producer's strategy updates past candles (e.g. data that becomes available with a delay). Increases bandwidth and producer load. Requires the producer to run 2026.11 or above.<br>*Defaults to `false`.*<br> **Datatype:** Boolean
 | | **Optional settings**
 | `wait_timeout` | Timeout until we ping again if no message is received. <br>*Defaults to `300`.*<br> **Datatype:** Integer - in seconds.
 | `ping_timeout` | Ping timeout <br>*Defaults to `10`.*<br> **Datatype:** Integer - in seconds.
 | `sleep_time` | Sleep time before retrying to connect.<br>*Defaults to `10`.*<br> **Datatype:** Integer - in seconds.
 | `remove_entry_exit_signals` | Remove signal columns from the dataframe (set them to 0) on dataframe receipt.<br>*Defaults to `false`.*<br> **Datatype:** Boolean.
-| `initial_candle_limit` | Initial candles to expect from the Producer.<br>*Defaults to `1500`.*<br> **Datatype:** Integer - Number of candles.
+| `initial_candle_limit` | Initial candles to expect from the Producer. Must be between `100` and `1500`.<br>*Defaults to `1500`.*<br> **Datatype:** Integer - Number of candles.
 | `message_size_limit` | Size limit per message<br>*Defaults to `8`.*<br> **Datatype:** Integer - Megabytes.
 
 Instead of (or as well as) calculating indicators in `populate_indicators()` the follower instance listens on the connection to a producer instance's messages (or multiple producer instances in advanced configurations) and requests the producer's most recently analyzed dataframes for each pair in the active whitelist.

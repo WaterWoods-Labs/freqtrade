@@ -47,6 +47,7 @@ from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
 from freqtrade.persistence import Order, PairLocks, Trade, init_db
+from freqtrade.persistence.custom_data import _CustomData
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.plugins.pairlistmanager import PairListManager
 from freqtrade.plugins.protectionmanager import ProtectionManager
@@ -344,7 +345,7 @@ class FreqtradeBot(LoggingMixin):
 
         # Protect from collisions with force_exit.
         # Without this, freqtrade may try to recreate stoploss_on_exchange orders
-        # while exiting is in process, since telegram messages arrive in an different thread.
+        # while exiting is in process, since telegram messages arrive in a different thread.
         with self._exit_lock:
             trades = Trade.get_open_trades()
             # First process current opened trades (positions)
@@ -363,6 +364,8 @@ class FreqtradeBot(LoggingMixin):
             self.enter_positions(free_trade_slots)
         self._schedule.run_pending()
         Trade.commit()
+        # Custom data commits on every write - so ending a read session is safe.
+        _CustomData.session.rollback()
         self.rpc.process_msg_queue(self.dataprovider._msg_queue)
         self.last_process = datetime.now(UTC)
 
@@ -606,7 +609,7 @@ class FreqtradeBot(LoggingMixin):
 
             except InvalidOrderException as e:
                 logger.warning(f"Error updating Order {order.order_id} due to {e}.")
-                if order.order_date_utc - timedelta(days=5) < datetime.now(UTC):
+                if order.order_date_utc < datetime.now(UTC) - timedelta(days=5):
                     logger.warning(
                         "Order is older than 5 days. Assuming order was fully cancelled."
                     )
@@ -688,7 +691,7 @@ class FreqtradeBot(LoggingMixin):
 
     def handle_onexchange_order(self, trade: Trade) -> bool:
         """
-        Try refinding a order that is not in the database.
+        Try refinding an order that is not in the database.
         Only used balance disappeared, which would make exiting impossible.
         :return: True if the trade was deleted, False otherwise
         """
@@ -1398,7 +1401,7 @@ class FreqtradeBot(LoggingMixin):
         sub_trade: bool = False,
     ) -> None:
         """
-        Sends rpc notification when a entry order occurred.
+        Sends rpc notification when an entry order occurred.
         """
         open_rate = order.safe_price
 
@@ -1447,7 +1450,7 @@ class FreqtradeBot(LoggingMixin):
         self, trade: Trade, order_type: str, reason: str, sub_trade: bool = False
     ) -> None:
         """
-        Sends rpc notification when a entry order cancel occurred.
+        Sends rpc notification when an entry order cancel occurred.
         """
         current_rate = self.exchange.get_rate(
             trade.pair, side="entry", is_short=trade.is_short, refresh=False
@@ -1985,7 +1988,12 @@ class FreqtradeBot(LoggingMixin):
                     )
                     # Trade.session.refresh(order_obj)
 
-                    self.emergency_exit(trade, order["price"], order_obj.safe_remaining)
+                    # Some exchanges don't return a price for cancelled orders.
+                    self.emergency_exit(
+                        trade,
+                        order.get("price") or order_obj.safe_placement_price,
+                        order_obj.safe_remaining,
+                    )
             return canceled
 
     def emergency_exit(
@@ -2802,7 +2810,7 @@ class FreqtradeBot(LoggingMixin):
             strategy_safe_wrapper(self.strategy.order_filled, supress_error=True)(
                 pair=trade.pair, trade=trade, order=order, current_time=datetime.now(UTC)
             )
-            # If a entry order was closed, force update on stoploss on exchange
+            # If an entry order was closed, force update on stoploss on exchange
             if order.ft_order_side == trade.entry_side:
                 if send_msg:
                     if trade.nr_of_successful_entries > 1:
