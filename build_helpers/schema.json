@@ -1028,6 +1028,9 @@
         "analyzed_df": {
           "type": "object"
         },
+        "full_analyzed_df": {
+          "type": "object"
+        },
         "new_candle": {
           "type": "object"
         }
@@ -1440,8 +1443,24 @@
           "default": false
         },
         "enable_ws": {
-          "description": "Enable WebSocket connections to the exchange.",
-          "type": "boolean",
+          "description": "Enable WebSocket connections to the exchange. Either a boolean to enable/disable all streams, or an object for per-stream control (e.g. {\"ohlcv\": true, \"orderbook\": false}).",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ohlcv": {
+                  "type": "boolean"
+                },
+                "orderbook": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
           "default": true
         },
         "unknown_fee_rate": {
@@ -4067,6 +4086,11 @@
               "ws_token": {
                 "description": "WebSocket token for the producer.",
                 "type": "string"
+              },
+              "request_full_dataframe": {
+                "description": "Receive the full analyzed dataframe from this producer on every update instead of only the latest candle.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -4099,7 +4123,7 @@
         "initial_candle_limit": {
           "description": "Initial candle limit.",
           "type": "integer",
-          "minimum": 0,
+          "minimum": 100,
           "maximum": 1500,
           "default": 1500
         },

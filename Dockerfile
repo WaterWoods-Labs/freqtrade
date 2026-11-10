@@ -1,4 +1,4 @@
-FROM python:3.14.7-slim-trixie AS base
+FROM python:3.14.10-slim-trixie AS base
 
 # Setup env
 ENV LANG=C.UTF-8
@@ -17,7 +17,8 @@ RUN mkdir /freqtrade \
   && useradd -u 1000 -G sudo -U -m -s /bin/bash ftuser \
   && chown ftuser:ftuser /freqtrade \
   # Allow sudoers
-  && echo "ftuser ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers
+  && echo "ftuser ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers \
+  && pip install --upgrade pip
 
 WORKDIR /freqtrade
 
@@ -32,8 +33,7 @@ RUN  apt-get update \
 # Install dependencies
 COPY --chown=ftuser:ftuser requirements.txt requirements-hyperopt.txt /freqtrade/
 USER ftuser
-RUN  pip install --user --no-cache-dir "numpy<3.0" \
-  && pip install --user --no-cache-dir -r requirements-hyperopt.txt
+RUN  pip install --user --no-cache-dir -r requirements-hyperopt.txt
 
 # Keep architecture-specific build inputs in their build stage, outside runtime layers.
 # Preserve the release-generated freqtrade_commit file and all other runtime inputs.

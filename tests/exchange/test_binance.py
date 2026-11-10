@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from random import randint
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 from urllib.parse import parse_qs, urlparse
 
 import ccxt
@@ -27,7 +27,7 @@ from freqtrade.misc import deep_merge_dicts
 from freqtrade.persistence import Trade
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts, dt_utc
 from freqtrade.wallets import PositionWallet
-from tests.conftest import EXMS, get_patched_exchange
+from tests.conftest import EXMS, get_patched_exchange, log_has_re
 from tests.exchange.test_exchange import ccxt_exceptionhandlers
 
 
@@ -2059,8 +2059,8 @@ def test_binance_portfolio_margin_preserves_open_position(default_conf, mocker):
 
 
 def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets):
-    """Exercise CCXT 4.5.85 and record the raw endpoint requests without network access."""
-    assert ccxt.__version__ == "4.5.85"
+    """Exercise CCXT 4.5.92 and record the raw endpoint requests without network access."""
+    assert ccxt.__version__ == "4.5.92"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     route_params = exchange._portfolio_margin_params({"subType": "linear"})
@@ -2178,8 +2178,8 @@ def test_binance_portfolio_margin_ccxt_raw_routes(default_conf, mocker, markets)
 def test_binance_portfolio_margin_ccxt_algo_raw_routes(
     default_conf, mocker, markets, side, stop_price, stoploss_type, order_type
 ):
-    """Use CCXT 4.5.85 signing with a fake transport for the full Algo lifecycle."""
-    assert ccxt.__version__ == "4.5.85"
+    """Use CCXT 4.5.92 signing with a fake transport for the full Algo lifecycle."""
+    assert ccxt.__version__ == "4.5.92"
     pair = "ETH/USDT:USDT"
     market = deepcopy(markets[pair])
     market["id"] = "ETHUSDT"
@@ -2327,7 +2327,7 @@ def test_binance_portfolio_margin_ccxt_algo_raw_routes(
 
 
 def test_binance_portfolio_margin_ccxt_disables_transport_retry():
-    assert ccxt.__version__ == "4.5.85"
+    assert ccxt.__version__ == "4.5.92"
     api = ccxt.binance(
         {
             "enableRateLimit": False,
@@ -2347,7 +2347,7 @@ def test_binance_portfolio_margin_ccxt_disables_transport_retry():
     with pytest.raises(ccxt.RequestTimeout):
         api.fetch2(
             "um/order",
-            "papi",
+            ["papi"],
             "POST",
             {
                 "symbol": "ETHUSDT",
@@ -2362,7 +2362,7 @@ def test_binance_portfolio_margin_ccxt_disables_transport_retry():
 
 def test_binance_portfolio_margin_ccxt_market_loading_avoids_signed_sapi(default_conf, mocker):
     """Authenticated market loading must use only public linear-market metadata."""
-    assert ccxt.__version__ == "4.5.85"
+    assert ccxt.__version__ == "4.5.92"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     raw_ccxt_config = deep_merge_dicts(
@@ -2390,8 +2390,8 @@ def test_binance_portfolio_margin_ccxt_market_loading_avoids_signed_sapi(default
 def test_binance_portfolio_margin_ccxt_public_bid_ask_routes(
     default_conf, mocker, markets, single_symbol
 ):
-    """Keep CCXT 4.5.85 futures quotes public for single-symbol and bulk responses."""
-    assert ccxt.__version__ == "4.5.85"
+    """Keep CCXT 4.5.92 futures quotes public for single-symbol and bulk responses."""
+    assert ccxt.__version__ == "4.5.92"
     conf = portfolio_margin_conf(default_conf)
     exchange = get_patched_exchange(mocker, conf, exchange="binance")
     raw_ccxt_config = deep_merge_dicts(
@@ -2512,7 +2512,7 @@ def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
     assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
     api_mock.request.assert_called_once_with(
         "um/algo/algoOrder",
-        "papi",
+        ["papi"],
         "GET",
         {
             "algoId": "73",
@@ -2527,8 +2527,8 @@ def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
     api_mock.request.side_effect = [ccxt.OrderNotFound("not open"), [order]]
     assert exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")["id"] == "73"
     assert [call.args[:3] for call in api_mock.request.call_args_list] == [
-        ("um/algo/algoOrder", "papi", "GET"),
-        ("um/algo/allAlgoOrders", "papi", "GET"),
+        ("um/algo/algoOrder", ["papi"], "GET"),
+        ("um/algo/allAlgoOrders", ["papi"], "GET"),
     ]
     assert api_mock.request.call_args_list[1].args[3] == {
         "symbol": "ETHUSDT",
@@ -2977,7 +2977,7 @@ def test_binance_portfolio_margin_recovers_unknown_stoploss(default_conf, mocker
     assert [call.args[2] for call in api_mock.request.call_args_list] == ["POST", "GET"]
     post_calls = [call for call in api_mock.request.call_args_list if call.args[2] == "POST"]
     assert len(post_calls) == 1
-    assert post_calls[0].args[:3] == ("um/algo/order", "papi", "POST")
+    assert post_calls[0].args[:3] == ("um/algo/order", ["papi"], "POST")
     assert post_calls[0].args[3]["clientAlgoId"] == "ftpm-stop"
     assert post_calls[0].args[3]["algoType"] == "CONDITIONAL"
     assert {"strategyType", "stopPrice", "newClientStrategyId"}.isdisjoint(post_calls[0].args[3])
@@ -3556,7 +3556,7 @@ def test_binance_portfolio_margin_stoploss_failure_forces_emergency_exit(
         )
     assert type(exc_info.value) is InvalidOrderException
     assert api_mock.request.call_count == 1
-    assert api_mock.request.call_args.args[:3] == ("um/algo/order", "papi", "POST")
+    assert api_mock.request.call_args.args[:3] == ("um/algo/order", ["papi"], "POST")
     api_mock.create_order.assert_not_called()
     api_mock.fetch_orders.assert_not_called()
 
@@ -3609,8 +3609,8 @@ def test_binance_portfolio_margin_delayed_unknown_stop_is_cancelled_after_emerge
     # Creation performs only the one configured fast recovery query. The
     # post-emergency cleanup owns all delayed visibility polling.
     assert [call.args[:3] for call in api_mock.request.call_args_list] == [
-        ("um/algo/order", "papi", "POST"),
-        ("um/algo/allAlgoOrders", "papi", "GET"),
+        ("um/algo/order", ["papi"], "POST"),
+        ("um/algo/allAlgoOrders", ["papi"], "GET"),
     ]
     sleep_mock.assert_not_called()
     assert exchange.cleanup_portfolio_margin_unknown_conditional_order("ETH/USDT:USDT")
@@ -3622,17 +3622,17 @@ def test_binance_portfolio_margin_delayed_unknown_stop_is_cancelled_after_emerge
     }
     cleanup_calls = api_mock.request.call_args_list[2:]
     assert [call.args[:3] for call in cleanup_calls] == [
-        ("um/algo/openAlgoOrders", "papi", "GET"),
-        ("um/algo/openAlgoOrders", "papi", "GET"),
-        ("um/algo/order", "papi", "DELETE"),
-        ("um/algo/openAlgoOrders", "papi", "GET"),
-        ("um/algo/openAlgoOrders", "papi", "GET"),
-        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
+        ("um/algo/order", ["papi"], "DELETE"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
     ]
     assert [
         call.args[3]
         for call in cleanup_calls
-        if call.args[:3] == ("um/algo/openAlgoOrders", "papi", "GET")
+        if call.args[:3] == ("um/algo/openAlgoOrders", ["papi"], "GET")
     ] == [open_params] * 5
     delete_call = next(call for call in cleanup_calls if call.args[2] == "DELETE")
     assert delete_call.args[3] == {
@@ -3858,7 +3858,7 @@ def test_binance_portfolio_margin_reduce_only_uses_independent_risk_reduction_in
             api_mock.request.call_count == exchange._portfolio_conditional_cleanup_stable_snapshots
         )
         assert all(
-            call.args[:3] == ("um/algo/openAlgoOrders", "papi", "GET")
+            call.args[:3] == ("um/algo/openAlgoOrders", ["papi"], "GET")
             and call.args[3]["symbol"] == "ETHUSDT"
             for call in api_mock.request.call_args_list
         )
@@ -4254,7 +4254,7 @@ def test_binance_portfolio_margin_restart_contains_post_cleanup_kill_point(
             restarted.validate_existing_positions({}, [])
         assert json.loads(state_path.read_text(encoding="utf-8"))["intents"] == []
         assert all(
-            call.args[:3] == ("um/algo/openAlgoOrders", "papi", "GET")
+            call.args[:3] == ("um/algo/openAlgoOrders", ["papi"], "GET")
             and call.args[3]["symbol"] == "ETHUSDT"
             for call in recovery_api.request.call_args_list
         )
@@ -5396,7 +5396,7 @@ def test_binance_portfolio_margin_rejects_untracked_open_orders(
     )
     api_mock.request.assert_called_once_with(
         "um/algo/openAlgoOrders",
-        "papi",
+        ["papi"],
         "GET",
         {
             "algoType": "CONDITIONAL",
@@ -5485,8 +5485,8 @@ def test_binance_portfolio_margin_restart_detects_delayed_conditional_order(defa
         },
     ]
     assert [call.args[:3] for call in api_mock.request.call_args_list] == [
-        ("um/algo/openAlgoOrders", "papi", "GET"),
-        ("um/algo/openAlgoOrders", "papi", "GET"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
+        ("um/algo/openAlgoOrders", ["papi"], "GET"),
     ]
     assert [call.args[3] for call in api_mock.request.call_args_list] == [
         {
@@ -5999,6 +5999,56 @@ async def test__async_get_trade_history_id_binance_fast(
     exchange.close()
 
 
+@pytest.mark.parametrize(
+    "trading_mode,error,expected_calls,expect_listing_date",
+    [
+        (TradingMode.SPOT, None, 1, True),
+        (TradingMode.SPOT, ccxt.ExchangeError("binance -4166"), 1, False),
+        (TradingMode.FUTURES, None, 0, False),
+    ],
+)
+async def test__async_get_trade_history_id_binance_fast_listing_probe(
+    default_conf_usdt,
+    mocker,
+    fetch_trades_result,
+    caplog,
+    trading_mode,
+    error,
+    expected_calls,
+    expect_listing_date,
+):
+    default_conf_usdt["exchange"]["only_from_ccxt"] = False
+    default_conf_usdt["trading_mode"] = trading_mode
+    default_conf_usdt["margin_mode"] = MarginMode.ISOLATED
+    exchange = get_patched_exchange(mocker, default_conf_usdt, exchange="binance")
+    pair = "ETH/USDT:USDT" if trading_mode == TradingMode.FUTURES else "ETH/BTC"
+
+    listing_trades = fetch_trades_result[1:3]
+    exchange._api_async.fetch_trades = AsyncMock(return_value=listing_trades, side_effect=error)
+    dl_mock = mocker.patch(
+        "freqtrade.exchange.binance.download_archive_trades",
+        return_value=(pair, trades_dict_to_list(fetch_trades_result[-2:])),
+    )
+
+    since = fetch_trades_result[0]["timestamp"]
+    ret = await exchange._async_get_trade_history_id(
+        pair, since=since, until=fetch_trades_result[-1]["timestamp"] - 1
+    )
+
+    assert ret[0] == pair
+    assert len(ret[1]) == 2
+    assert exchange._api_async.fetch_trades.call_count == expected_calls
+    if expected_calls:
+        call = exchange._api_async.fetch_trades.call_args_list[0]
+        assert call[1]["params"] == {"fromId": "0"}
+    expected_since = listing_trades[0]["timestamp"] if expect_listing_date else since
+    assert dl_mock.call_args[1]["since_ms"] == expected_since
+    assert log_has_re(r"Could not determine listing date for .*", caplog) == bool(error)
+
+    # Clean up event loop to avoid warnings
+    exchange.close()
+
+
 def test_check_delisting_time_binance(default_conf_usdt, mocker):
     exchange = get_patched_exchange(mocker, default_conf_usdt, exchange="binance")
     exchange._config["runmode"] = RunMode.BACKTEST
@@ -6107,24 +6157,68 @@ def test_binance_portfolio_dca_signing_lease_expires_and_is_single_use(
     }
     at = Clock(2026, 10, 24, 1, 0, tzinfo=UTC)
     with pytest.raises(InvalidOrderException, match="expired"):
-        api.sign("um/order", "papi", "POST", params)
+        api.sign("um/order", ["papi"], "POST", params)
     exchange.arm_portfolio_dca_entry("ETH/USDT:USDT", "buy", 2000.0, "PO", at)
     timer.return_value = 151.0
     with pytest.raises(InvalidOrderException, match="expired"):
-        api.sign("um/order", "papi", "POST", params)
+        api.sign("um/order", ["papi"], "POST", params)
     signed.assert_not_called()
     timer.return_value = 100.0
     exchange.arm_portfolio_dca_entry("ETH/USDT:USDT", "buy", 2000.0, "PO", at)
     with pytest.raises(InvalidOrderException, match="differs"):
-        api.sign("um/order", "papi", "POST", {**params, "price": "2001.0"})
+        api.sign("um/order", ["papi"], "POST", {**params, "price": "2001.0"})
     signed.assert_not_called()
-    api.sign("um/order", "papi", "POST", params)
+    api.sign("um/order", ["papi"], "POST", params)
     assert signed.call_count == 1
     with pytest.raises(InvalidOrderException, match="expired"):
-        api.sign("um/order", "papi", "POST", params)
+        api.sign("um/order", ["papi"], "POST", params)
     # Protective exits do not depend on a stale entry signal.
-    api.sign("um/order", "papi", "POST", {"reduceOnly": True})
+    api.sign("um/order", ["papi"], "POST", {"reduceOnly": True})
     assert signed.call_count == 2
+
+
+def test_binance_portfolio_dca_guard_with_real_ccxt_signer(default_conf, mocker, tmp_path, markets):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 24, 1, 0, 10, tzinfo=UTC)
+
+    mocker.patch("freqtrade.exchange.binance.datetime", Clock)
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_dca_conf(default_conf, tmp_path),
+        portfolio_margin_live_api_mock(),
+        exchange="binance",
+    )
+    pair = "ETH/USDT:USDT"
+    market = deepcopy(markets[pair])
+    market["id"] = "ETHUSDT"
+    api = ccxt.binance({"apiKey": "test-api-key", "secret": "test-api-secret"})
+    api.set_markets([market])
+    exchange._api = api
+    exchange._install_portfolio_dca_submission_guard()
+    mocker.patch.object(exchange, "price_to_precision", side_effect=lambda pair, rate: rate)
+    exchange._portfolio_active_client_order_id = "ftpm-real-sign"
+    params = {
+        "symbol": "ETHUSDT",
+        "side": "BUY",
+        "type": "LIMIT",
+        "timeInForce": "GTX",
+        "price": "2000.0",
+        "newClientOrderId": "ftpm-real-sign",
+    }
+    with pytest.raises(InvalidOrderException, match="expired"):
+        api.sign("um/order", ["papi"], "POST", params)
+    exchange.arm_portfolio_dca_entry(
+        pair, "buy", 2000.0, "PO", Clock(2026, 10, 24, 1, 0, tzinfo=UTC)
+    )
+    signed = api.sign("um/order", ["papi"], "POST", params)
+    assert urlparse(signed["url"]).path == "/papi/v1/um/order"
+    assert parse_qs(signed["body"])["newClientOrderId"] == ["ftpm-real-sign"]
+    with pytest.raises(InvalidOrderException, match="expired"):
+        api.sign("um/order", ["papi"], "POST", params)
+    # Protective exits still sign without a fresh entry lease; no HTTP is sent.
+    assert api.sign("um/order", ["papi"], "POST", {"reduceOnly": True})
 
 
 def test_binance_portfolio_dca_expiry_after_intent_never_submits(default_conf, mocker, tmp_path):
@@ -6146,7 +6240,7 @@ def test_binance_portfolio_dca_expiry_after_intent_never_submits(default_conf, m
     def delayed_submission(**kwargs):
         assert len(store.intents) == 1
         timer.return_value = 151.0
-        api.sign("um/order", "papi", "POST", {"side": "BUY"})
+        api.sign("um/order", ["papi"], "POST", {"side": "BUY"})
 
     submit = mocker.patch(EXMS + ".create_order", side_effect=delayed_submission)
     recover = mocker.patch.object(exchange, "_recover_portfolio_order")

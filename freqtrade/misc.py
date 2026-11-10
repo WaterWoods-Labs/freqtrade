@@ -145,12 +145,13 @@ def round_dict(d, n):
 DictMap = dict[str, Any] | Mapping[str, Any]
 
 
-def safe_value_nested(obj: DictMap, keys: str, default_value=None):
+def safe_value_nested(obj: DictMap, keys: str, default_value=None, *, preserve_none=False):
     """
     Search a nested dict for a value.
     :param obj: dict to search in
     :param keys: dot separated keys to search for
     :param default_value: value to return if the key is not found or value is None
+    :param preserve_none: if True, will consider None as a valid value
     :return: value found in dict or default_value
      Sample:
     >>> d = { 'first' : { 'rows' : { 'pass' : 'dog', 'number' : '1' } } }
@@ -159,7 +160,11 @@ def safe_value_nested(obj: DictMap, keys: str, default_value=None):
     """
     nested_obj = obj
     for key in keys.split("."):
-        if isinstance(nested_obj, Mapping) and key in nested_obj and nested_obj[key] is not None:
+        if (
+            isinstance(nested_obj, Mapping)
+            and key in nested_obj
+            and (nested_obj[key] is not None or preserve_none)
+        ):
             nested_obj = nested_obj[key]
         else:
             return default_value
@@ -246,7 +251,7 @@ def json_to_dataframe(data: str) -> pd.DataFrame:
     """
     dataframe = pd.read_json(StringIO(data), orient="split")
     if "date" in dataframe.columns:
-        dataframe["date"] = pd.to_datetime(dataframe["date"], unit="ms", utc=True)
+        dataframe["date"] = pd.to_datetime(dataframe["date"], unit="ms", utc=True).dt.as_unit("ms")
 
     return dataframe
 
@@ -280,6 +285,6 @@ def append_candles_to_dataframe(left: pd.DataFrame, right: pd.DataFrame) -> pd.D
 
     # Only keep the last 1500 candles in memory
     left = left[-1500:] if len(left) > 1500 else left
-    left.reset_index(drop=True, inplace=True)
+    left = left.reset_index(drop=True)
 
     return left
