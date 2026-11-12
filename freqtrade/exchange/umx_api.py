@@ -714,11 +714,49 @@ class UMXSync(UMXStoploss):
         )
         return self._parse_order(payload.get("data") or {}, symbol=symbol)
 
-    def fetch_order_by_client_id(self, client_order_id: str, symbol: str) -> dict[str, Any]:
-        payload = self.client.order_info({"clientOrderId": client_order_id, "orderFilter": "order"})
+    def fetch_order_by_client_id(
+        self, client_order_id: str, symbol: str, *, order_id: str | None = None
+    ) -> dict[str, Any]:
+        request = {"clientOrderId": client_order_id, "orderFilter": "order"}
+        if order_id:
+            request["orderId"] = order_id
+        try:
+            payload = self.client.order_info(request)
+        except ccxt.OrderNotFound:
+            if not order_id:
+                raise
+            history = self.client.request(
+                "GET",
+                "/v2/history/orders",
+                private=True,
+                params=self.client.private_params(
+                    {
+                        "orderId": order_id,
+                        "symbol": self.market_id(symbol),
+                        "businessType": self._business_type(symbol),
+                        "orderFilter": "order",
+                        "limit": 100,
+                    }
+                ),
+            ).get("data")
+            if not isinstance(history, list) or len(history) != 1:
+                raise ccxt.OrderNotFound("UMX exact historical order is unavailable") from None
+            payload = {"data": history[0]}
         raw = payload.get("data")
-        if not isinstance(raw, dict) or raw.get("clientOrderId") != client_order_id:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("clientOrderId") != client_order_id
+            or raw.get("symbol") != self.market_id(symbol)
+            or (order_id and str(raw.get("orderId")) != order_id)
+            or raw.get("totalFillQty") is None
+        ):
             raise ccxt.ExchangeError("UMX client order identity cannot be established")
+        try:
+            filled = float(raw["totalFillQty"])
+        except (TypeError, ValueError) as exc:
+            raise ccxt.ExchangeError("UMX exact order fill evidence is invalid") from exc
+        if not math.isfinite(filled) or filled < 0:
+            raise ccxt.ExchangeError("UMX exact order fill evidence is invalid")
         return self._parse_order(raw, symbol=symbol)
 
     def fetch_open_orders(

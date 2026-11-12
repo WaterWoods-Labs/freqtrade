@@ -134,6 +134,12 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
   still pending. Attached entry stops are sent atomically with PO or limit-IOC entries
   when configured; adoption requires the actual position quantity and an equal or tighter trigger.
   Venue activation during partial fills and remainder cancellation still require live evidence.
+- After DCA fills, owned attached stops may cover only individual entry fragments. For a request
+  matching the full current position, the adapter creates and reads back a full-size position stop
+  before canceling those fragments. It verifies the replacement and position before each cancel,
+  reads every cancellation result, and rechecks the final position. A retry adopts an already
+  visible matching replacement. Failed or uncertain creation leaves existing fragments intact;
+  unexpected direction, size, ownership or trigger state is not silently discarded.
 - Observed attached stops (`ftsa` client IDs) use `untrigger` while waiting, and report the
   entry direction in their raw `side`. The stop adapter accepts `untrigger` and legacy `live`
   as open/cancellable states. It matches an attached stop using that entry direction and exposes

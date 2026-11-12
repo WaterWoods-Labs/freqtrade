@@ -16,9 +16,16 @@ UMX entry client IDs contain only 1-32 ASCII letters or digits, as required by t
 [order endpoint](https://www.umx.com/docs/coin-apis/trading/regular-trading/place-order).
 Generated budget IDs use `ftbr` followed by 24 hexadecimal characters. Invalid supplied IDs
 are rejected before reserving capacity or sending an order. Exact-order lookup failures and
-unresolved submissions use the native entry-error path: they retain the reservation and block
-new entries while normal exit processing remains available. A query miss never clears an intent
-or authorizes another submission.
+unresolved submissions use the native entry-error path. Unknown submission outcomes block all
+new entries while normal exit processing remains available. An acknowledged order whose exact
+terminal evidence is unavailable retains its full reservation and prevents a fresh entry in that
+pair; unrelated pairs may use the remaining budget after complete account checks. A query miss
+never clears an intent or authorizes resubmitting that intent.
+
+Recovery prefers the acknowledged venue order ID and falls back to exact-ID historical orders.
+Exact terminal GET evidence is persisted before native zero-fill trade cleanup and survives venue
+history expiry. Recovery saves progress for other entries even when one lookup fails. Release still
+requires the terminal identity and two complete flat account observations at least 60 seconds apart.
 
 Budgets may be lowered without changing or deleting the namespace/state. Entry-limit rejection
 uses the native invalid-order path so normal exit processing remains available. Reduce-only exits

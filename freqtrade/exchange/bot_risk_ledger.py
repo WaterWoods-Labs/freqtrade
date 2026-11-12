@@ -1,6 +1,7 @@
 """Durable single-account entry reservations; unknown outcomes never authorize resubmission."""
 
 import json
+import logging
 import math
 import os
 import time
@@ -9,7 +10,10 @@ from pathlib import Path
 from filelock import FileLock
 
 from freqtrade.bot_risk import positive, validate_bot_risk
-from freqtrade.exceptions import InvalidOrderException, OperationalException
+from freqtrade.exceptions import InvalidOrderException, OperationalException, TemporaryError
+
+
+logger = logging.getLogger(__name__)
 
 
 class EntryLedger:
@@ -94,7 +98,7 @@ class EntryLedger:
             counts = dict.fromkeys(limits, 0)
             for entry in state["entries"].values():
                 if entry["pair"] == pair and entry.get("side") != side:
-                    raise OperationalException("Add direction differs from its reserved entry")
+                    raise InvalidOrderException("Add direction differs from its reserved entry")
                 reserved[entry["pair"]] += entry["notional"]
                 counts[entry["pair"]] += 1
             effective = {p: max(exposure[p], reserved[p]) for p in limits}
@@ -106,7 +110,7 @@ class EntryLedger:
                 or (initial and effective[pair] > 1e-9)
                 or (not initial and (counts[pair] != 1 or exposure[pair] <= 0))
             ):
-                raise OperationalException(
+                raise InvalidOrderException(
                     "Entry conflicts with pending/unknown position or add count"
                 )
             if not initial and any(
@@ -114,7 +118,7 @@ class EntryLedger:
                 for entry in state["entries"].values()
                 if entry["pair"] == pair
             ):
-                raise OperationalException("Add requires exact terminal fill evidence")
+                raise InvalidOrderException("Add requires exact terminal fill evidence")
             occupied = sum(v > 1e-9 for v in effective.values())
             if (
                 (effective[pair] == 0 and occupied >= self.risk["max_occupied_symbols"])
@@ -148,7 +152,46 @@ class EntryLedger:
             self.save(state)
             return result
 
-    def reconcile_flat(self, query, snapshot, *, now=None):
+    @staticmethod
+    def _terminal_matches(client_id, entry, order):
+        return (
+            isinstance(order, dict)
+            and bool(order.get("id"))
+            and (not entry.get("order_id") or str(order["id"]) == entry["order_id"])
+            and order.get("clientOrderId") == client_id
+            and order.get("symbol") == entry["pair"]
+            and order.get("side") == entry["side"]
+            and order.get("status") in {"closed", "canceled", "expired", "rejected"}
+            and type(order.get("filled")) in (int, float)
+            and math.isfinite(order["filled"])
+            and order["filled"] >= 0
+        )
+
+    def record_terminal(self, order):
+        """Persist exact GET evidence before native zero-fill trades can be deleted."""
+        if not isinstance(order, dict) or not order.get("clientOrderId"):
+            return
+        with self.lock:
+            state = self.load()
+            client_id = order["clientOrderId"]
+            entry = state["entries"].get(client_id)
+            if entry is None or not self._terminal_matches(client_id, entry, order):
+                return
+            terminal = {
+                key: order[key]
+                for key in ("id", "clientOrderId", "symbol", "side", "status", "filled")
+            }
+            if entry.get("terminal_order") == terminal:
+                return
+            entry.update(
+                outcome="confirmed",
+                order_id=str(order["id"]),
+                terminal_filled=order["filled"] > 0,
+                terminal_order=terminal,
+            )
+            self.save(state)
+
+    def reconcile_flat(self, query, snapshot, *, now=None, query_known=None):
         """GET-only recovery; every exact order terminal and flat twice, >=60 seconds apart.
 
         Unknown exact orders stay reserved. No administrative clear/delete escape hatch.
@@ -158,27 +201,43 @@ class EntryLedger:
         with self.lock:
             state = self.load()
             exposure, pending = snapshot()
+            if set(exposure) != set(self.risk["pair_limits"]) or any(
+                type(v) not in (int, float) or not math.isfinite(v) or v < 0
+                for v in exposure.values()
+            ):
+                raise OperationalException("Incomplete account exposure evidence")
+            unresolved_error = None
             for client_id, entry in list(state["entries"].items()):
-                order = query(client_id, entry["pair"])
-                terminal = (
-                    isinstance(order, dict)
-                    and bool(order.get("id"))
-                    and (not entry.get("order_id") or str(order["id"]) == entry["order_id"])
-                    and order.get("clientOrderId") == client_id
-                    and order.get("symbol") == entry["pair"]
-                    and order.get("side") == entry["side"]
-                    and order.get("status") in {"closed", "canceled", "expired", "rejected"}
-                )
+                order = entry.get("terminal_order")
+                if not self._terminal_matches(client_id, entry, order):
+                    try:
+                        order = (
+                            query_known(client_id, entry["pair"], entry["order_id"])
+                            if query_known and entry.get("order_id")
+                            else query(client_id, entry["pair"])
+                        )
+                    except (InvalidOrderException, TemporaryError) as exc:
+                        # A confirmed acknowledgement still reserves this pair and its full
+                        # notional. It need not prevent recovery of unrelated entries. Unknown
+                        # submissions continue to block ALL new entries in submit().
+                        entry.pop("flat_since", None)
+                        if entry.get("outcome") != "confirmed":
+                            unresolved_error = exc
+                        logger.warning(
+                            "UMX entry recovery pending for %s (%s); reservation kept",
+                            entry["pair"],
+                            type(exc).__name__,
+                        )
+                        continue
+                terminal = self._terminal_matches(client_id, entry, order)
                 filled = order.get("filled") if isinstance(order, dict) else None
-                terminal = (
-                    terminal
-                    and type(filled) in (int, float)
-                    and math.isfinite(filled)
-                    and filled >= 0
-                )
                 entry["terminal_filled"] = bool(terminal and filled > 0)
                 if terminal:
                     entry.update(outcome="confirmed", order_id=str(order["id"]))
+                    entry["terminal_order"] = {
+                        key: order[key]
+                        for key in ("id", "clientOrderId", "symbol", "side", "status", "filled")
+                    }
                 flat = (
                     terminal
                     and entry["pair"] in exposure
@@ -192,4 +251,6 @@ class EntryLedger:
                 else:
                     entry.pop("flat_since", None)
             self.save(state)
+            if unresolved_error is not None:
+                raise unresolved_error
             return len(state["entries"])

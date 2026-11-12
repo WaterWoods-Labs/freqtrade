@@ -155,6 +155,104 @@ ATTACHED_CASES = [
 ]
 
 
+@pytest.fixture(params=ATTACHED_CASES)
+def dca_api(request):
+    position_side, entry_side, exit_side, stop = request.param
+    api = attached_api(position_side, entry_side, stop)
+    api.fetch_positions.return_value = [{"side": position_side, "contracts": 2}]
+    second = deepcopy(api._test_rows[0])
+    second.update(complexOId="attached2", qty="0.005")
+    second["tpslOrder"].update(tpslClOrdId="ftsa2", stopLoss=str(stop * 1.01))
+    api._test_rows.append(second)
+    api._test_events = []
+    api._test_timeout = False
+    api._test_cancel_race = False
+    api._test_exit_side = exit_side
+    api._test_stop = stop
+
+    def transport(method, path, **kwargs):
+        if path == "/v2/trade/stopPosition":
+            data = kwargs["data"]
+            assert all(r["status"] == "untrigger" for r in api._test_rows)
+            assert data["tpslQty"] == "0.02"
+            row = deepcopy(api._test_rows[0])
+            row.update(complexOId="combined", qty="0.02", side=exit_side, status="live")
+            row["tpslOrder"].update(tpslClOrdId=data["tpslClOrdId"], stopLoss=data["stopLoss"])
+            api._test_rows.append(row)
+            api._test_events.append("create")
+            if api._test_timeout:
+                raise ccxt.RequestTimeout("response lost after venue acceptance")
+            return {"data": {"orderId": "combined"}}
+        if path == "/v1/trade/cancelComplex":
+            order_id = kwargs["data"]["complexOId"]
+            assert api._test_rows[-1]["status"] == "live"
+            assert api._test_events.count("verify") >= 2
+            row = next(r for r in api._test_rows if r["complexOId"] == order_id)
+            row["status"] = "canceled"
+            api._test_events.append(order_id)
+            if api._test_cancel_race:
+                api.fetch_positions.return_value = []
+            return {"data": {"complexOId": order_id}}
+        if path == "/v2/trade/openOrderComplex":
+            if any(r["complexOId"] == "combined" for r in api._test_rows):
+                api._test_events.append("verify")
+            return {"data": [r for r in api._test_rows if r["status"] in {"live", "untrigger"}]}
+        if path == "/v2/history/orderComplexs":
+            return {"data": [r for r in api._test_rows if r["status"] == "canceled"]}
+        raise AssertionError(path)
+
+    api.client.request.side_effect = transport
+    return api
+
+
+def create_dca_stop(api):
+    return api.create_order(
+        PAIR,
+        "stop_market",
+        api._test_exit_side,
+        2,
+        params={"reduceOnly": True, "stopLossPrice": api._test_stop},
+    )
+
+
+def test_dca_full_stop_is_verified_before_retiring_partial_entry_protection(dca_api):
+    order = create_dca_stop(dca_api)
+    assert order["id"] == "combined" and order["amount"] == 2 and order["status"] == "open"
+    assert [r["status"] for r in dca_api._test_rows] == ["canceled", "canceled", "live"]
+    assert create_dca_stop(dca_api)["id"] == "combined"
+    assert dca_api._test_events.count("create") == 1
+
+
+def test_dca_timeout_retains_fragments_and_retry_adopts_accepted_full_stop(dca_api):
+    dca_api._test_timeout = True
+    with pytest.raises(ccxt.RequestTimeout):
+        create_dca_stop(dca_api)
+    assert [r["status"] for r in dca_api._test_rows] == ["untrigger", "untrigger", "live"]
+    assert create_dca_stop(dca_api)["id"] == "combined"
+    assert dca_api._test_events.count("create") == 1
+
+
+def test_dca_position_change_stops_further_cancellation(dca_api):
+    dca_api._test_cancel_race = True
+    with pytest.raises(ccxt.ExchangeError, match="position changed"):
+        create_dca_stop(dca_api)
+    assert [r["status"] for r in dca_api._test_rows] == ["canceled", "untrigger", "live"]
+
+
+def test_dca_failed_creation_preserves_every_existing_stop(dca_api):
+    transport = dca_api.client.request.side_effect
+
+    def reject(method, path, **kwargs):
+        if path == "/v2/trade/stopPosition":
+            raise ccxt.ExchangeError("unavailable")
+        return transport(method, path, **kwargs)
+
+    dca_api.client.request.side_effect = reject
+    with pytest.raises(ccxt.ExchangeError, match="unavailable"):
+        create_dca_stop(dca_api)
+    assert [r["status"] for r in dca_api._test_rows] == ["untrigger", "untrigger"]
+
+
 def attached_api(position_side, entry_side, stop):
     """API mock carrying one live-observed attached (ftsa*) untrigger TPSL row."""
     api = object.__new__(UMXSync)

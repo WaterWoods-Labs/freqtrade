@@ -109,33 +109,32 @@ class UMXStoploss:
         if amount > positions[0]["contracts"] + 1e-10:
             raise ccxt.InvalidOrder("UMX stop-loss quantity exceeds the current position")
         qty = Decimal(str(amount)) * Decimal(str(self._contract_size(symbol)))
-        # A prior timeout may have placed the protection. Adopt an exact owned match.
-        # Venue rows for attached (ftsa*) protections carry the entry side; independent
-        # (ftsl*) stops carry the exit side requested here.
-        entry_side = "buy" if side == "sell" else "sell"
-        matches = []
-        for row in self._stop_rows(symbol):
-            info = self._stop_info(row)
-            client_id = str(info.get("tpslClOrdId", ""))
-            if client_id.startswith(("ftsl", "ftsa")):
-                attached = client_id.startswith("ftsa")
-                accepted_stop = float(info.get("stopLoss", 0))
-                protective = accepted_stop >= stop if side == "sell" else 0 < accepted_stop <= stop
-                if (
-                    row.get("side") != (entry_side if attached else side)
-                    or (not attached and info.get("tpslMode") != "partially_position")
-                    or not math.isclose(float(row.get("qty", 0)), qty)
-                    or (not protective if attached else not math.isclose(accepted_stop, stop))
-                    or info.get("slOrderType") != "market"
-                    or info.get("stopLossType") != "last_price"
-                ):
-                    raise ccxt.InvalidOrder("Conflicting existing UMX stop protection")
-                matches.append(row)
+        matches, attached_parts = self._matching_stops(symbol, side, qty, stop)
+        if attached_parts and (
+            not math.isclose(amount, positions[0]["contracts"])
+            or sum(float(row["qty"]) for row in attached_parts) > float(qty) + 1e-10
+            or len({str(row["complexOId"]) for row in attached_parts}) != len(attached_parts)
+        ):
+            raise ccxt.InvalidOrder("Conflicting existing UMX stop protection quantities")
         if len(matches) > 1:
             raise ccxt.InvalidOrder("Multiple existing UMX stop protections require reconciliation")
         if matches:
+            if attached_parts:
+                self._retire_attached_parts(symbol, side, amount, matches[0], attached_parts)
             return self._parse_stoploss(matches[0], symbol)
-        client_id = "ftsl" + uuid4().hex[:28]
+        client_id = "ftsl" + (
+            hashlib.sha256(
+                (
+                    symbol
+                    + side
+                    + str(qty)
+                    + str(stop)
+                    + "|".join(sorted(str(row["complexOId"]) for row in attached_parts))
+                ).encode()
+            ).hexdigest()[:28]
+            if attached_parts
+            else uuid4().hex[:28]
+        )
         payload = self.client.request(
             "POST",
             "/v2/trade/stopPosition",
@@ -167,9 +166,82 @@ class UMXStoploss:
             or accepted.get("side") != side
             or not math.isclose(float(accepted.get("qty", 0)), qty)
             or not math.isclose(float(info.get("stopLoss", 0)), stop)
+            or accepted.get("status") not in {"live", "untrigger"}
         ):
             raise ccxt.ExchangeError("UMX accepted protection differs from the requested stop")
+        if attached_parts:
+            self._retire_attached_parts(symbol, side, amount, accepted, attached_parts)
         return self._parse_stoploss(accepted, symbol)
+
+    def _matching_stops(self, symbol, side, qty, stop):
+        # A prior timeout may have placed the protection. Adopt an exact owned match.
+        # Venue rows for attached (ftsa*) protections carry the entry side; independent
+        # (ftsl*) stops carry the exit side requested here.
+        entry_side = "buy" if side == "sell" else "sell"
+        matches = []
+        attached_parts = []
+        for row in self._stop_rows(symbol):
+            info = self._stop_info(row)
+            client_id = str(info.get("tpslClOrdId", ""))
+            if client_id.startswith(("ftsl", "ftsa")):
+                attached = client_id.startswith("ftsa")
+                accepted_stop = float(info.get("stopLoss", 0))
+                part_qty = float(row.get("qty", 0))
+                protective = accepted_stop >= stop if side == "sell" else 0 < accepted_stop <= stop
+                # DCA entries attach a stop for their own fill, not the combined position.
+                # Keep those protections until a verified full-size replacement is live.
+                partial = attached and 0 < part_qty < float(qty) and math.isfinite(part_qty)
+                if (
+                    row.get("side") != (entry_side if attached else side)
+                    or (not attached and info.get("tpslMode") != "partially_position")
+                    or (not partial and not math.isclose(part_qty, qty))
+                    or not math.isfinite(accepted_stop)
+                    or accepted_stop <= 0
+                    or (
+                        not partial
+                        and (not protective if attached else not math.isclose(accepted_stop, stop))
+                    )
+                    or info.get("slOrderType") != "market"
+                    or info.get("stopLossType") != "last_price"
+                    or row.get("status") not in {"live", "untrigger"}
+                    or not row.get("complexOId")
+                ):
+                    raise ccxt.InvalidOrder("Conflicting existing UMX stop protection")
+                if partial:
+                    attached_parts.append(row)
+                else:
+                    matches.append(row)
+            else:
+                raise ccxt.InvalidOrder("Unowned UMX stop protection requires reconciliation")
+        return matches, attached_parts
+
+    def _retire_attached_parts(self, symbol, side, amount, replacement, parts):
+        """Protect first; cancel only owned entry fragments and read back every outcome."""
+        expected_side = "long" if side == "sell" else "short"
+        for part in parts:
+            positions = [p for p in self.fetch_positions([symbol]) if p.get("contracts", 0) > 0]
+            if (
+                len(positions) != 1
+                or positions[0]["side"] != expected_side
+                or not math.isclose(positions[0]["contracts"], amount)
+            ):
+                raise ccxt.ExchangeError("UMX position changed during stop consolidation")
+            active = self._fetch_stoploss(str(replacement["complexOId"]), symbol)
+            if active["status"] != "open" or not math.isclose(active["amount"], amount):
+                raise ccxt.ExchangeError(
+                    "UMX replacement stop is not active; old protection retained"
+                )
+            canceled = self._cancel_stoploss(str(part["complexOId"]), symbol)
+            if canceled["status"] != "canceled":
+                raise ccxt.ExchangeError("UMX attached stop changed during consolidation")
+        # A trigger may race the last cancellation, too. Do not return stale coverage.
+        positions = [p for p in self.fetch_positions([symbol]) if p.get("contracts", 0) > 0]
+        if (
+            len(positions) != 1
+            or positions[0]["side"] != expected_side
+            or not math.isclose(positions[0]["contracts"], amount)
+        ):
+            raise ccxt.ExchangeError("UMX position changed during stop consolidation")
 
     def _find_stoploss(self, order_id, symbol):
         if not symbol:
