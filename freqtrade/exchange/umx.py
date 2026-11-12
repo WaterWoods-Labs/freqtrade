@@ -153,7 +153,11 @@ class UMX(Exchange):
         ):
             raise InvalidOrderException("UMX clientOrderId requires 1-32 ASCII letters or digits")
         ledger = self._bot_risk_ledger()
-        ledger.reconcile_flat(self.fetch_order_by_client_id, self._bot_risk_snapshot)
+        ledger.reconcile_flat(
+            self.fetch_order_by_client_id,
+            self._bot_risk_snapshot,
+            query_known=self.fetch_reserved_order,
+        )
         # Reserve the exact venue-rounded notional, including contract conversion.
         contracts = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
         rounded_amount = self._contracts_to_amount(pair, contracts)
@@ -170,7 +174,23 @@ class UMX(Exchange):
             send=lambda: create(**arguments),
         )
 
-    def fetch_order_by_client_id(self, client_order_id, pair):
+    def fetch_order(self, order_id, pair, params=None):
+        order = super().fetch_order(order_id, pair, params)
+        if "bot_risk" in self._config and not self._config["dry_run"]:
+            raw = order.get("info") or {}
+            # Never cache synthetic cancellation acknowledgements or inferred zero fills.
+            try:
+                fill = float(raw.get("totalFillQty"))
+            except (TypeError, ValueError):
+                fill = -1
+            if isfinite(fill) and fill >= 0 and raw.get("clientOrderId"):
+                self._bot_risk_ledger().record_terminal(order)
+        return order
+
+    def fetch_reserved_order(self, client_order_id, pair, order_id):
+        return self.fetch_order_by_client_id(client_order_id, pair, order_id=order_id)
+
+    def fetch_order_by_client_id(self, client_order_id, pair, *, order_id=None):
         """GET-only recovery of a durable entry intent; a miss never authorizes retry."""
         if self._config["dry_run"]:
             for order in self._dry_run_open_orders.values():
@@ -178,7 +198,11 @@ class UMX(Exchange):
                     return self.fetch_dry_run_order(order["id"])
             raise OperationalException("Unknown simulated entry; private recovery is prohibited")
         try:
-            order = self._api.fetch_order_by_client_id(client_order_id, pair)
+            order = (
+                self._api.fetch_order_by_client_id(client_order_id, pair, order_id=order_id)
+                if order_id
+                else self._api.fetch_order_by_client_id(client_order_id, pair)
+            )
         except ccxt.InvalidOrder as exc:
             raise InvalidOrderException(
                 "UMX exact-order recovery unavailable; entry reservation retained"

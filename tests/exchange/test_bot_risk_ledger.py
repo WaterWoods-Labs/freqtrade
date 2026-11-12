@@ -58,13 +58,13 @@ def test_pending_partial_fill_and_slots_are_reserved(tmp_path):
     def partial():
         return ({"BTC/USDT:USDT": 50, "ETH/USDT:USDT": 0}, {"BTC/USDT:USDT"})
 
-    with pytest.raises(OperationalException, match="pending"):
+    with pytest.raises(InvalidOrderException, match="pending"):
         submit(ledger, "add", partial, initial=False)
 
     def held():
         return ({"BTC/USDT:USDT": 50, "ETH/USDT:USDT": 0}, set())
 
-    with pytest.raises(OperationalException, match="terminal fill"):
+    with pytest.raises(InvalidOrderException, match="terminal fill"):
         submit(ledger, "add", held, initial=False)
 
 
@@ -117,7 +117,7 @@ def test_one_confirmed_same_direction_add_and_third_entry_rejected(tmp_path):
 
     ledger.reconcile_flat(query, held, now=100)
     submit(ledger, "add", held, initial=False)
-    with pytest.raises(OperationalException, match="add count"):
+    with pytest.raises(InvalidOrderException, match="add count"):
         submit(ledger, "third", held, initial=False, amount=1)
 
 
@@ -169,9 +169,106 @@ def test_exact_terminal_response_can_resolve_unknown_but_wrong_order_id_cannot(t
     ledger.reconcile_flat(lambda *args: result, held, now=100)
     assert ledger.load()["entries"]["one"]["outcome"] == "confirmed"
     assert ledger.load()["entries"]["one"]["order_id"] == "venue-one"
+    # A migrated acknowledgement without cached terminal evidence must still reject a
+    # different venue order. A verified immutable terminal cache has its own coverage below.
+    state = ledger.load()
+    state["entries"]["one"].pop("terminal_order")
+    ledger.save(state)
     ledger.reconcile_flat(lambda *args: {**result, "id": "wrong-order"}, flat, now=200)
     ledger.reconcile_flat(lambda *args: {**result, "id": "wrong-order"}, flat, now=300)
     assert len(ledger.load()["entries"]) == 1
+
+
+def test_terminal_evidence_survives_restart_and_venue_history_expiry(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "one", flat)
+    terminal = {
+        "id": "one",
+        "clientOrderId": "one",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+    }
+    ledger.record_terminal(terminal)
+    restarted = EntryLedger(ledger.path, risk())
+    missing = Mock(side_effect=InvalidOrderException("pruned order"))
+    assert restarted.reconcile_flat(missing, flat, now=100) == 1
+    assert restarted.reconcile_flat(missing, flat, now=160) == 0
+    missing.assert_not_called()
+
+
+def test_confirmed_missing_order_keeps_its_capacity_without_blocking_other_pairs(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "missing", flat)
+    missing = Mock(side_effect=InvalidOrderException("pruned order"))
+    assert ledger.reconcile_flat(missing, flat, now=100) == 1
+    assert ledger.reconcile_flat(missing, flat, now=200) == 1
+    submit(ledger, "other", flat, pair="ETH/USDT:USDT")
+    with pytest.raises(InvalidOrderException, match="pending/unknown"):
+        submit(ledger, "retry", flat)
+    assert "flat_since" not in ledger.load()["entries"]["missing"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", "wrong"),
+        ("clientOrderId", "wrong"),
+        ("symbol", "ETH/USDT:USDT"),
+        ("side", "sell"),
+        ("status", "open"),
+        ("filled", None),
+        ("filled", float("nan")),
+        ("filled", -1),
+    ],
+)
+def test_invalid_terminal_evidence_never_enters_cache(tmp_path, field, value):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "one", flat)
+    terminal = {
+        "id": "one",
+        "clientOrderId": "one",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+        field: value,
+    }
+    ledger.record_terminal(terminal)
+    assert "terminal_order" not in ledger.load()["entries"]["one"]
+
+
+def test_reconciliation_saves_other_progress_before_unknown_error(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "known", flat)
+    with pytest.raises(TimeoutError):
+        submit(ledger, "unknown", flat, Mock(side_effect=TimeoutError()), pair="ETH/USDT:USDT")
+
+    def query(cid, pair):
+        if cid == "unknown":
+            raise InvalidOrderException("unknown lookup")
+        return {
+            "id": cid,
+            "clientOrderId": cid,
+            "symbol": pair,
+            "side": "buy",
+            "status": "closed",
+            "filled": 1,
+        }
+
+    with pytest.raises(InvalidOrderException):
+        ledger.reconcile_flat(query, flat, now=100)
+    with pytest.raises(InvalidOrderException):
+        ledger.reconcile_flat(query, flat, now=160)
+    assert set(ledger.load()["entries"]) == {"unknown"}
+
+
+def test_incomplete_flat_snapshot_cannot_release_cached_entry(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "one", flat)
+    with pytest.raises(OperationalException, match="Incomplete"):
+        ledger.reconcile_flat(Mock(), lambda: ({"BTC/USDT:USDT": 0}, set()))
 
 
 def test_adapter_reserves_venue_rounded_notional(mocker):
@@ -200,6 +297,25 @@ def test_adapter_reserves_venue_rounded_notional(mocker):
     )
     assert ledger.submit.call_args.kwargs["notional"] == pytest.approx(100.08)
     assert re.fullmatch(r"[A-Za-z0-9]{1,32}", ledger.submit.call_args.kwargs["client_id"])
+
+
+@pytest.mark.parametrize(
+    "raw_fill,recorded",
+    [("0", True), ("1.2", True), (None, False), ("nan", False), ("invalid", False), (-1, False)],
+)
+def test_adapter_caches_only_explicit_terminal_fill_evidence(mocker, raw_fill, recorded):
+    from freqtrade.exchange import Exchange
+    from freqtrade.exchange.umx import UMX
+
+    exchange = object.__new__(UMX)
+    exchange._exchange_ws = None
+    exchange._config = {"bot_risk": risk(), "dry_run": False}
+    order = {"info": {"clientOrderId": "exact", "totalFillQty": raw_fill}}
+    mocker.patch.object(Exchange, "fetch_order", return_value=order)
+    ledger = Mock()
+    mocker.patch.object(exchange, "_bot_risk_ledger", return_value=ledger)
+    assert exchange.fetch_order("id", "BTC/USDT:USDT") == order
+    assert ledger.record_terminal.called is recorded
 
 
 @pytest.mark.parametrize("client_id", ["ftbr-bad", "", 123, "a" * 33, "订单", " id"])

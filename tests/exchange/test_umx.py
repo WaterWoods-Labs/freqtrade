@@ -49,6 +49,65 @@ def _umx_config(default_conf: dict, *, dry_run: bool = True) -> dict:
     return conf
 
 
+@pytest.mark.parametrize("history", [False, True])
+def test_exact_recovery_uses_acknowledged_id_and_validates_history(mocker, history):
+    api = object.__new__(UMXSync)
+    api.client = mocker.Mock()
+    api.client.private_params.side_effect = lambda p: p
+    api.market_id = mocker.Mock(return_value="BTC-USDT-PERP")
+    api._business_type = mocker.Mock(return_value="linear_perpetual")
+    raw = {
+        "orderId": "123",
+        "clientOrderId": "ftbr1",
+        "symbol": "BTC-USDT-PERP",
+        "totalFillQty": "0",
+        "status": "canceled",
+    }
+    api._parse_order = mocker.Mock(return_value={"id": "123"})
+    if history:
+        api.client.order_info.side_effect = ccxt.OrderNotFound("expired")
+        api.client.request.return_value = {"data": [raw]}
+    else:
+        api.client.order_info.return_value = {"data": raw}
+    assert api.fetch_order_by_client_id("ftbr1", "BTC/USDT:USDT", order_id="123") == {"id": "123"}
+    assert api.client.order_info.call_args.args[0]["orderId"] == "123"
+    api._parse_order.assert_called_once_with(raw, symbol="BTC/USDT:USDT")
+    if history:
+        assert api.client.request.call_args.args == ("GET", "/v2/history/orders")
+        assert api.client.request.call_args.kwargs["params"]["orderId"] == "123"
+    else:
+        api.client.request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("orderId", "other"),
+        ("clientOrderId", "other"),
+        ("symbol", "ETH-USDT-PERP"),
+        ("totalFillQty", None),
+        ("totalFillQty", "nan"),
+        ("totalFillQty", "invalid"),
+        ("totalFillQty", -1),
+    ],
+)
+def test_exact_recovery_rejects_mismatched_or_incomplete_evidence(mocker, field, value):
+    api = object.__new__(UMXSync)
+    api.client = mocker.Mock()
+    api.market_id = mocker.Mock(return_value="BTC-USDT-PERP")
+    raw = {
+        "orderId": "123",
+        "clientOrderId": "ftbr1",
+        "symbol": "BTC-USDT-PERP",
+        "totalFillQty": "0",
+        field: value,
+    }
+    api.client.order_info.return_value = {"data": raw}
+    with pytest.raises(ccxt.ExchangeError):
+        api.fetch_order_by_client_id("ftbr1", "BTC/USDT:USDT", order_id="123")
+    api.client.request.assert_not_called()
+
+
 @pytest.fixture
 def opportunity_conditionals(mocker):
     protection = {
