@@ -48,6 +48,14 @@
       "groupSlug": "freqai"
     },
     {
+      "description": "Torch minor releases (e.g. 2.5 -> 2.6) are effectively major releases - keep them in their own PR, out of the FreqAI group. Patch releases stay grouped.",
+      "matchDatasources": ["pypi"],
+      "matchPackageNames": ["torch"],
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": "Torch",
+      "groupSlug": "torch"
+    },
+    {
       "description": "Group pre-commit hook updates into one PR, as pre-commit autoupdate did.",
       "matchManagers": ["pre-commit"],
       "matchDepTypes": ["!pre-commit-python"],
@@ -74,12 +82,6 @@
       "matchPackageNames": ["mypy", "/mirrors-mypy$/"],
       "groupName": "Mypy",
       "groupSlug": "mypy"
-    },
-    {
-      "description": "Keep Dockerfile.armhf updates separate.",
-      "matchFileNames": ["docker/Dockerfile.armhf"],
-      "groupName": "Dockerfile.armhf",
-      "groupSlug": "dockerfile-armhf"
     }
   ]
 }
