@@ -417,6 +417,108 @@ def _filled_fixture(api, *, status="filled"):
     return row
 
 
+def partial_stop_api(exit_side="sell"):
+    api = attached_api(
+        "long" if exit_side == "sell" else "short", "buy" if exit_side == "sell" else "sell", 196.42
+    )
+    row = _filled_fixture(api, status="partially_canceled")
+    row["qty"] = "0.39"
+    api.client.trade_history.return_value = {
+        "data": [
+            {
+                "orderId": "partial-execution",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": exit_side,
+                "fillQty": "0.11",
+                "fillTime": "2000259",
+            },
+            {
+                "orderId": "partial-execution",
+                "symbol": SYMBOL,
+                "orderType": "market",
+                "side": exit_side,
+                "fillQty": "0.11",
+                "fillTime": "2000259",
+            },
+        ]
+    }
+    api.client.order_info.return_value = {
+        "data": {
+            "orderId": "partial-execution",
+            "symbol": SYMBOL,
+            "side": exit_side,
+            "orderType": "market",
+            "status": "partially_canceled",
+            "reduceOnly": True,
+            "qty": "0.39",
+            "totalFillQty": "0.22",
+            "avgPrice": "194.57",
+            "price": "194.33",
+            "createTime": "2000258",
+            "updateTime": "2000259",
+        }
+    }
+    return api
+
+
+@pytest.mark.parametrize("exit_side", ["sell", "buy"])
+def test_partially_canceled_stop_preserves_real_execution_and_remainder(exit_side):
+    api = partial_stop_api(exit_side)
+    exchange = object.__new__(UMX)
+    exchange.close = Mock()
+    options = {
+        "stoploss_query_requires_stop_flag": True,
+        "stoploss_algo_order_info_id": "triggeredOrderId",
+    }
+    exchange.get_option = lambda key: options.get(key)
+    exchange.fetch_order = lambda order_id, pair, params: api.fetch_order(order_id, pair, params)
+    order = exchange.fetch_stoploss_order("attached1", PAIR)
+    assert order["id"] == "attached1" and order["id_stop"] == "partial-execution"
+    assert order["status"] == "canceled" and order["status_stop"] == "triggered"
+    assert order["amount"] == 39 and order["filled"] == 22 and order["remaining"] == 17
+    assert order["side"] == exit_side and order["average"] == 194.57
+    assert order["cost"] == pytest.approx(0.22 * 194.57)
+    assert all(c.args[0] == "GET" for c in api.client.request.call_args_list)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reduceOnly", False),
+        ("status", "live"),
+        ("qty", "0.38"),
+        ("totalFillQty", "0.21"),
+        ("side", "buy"),
+        ("orderType", "limit"),
+        ("orderId", "another-order"),
+        ("symbol", "OTHER-USDT-PERP"),
+    ],
+)
+def test_partially_canceled_stop_rejects_inconsistent_execution(field, value):
+    api = partial_stop_api()
+    api.client.order_info.return_value["data"][field] = value
+    with pytest.raises(ccxt.ExchangeError, match="execution is inconsistent"):
+        api.fetch_order("attached1", PAIR, {"stop": True})
+
+
+@pytest.mark.parametrize("case", ["missing", "ambiguous", "full_fill", "truncated"])
+def test_partially_canceled_stop_requires_unambiguous_partial_fills(case):
+    api = partial_stop_api()
+    fills = api.client.trade_history.return_value["data"]
+    if case == "missing":
+        fills.clear()
+    elif case == "ambiguous":
+        fills.append({**fills[0], "orderId": "other-execution"})
+    elif case == "full_fill":
+        fills[1]["fillQty"] = "0.28"
+    else:
+        fills.extend([deepcopy(fills[0]) for _ in range(98)])
+    with pytest.raises(ccxt.ExchangeError):
+        api.fetch_order("attached1", PAIR, {"stop": True})
+    api.client.order_info.assert_not_called()
+
+
 @pytest.mark.parametrize("position_side,entry_side,exit_side,stop", ATTACHED_CASES)
 def test_filled_attached_stop_resolves_execution_from_fills(
     position_side, entry_side, exit_side, stop
