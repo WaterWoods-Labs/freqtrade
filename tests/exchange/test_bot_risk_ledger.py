@@ -210,6 +210,132 @@ def test_confirmed_missing_order_keeps_its_capacity_without_blocking_other_pairs
     assert "flat_since" not in ledger.load()["entries"]["missing"]
 
 
+def test_reviewed_historical_cancel_releases_and_allows_new_entry_after_restart(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "old", flat)
+    order = {
+        "id": "old",
+        "clientOrderId": "old",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+    }
+    ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+    restarted = EntryLedger(ledger.path, risk())
+    missing = Mock(side_effect=InvalidOrderException("history expired"))
+    assert restarted.reconcile_flat(missing, flat, now=100) == 1
+    with pytest.raises(InvalidOrderException, match="pending/unknown"):
+        submit(restarted, "new", flat)
+    assert restarted.reconcile_flat(missing, flat, now=159) == 1
+    assert restarted.reconcile_flat(missing, flat, now=160) == 0
+    assert submit(restarted, "new", flat)["id"] == "new"
+    missing.assert_not_called()
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_historical_recovery_restarts_flat_window_on_exposure(tmp_path, pending):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "old", flat)
+    order = {
+        "id": "old",
+        "clientOrderId": "old",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+    }
+    ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+    ledger.reconcile_flat(Mock(), flat, now=100)
+
+    def held():
+        return (
+            {"BTC/USDT:USDT": 0 if pending else 10, "ETH/USDT:USDT": 0},
+            {"BTC/USDT:USDT"} if pending else set(),
+        )
+
+    assert ledger.reconcile_flat(Mock(), held, now=160) == 1
+    assert ledger.reconcile_flat(Mock(), flat, now=200) == 1
+    assert ledger.reconcile_flat(Mock(), flat, now=260) == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"id": "wrong"},
+        {"clientOrderId": "wrong"},
+        {"symbol": "ETH/USDT:USDT"},
+        {"side": "sell"},
+        {"status": "open"},
+        {"filled": 0.1},
+        {"filled": None},
+    ],
+)
+def test_historical_cancel_rejects_mismatched_or_filled_evidence(tmp_path, changes):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "old", flat)
+    before = ledger.load()
+    order = {
+        "id": "old",
+        "clientOrderId": "old",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+        **changes,
+    }
+    with pytest.raises(OperationalException, match="known entry"):
+        ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+    assert ledger.load() == before
+
+
+def test_historical_cancel_cannot_clear_unknown_submission(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    with pytest.raises(TimeoutError):
+        submit(ledger, "old", flat, Mock(side_effect=TimeoutError()))
+    order = {
+        "id": "old",
+        "clientOrderId": "old",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+    }
+    with pytest.raises(OperationalException, match="known entry"):
+        ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+    with pytest.raises(InvalidOrderException, match="Unknown submission"):
+        submit(ledger, "new", flat)
+
+
+def test_historical_cancel_requires_provenance_and_preserves_later_fill(tmp_path):
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "old", flat)
+    order = {
+        "id": "old",
+        "clientOrderId": "old",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "status": "canceled",
+        "filled": 0,
+    }
+    with pytest.raises(OperationalException, match="SHA-256"):
+        ledger.record_historical_cancel(order, evidence_sha256="")
+    ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+    ledger.reconcile_flat(Mock(), flat, now=100)
+    ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+    assert ledger.load()["entries"]["old"]["flat_since"] == 100
+    ledger.record_terminal({**order, "filled": 0.5})
+    assert "flat_since" not in ledger.load()["entries"]["old"]
+    with pytest.raises(OperationalException, match="known entry"):
+        ledger.record_historical_cancel(order, evidence_sha256="a" * 64)
+
+    def held():
+        return {"BTC/USDT:USDT": 50, "ETH/USDT:USDT": 0}, set()
+
+    assert ledger.reconcile_flat(Mock(), held, now=160) == 1
+    assert ledger.load()["entries"]["old"]["terminal_filled"]
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

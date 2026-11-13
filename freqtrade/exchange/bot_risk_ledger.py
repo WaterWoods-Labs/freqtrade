@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -189,12 +190,52 @@ class EntryLedger:
                 terminal_filled=order["filled"] > 0,
                 terminal_order=terminal,
             )
+            entry.pop("flat_since", None)
+            self.save(state)
+
+    def record_historical_cancel(self, order, *, evidence_sha256):
+        """Import an operator-reviewed zero-fill cancellation from retained evidence.
+
+        This is a recovery-only operation, never called by automated order lookup.
+        It repairs old acknowledgements whose terminal GET was not persisted before
+        venue history expired. It does not release capacity: reconcile_flat still
+        requires two complete, flat account observations at least 60 seconds apart.
+        Preserve the original ledger and reviewed evidence outside this ledger.
+        """
+        if not isinstance(evidence_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", evidence_sha256
+        ):
+            raise OperationalException("Historical recovery requires an evidence SHA-256")
+        with self.lock:
+            state = self.load()
+            client_id = order.get("clientOrderId") if isinstance(order, dict) else None
+            entry = state["entries"].get(client_id)
+            if (
+                entry is None
+                or entry.get("outcome") != "confirmed"
+                or not entry.get("order_id")
+                or not self._terminal_matches(client_id, entry, order)
+                or order["status"] != "canceled"
+                or order["filled"] != 0
+                or entry.get("terminal_filled")
+            ):
+                raise OperationalException("Historical cancellation does not match a known entry")
+            if entry.get("terminal_order") and entry["terminal_order"] != order:
+                raise OperationalException("Historical cancellation conflicts with cached evidence")
+            evidence = {"kind": "reviewed_historical_cancel", "sha256": evidence_sha256}
+            if entry.get("terminal_order") == order and entry.get("terminal_source") == evidence:
+                return
+            entry.update(
+                terminal_order=dict(order), terminal_filled=False, terminal_source=evidence
+            )
+            entry.pop("flat_since", None)
             self.save(state)
 
     def reconcile_flat(self, query, snapshot, *, now=None, query_known=None):
         """GET-only recovery; every exact order terminal and flat twice, >=60 seconds apart.
 
-        Unknown exact orders stay reserved. No administrative clear/delete escape hatch.
+        Unknown exact orders stay reserved. Historical recovery must first import
+        reviewed cancellation evidence; it cannot directly clear/delete a reservation.
         A lower budget does not change the ledger identity or erase previous reservations.
         """
         now = time.time() if now is None else now
