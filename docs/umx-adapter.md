@@ -24,6 +24,12 @@ PO or limit-IOC perpetual entry. `exchange.umx_order_read_only=true` blocks ever
 HTTP transport. Unapproved `UMXChanB1S1Maker` configurations force that read-only setting after
 generic client overrides; they may be deployed STOPPED without enabling account writes.
 
+Triggered TPSL orders with `partially_canceled` status are reconciled through a unique
+market execution in the bounded fill-history window. The execution must be reduce-only,
+canceled, match the stop's requested quantity and direction, and report the same partial
+fill as the history. Freqtrade records that fill and recreates protection for the remaining
+position. Missing, ambiguous, or inconsistent execution evidence remains an error.
+
 ## Supported integration
 
 | Capability | Adapter behavior |

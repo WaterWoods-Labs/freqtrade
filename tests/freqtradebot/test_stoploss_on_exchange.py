@@ -1198,8 +1198,9 @@ def test_execute_trade_exit_with_stoploss_on_exchange(
 
 
 @pytest.mark.parametrize("is_short", [False, True])
+@pytest.mark.parametrize("partial", [False, True])
 def test_may_execute_trade_exit_after_stoploss_on_exchange_hit(
-    default_conf_usdt, ticker_usdt, fee, mocker, is_short
+    default_conf_usdt, ticker_usdt, fee, mocker, is_short, partial
 ) -> None:
     default_conf_usdt["exchange"]["name"] = "binance"
     rpc_mock = patch_RPCManager(mocker)
@@ -1235,6 +1236,8 @@ def test_may_execute_trade_exit_after_stoploss_on_exchange_hit(
 
     # Assuming stoploss on exchange is hit
     # trade should be sold at the price of stoploss, with exit_reason STOPLOSS_ON_EXCHANGE
+    original_amount = trade.amount
+    exit_amount = original_amount / 2 if partial else original_amount
     stoploss_executed = MagicMock(
         return_value={
             "id": "123",
@@ -1246,16 +1249,27 @@ def test_may_execute_trade_exit_after_stoploss_on_exchange_hit(
             "side": "buy" if is_short else "sell",
             "price": 1.08801,
             "amount": trade.amount,
-            "cost": 1.08801 * trade.amount,
+            "cost": 1.08801 * exit_amount,
             "average": 1.08801,
-            "filled": trade.amount,
-            "remaining": 0.0,
-            "status": "closed",
+            "filled": exit_amount,
+            "remaining": original_amount - exit_amount,
+            "status": "canceled" if partial else "closed",
             "fee": None,
             "trades": None,
         }
     )
     mocker.patch.object(freqtrade.exchange, "fetch_stoploss_order", stoploss_executed)
+
+    if partial:
+        # A terminal partial stop must account for its fill, keep the residual trade,
+        # and request replacement protection for that residual in the same pass.
+        replacement = mocker.patch.object(freqtrade, "create_stoploss_order", return_value=True)
+        assert freqtrade.handle_stoploss_on_exchange(trade) is False
+        assert trade.is_open and trade.amount == pytest.approx(original_amount - exit_amount)
+        assert trade.has_open_sl_orders is False
+        replacement.assert_called_once_with(trade=trade, stop_price=trade.stoploss_or_liquidation)
+        assert trade.realized_profit != 0
+        return
 
     freqtrade.exit_positions(trades)
     assert trade.has_open_sl_orders is False
