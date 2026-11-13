@@ -136,7 +136,7 @@ def test_binance_portfolio_dca_confirmed_add_and_second_add_rejection(
     store.add(PortfolioOrderIntent("ftpm-first", "ETH/USDT:USDT", "regular"))
     store.promote_to_entry_reservation("ftpm-first")
     store.mark_reservation_exposure_seen("ftpm-first")
-    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations", return_value={})
     exact = mocker.patch.object(
         exchange,
         "_fetch_portfolio_entry_reservation_order",
@@ -193,7 +193,7 @@ def test_binance_portfolio_dca_missing_order_evidence_reserves_full_cap(
     api.fetch_positions.return_value = []
     api.fetch_open_orders.return_value = []
     exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
-    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations", return_value={})
     mocker.patch.object(exchange, "_fetch_portfolio_entry_reservation_order", return_value=None)
     store = exchange._portfolio_order_intent_store
     pairs = sorted(conf["exchange"]["pair_whitelist"])
@@ -218,7 +218,7 @@ def test_binance_portfolio_dca_limits_initial_size_and_twenty_slots(
     api.fetch_positions.return_value = []
     api.fetch_open_orders.return_value = []
     exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
-    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations", return_value={})
     exchange._validate_portfolio_margin_dca_projected_exposure(
         "ETH/USDT:USDT", entry_cap, "ftpm-next", "buy"
     )
@@ -251,7 +251,7 @@ def test_binance_portfolio_dca_2000_pending_and_policy_limits(default_conf, mock
     api.fetch_positions.return_value = []
     api.fetch_open_orders.return_value = []
     exchange = get_patched_exchange(mocker, conf, api, exchange="binance")
-    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations", return_value={})
     mocker.patch.object(exchange, "_fetch_portfolio_entry_reservation_order", return_value=None)
     store = exchange._portfolio_order_intent_store
     pairs = sorted(risk["pairs"])

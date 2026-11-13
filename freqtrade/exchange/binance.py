@@ -1415,7 +1415,7 @@ class Binance(Exchange):
         )
         return released
 
-    def _reconcile_portfolio_entry_reservations(self) -> None:
+    def _reconcile_portfolio_entry_reservations(self) -> dict[str, dict[str, Any]]:
         """Refresh durable Chan reservations while the account-wide operation lock is held."""
         store = self._portfolio_order_intent_store
         if store is None:
@@ -1423,14 +1423,31 @@ class Binance(Exchange):
                 "Binance Portfolio Margin Chan entry reservation storage is unavailable. "
                 "Trading remains stopped."
             )
-        for reservation in store.reservations:
-            order = self._fetch_portfolio_entry_reservation_order(reservation)
+        reservations = store.reservations
+        # Read exact orders before the account-wide position snapshot. Only terminal
+        # evidence is reused within this locked admission, never across entry attempts.
+        orders = {
+            r.client_order_id: self._fetch_portfolio_entry_reservation_order(r)
+            for r in reservations
+        }
+        positions_by_pair: dict[str, list[dict[str, Any]]] = {}
+        if reservations:
+            for position in self._fetch_portfolio_positions_once():
+                symbol = position.get("symbol")
+                if not isinstance(symbol, str) or not symbol:
+                    raise OperationalException("PAPI reservation snapshot lacks a position symbol.")
+                positions_by_pair.setdefault(symbol, []).append(position)
+        terminal_orders = {}
+        for reservation in reservations:
+            order = orders[reservation.client_order_id]
             if order is None:
                 # Exchange snapshots may lag a confirmed create response. Full configured
                 # pair capacity remains held locally until exact evidence appears.
                 continue
             terminal, filled = self._portfolio_entry_reservation_order_state(order)
-            active_positions = self._portfolio_active_position_snapshot(reservation.pair)
+            active_positions = self._portfolio_active_position_snapshot(
+                reservation.pair, positions=positions_by_pair.get(reservation.pair, [])
+            )
             if active_positions and filled > 0 and not reservation.exposure_seen:
                 store.mark_reservation_exposure_seen(reservation.client_order_id)
                 reservation = PortfolioEntryReservation(
@@ -1446,15 +1463,20 @@ class Binance(Exchange):
                 and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES
             )
             if not terminal or (active_positions and not zero_fill_dca):
+                if terminal:
+                    terminal_orders[reservation.client_order_id] = order
                 continue
             if filled > 0 and not reservation.exposure_seen:
                 # A filled order whose position was never observed is not safe to forget.
+                terminal_orders[reservation.client_order_id] = order
                 continue
             # An existing first entry must not pin a canceled, unfilled add forever. Only
             # that exact zero-fill order may be released; filled reservations still need flatness.
             self._portfolio_entry_reservation_release_window(
                 reservation, zero_fill_only=zero_fill_dca
             )
+            # A release window may observe a late fill; never reuse its earlier evidence.
+        return terminal_orders
 
     def _validate_portfolio_margin_chan_projected_exposure(
         self, pair: str, proposed_notional: float, client_order_id: str
@@ -1565,7 +1587,7 @@ class Binance(Exchange):
             or proposed_notional <= 0
         ):
             raise OperationalException("Portfolio Margin DCA entry has an invalid risk policy.")
-        self._reconcile_portfolio_entry_reservations()
+        terminal_orders = self._reconcile_portfolio_entry_reservations()
         store = self._portfolio_order_intent_store
         if store is None:
             raise OperationalException("Portfolio Margin DCA requires durable entry reservations.")
@@ -1605,7 +1627,9 @@ class Binance(Exchange):
                 raise OperationalException("Portfolio Margin DCA found an unreviewed reservation.")
             if reserved_pair == pair:
                 target_reservations.append(reservation)
-            order = self._fetch_portfolio_entry_reservation_order(reservation)
+            order = terminal_orders.get(reservation.client_order_id)
+            if order is None:
+                order = self._fetch_portfolio_entry_reservation_order(reservation)
             if order is None:
                 reserved[reserved_pair] += float(limits[reserved_pair])
                 continue
@@ -1943,10 +1967,11 @@ class Binance(Exchange):
         return order if conditional else self._order_contracts_to_amount(order)
 
     def _portfolio_active_position_snapshot(  # noqa: C901
-        self, pair: str
+        self, pair: str, *, positions: list[dict[str, Any]] | None = None
     ) -> list[tuple[dict[str, Any], float]]:
         """Return validated active PAPI positions for one pair's safety reconciliation."""
-        positions = self._fetch_portfolio_positions_once(pair)
+        if positions is None:
+            positions = self._fetch_portfolio_positions_once(pair)
         if not isinstance(positions, list) or any(
             not isinstance(position, dict) for position in positions
         ):
@@ -3065,8 +3090,74 @@ class Binance(Exchange):
                 "DCA partial cancel was ambiguous; containment ran and trading remains stopped."
             )
 
+    def _reconcile_portfolio_cancel(self, order_id: str, pair: str, *, stop: bool = False):
+        """Resolve an ambiguous cancel by exact GET, without inventing zero fills."""
+        try:
+            order = (
+                self.fetch_stoploss_order(order_id, pair)
+                if stop
+                else self._api.fetch_order(order_id, pair, params=self._portfolio_margin_params())
+            )
+        except (ccxt.BaseError, InvalidOrderException) as exc:
+            raise TemporaryError(
+                "PAPI cancel outcome remains unconfirmed; defer reconciliation."
+            ) from exc
+        if not self._portfolio_cancel_result_confirmed(order, order_id, pair):
+            raise TemporaryError(
+                "PAPI cancel lacks exact terminal fill evidence; defer reconciliation."
+            )
+        return order if stop else self._order_contracts_to_amount(order)
+
+    @staticmethod
+    def _portfolio_cancel_result_confirmed(order, order_id, pair):
+        return not (
+            not isinstance(order, dict)
+            or str(order.get("id")) != str(order_id)
+            or order.get("symbol") != pair
+            or order.get("status") not in {"closed", "canceled", "cancelled", "expired", "rejected"}
+            or type(order.get("filled")) not in (int, float)
+            or not isfinite(order["filled"])
+            or order["filled"] < 0
+            or type(order.get("amount")) not in (int, float)
+            or not isfinite(order["amount"])
+            or order["amount"] < order["filled"]
+        )
+
     def cancel_order(self, order_id: str, pair: str, params: dict | None = None):
-        return super().cancel_order(order_id, pair, self._portfolio_margin_params(params))
+        if not self._portfolio_margin or self._config["dry_run"]:
+            return super().cancel_order(order_id, pair, self._portfolio_margin_params(params))
+        try:
+            order = self._api.cancel_order(
+                order_id, pair, params=self._portfolio_margin_params(params)
+            )
+            self._log_exchange_response("cancel_order", order)
+            return self._order_contracts_to_amount(order)
+        except ccxt.DDoSProtection as exc:
+            raise DDosProtection(exc) from exc
+        except (ccxt.InvalidOrder, ccxt.OperationFailed, ccxt.ExchangeError):
+            # -2011 may mean filled/canceled already. Repeating DELETE cannot establish
+            # which happened, and generic retries stalled the complete trading loop.
+            return self._reconcile_portfolio_cancel(order_id, pair)
+        except ccxt.BaseError as exc:
+            raise OperationalException(exc) from exc
+
+    def cancel_order_with_result(self, order_id: str, pair: str, amount: float) -> CcxtOrder:
+        if not self._portfolio_margin or self._config["dry_run"]:
+            return super().cancel_order_with_result(order_id, pair, amount)
+        order = self.cancel_order(order_id, pair)
+        if self._portfolio_cancel_result_confirmed(order, order_id, pair):
+            return order
+        return self._reconcile_portfolio_cancel(order_id, pair)
+
+    def cancel_stoploss_order_with_result(
+        self, order_id: str, pair: str, amount: float
+    ) -> CcxtOrder:
+        if not self._portfolio_margin or self._config["dry_run"]:
+            return super().cancel_stoploss_order_with_result(order_id, pair, amount)
+        order = self.cancel_stoploss_order(order_id, pair)
+        if self._portfolio_cancel_result_confirmed(order, order_id, pair):
+            return order
+        return self._reconcile_portfolio_cancel(order_id, pair, stop=True)
 
     def cancel_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
         if not self._portfolio_margin or self._config["dry_run"]:
@@ -3082,14 +3173,10 @@ class Binance(Exchange):
             order = self._cancel_portfolio_algo_order(order_id)
             self._log_exchange_response("cancel_stoploss_order", order)
             return order
-        except ccxt.InvalidOrder as e:
-            raise InvalidOrderException(f"Could not cancel stoploss order. Message: {e}") from e
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
-        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not cancel stoploss order due to {e.__class__.__name__}. Message: {e}"
-            ) from e
+        except (ccxt.InvalidOrder, ccxt.OperationFailed, ccxt.ExchangeError):
+            return self._reconcile_portfolio_cancel(order_id, pair, stop=True)
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 

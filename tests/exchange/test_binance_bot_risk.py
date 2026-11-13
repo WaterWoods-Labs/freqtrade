@@ -26,7 +26,7 @@ def test_nonpreset_limits_reach_submission_guard(default_conf, tmp_path, mocker)
     api.fetch_positions.return_value = []
     api.fetch_open_orders.return_value = []
     exchange = get_patched_exchange(mocker, config, api, exchange="binance")
-    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations", return_value={})
     cap = config["bot_risk"]["max_initial_notional_usdt"]
     exchange._validate_portfolio_margin_dca_projected_exposure(
         "ETH/USDT:USDT", cap, "ftpm-test", "buy"
@@ -72,7 +72,7 @@ def test_dynamic_slots_include_position_exposure(default_conf, tmp_path, mocker)
     ]
     api.fetch_open_orders.return_value = []
     exchange = get_patched_exchange(mocker, config, api, exchange="binance")
-    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations")
+    mocker.patch.object(exchange, "_reconcile_portfolio_entry_reservations", return_value={})
     with pytest.raises(InvalidOrderException, match="slot limit"):
         exchange._validate_portfolio_margin_dca_projected_exposure(
             "ETH/USDT:USDT", 1, "ftpm-next", "buy"
