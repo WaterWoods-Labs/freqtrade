@@ -27,6 +27,18 @@ Exact terminal GET evidence is persisted before native zero-fill trade cleanup a
 history expiry. Recovery saves progress for other entries even when one lookup fails. Release still
 requires the terminal identity and two complete flat account observations at least 60 seconds apart.
 
+For pre-cache historical acknowledgements only, an operator may restore reviewed zero-fill
+cancellation evidence with `EntryLedger.record_historical_cancel`. Preserve the original ledger
+and the source evidence, record its SHA-256, and match the acknowledged order ID, client ID, pair
+and side. A timeout message, an empty history response, or a flat snapshot alone is insufficient;
+review the complete creation/cancellation/trade-removal sequence and current account state.
+This recovery entrypoint is never called automatically and cannot resolve an unknown submission,
+overwrite a known fill, or release capacity directly. It starts a fresh normal reconciliation
+window; any position or pending entry resets that window. After two complete flat observations
+at least 60 seconds apart, the historical reservation is removed and a new signal may enter under
+the unchanged budget. Run and review recovery on a ledger copy first. Applying it to live state is
+a separately authorized operational action, not part of deploying adapter code.
+
 Budgets may be lowered without changing or deleting the namespace/state. Entry-limit rejection
 uses the native invalid-order path so normal exit processing remains available. Reduce-only exits
 and protection bypass admission checks. Missing account evidence or an unknown submission remains
