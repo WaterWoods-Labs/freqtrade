@@ -163,7 +163,7 @@ class UMXStoploss:
             or info.get("tpslMode") != "partially_position"
             or info.get("slOrderType") != "market"
             or info.get("stopLossType") != "last_price"
-            or accepted.get("side") != side
+            or self._stop_exit_side(accepted) != side
             or not math.isclose(float(accepted.get("qty", 0)), qty)
             or not math.isclose(float(info.get("stopLoss", 0)), stop)
             or accepted.get("status") not in {"live", "untrigger"}
@@ -175,9 +175,7 @@ class UMXStoploss:
 
     def _matching_stops(self, symbol, side, qty, stop):
         # A prior timeout may have placed the protection. Adopt an exact owned match.
-        # Venue rows for attached (ftsa*) protections carry the entry side; independent
-        # (ftsl*) stops carry the exit side requested here.
-        entry_side = "buy" if side == "sell" else "sell"
+        # Both attached (ftsa*) and position (ftsl*) TPSL rows carry the position side.
         matches = []
         attached_parts = []
         for row in self._stop_rows(symbol):
@@ -192,7 +190,7 @@ class UMXStoploss:
                 # Keep those protections until a verified full-size replacement is live.
                 partial = attached and 0 < part_qty < float(qty) and math.isfinite(part_qty)
                 if (
-                    row.get("side") != (entry_side if attached else side)
+                    self._stop_exit_side(row) != side
                     or (not attached and info.get("tpslMode") != "partially_position")
                     or (not partial and not math.isclose(part_qty, qty))
                     or not math.isfinite(accepted_stop)
@@ -326,12 +324,16 @@ class UMXStoploss:
 
     def _stop_exit_side(self, raw):
         side = raw.get("side")
-        attached = str(self._stop_info(raw).get("tpslClOrdId", "")).startswith("ftsa")
+        client_id = str(self._stop_info(raw).get("tpslClOrdId", ""))
+        attached = client_id.startswith("ftsa")
         if side not in {"buy", "sell"}:
             kind = "attached-stop entry" if attached else "stop"
             raise ccxt.ExchangeError(f"Invalid UMX {kind} side")
-        # Attached protections report the entry side; standalone stops report the exit side.
-        return ("sell" if side == "buy" else "buy") if attached else side
+        # Live position-stop responses also report the position's entry direction.
+        # Normalize only our known position-protection families; preserve the raw info.
+        return (
+            ("sell" if side == "buy" else "buy") if client_id.startswith(("ftsa", "ftsl")) else side
+        )
 
     def _find_triggered_order_id(self, raw, symbol, *, partial=False):
         """Resolve the execution order of a triggered stop from bounded recent fills."""

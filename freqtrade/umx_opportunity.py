@@ -452,7 +452,7 @@ class OpportunityController:
             elif trade is not None:
                 expected_side = (
                     trade.entry_side
-                    if str(info.get("tpslClOrdId", "")).startswith("ftsa")
+                    if str(info.get("tpslClOrdId", "")).startswith(("ftsa", "ftsl"))
                     else trade.exit_side
                 )
                 current = remaining.get(pair)
