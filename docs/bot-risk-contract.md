@@ -12,6 +12,12 @@ not evidence of cancellation. Releasing a reservation requires its exact termina
 flat observations at least 60 seconds apart; partial fills and unresolved submissions retain capacity.
 The second entry requires a terminal filled first entry of the same direction; no third add is allowed.
 
+The filtered and unfiltered position reads are separate requests and may straddle a fill.
+If they disagree, the adapter rejects that snapshot with a temporary error before entry admission.
+The worker retries with fresh reads while retaining its running state and existing reservations;
+reduce-only exits bypass this admission check. Persistent disagreement continues to block entries.
+Malformed evidence and ownership conflicts retain their operational-error behavior.
+
 UMX entry client IDs contain only 1-32 ASCII letters or digits, as required by the
 [order endpoint](https://www.umx.com/docs/coin-apis/trading/regular-trading/place-order).
 Generated budget IDs use `ftbr` followed by 24 hexadecimal characters. Invalid supplied IDs

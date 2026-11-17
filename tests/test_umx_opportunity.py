@@ -469,6 +469,45 @@ def test_position_without_protection_blocks_new_entries(controller):
         )
 
 
+@pytest.mark.parametrize("short", [False, True])
+@pytest.mark.parametrize("prefix", ["ftsa", "ftsl"])
+def test_native_position_protection_uses_raw_entry_direction(controller, short, prefix):
+    from types import SimpleNamespace
+
+    entry_side = "sell" if short else "buy"
+    exit_side = "buy" if short else "sell"
+    t = SimpleNamespace(
+        is_open=True,
+        pair="A/USDT:USDT",
+        entry_side=entry_side,
+        exit_side=exit_side,
+        orders=[
+            SimpleNamespace(
+                order_id="native", ft_is_open=True, ft_order_side="stoploss", safe_price=97
+            )
+        ],
+    )
+    row = {
+        "symbol": "A-USDT-PERP",
+        "side": entry_side,
+        "qty": "1",
+        "complexOId": "native",
+        "tpslOrder": {
+            "tpslClOrdId": prefix + "fixture",
+            "slOrderType": "market",
+            "stopLossType": "last_price",
+            "stopLoss": "97",
+        },
+    }
+    controller.bot.exchange.markets = {t.pair: {"id": "A-USDT-PERP"}}
+    controller.bot.exchange.opportunity_conditional_snapshot = Mock(return_value=[row])
+    remaining = {t.pair: (D(1), "short" if short else "long", D(100))}
+    OpportunityController._validate_conditionals(controller, [t], remaining)
+    row["side"] = exit_side
+    with pytest.raises(ValueError, match="quantity or side differs"):
+        OpportunityController._validate_conditionals(controller, [t], remaining)
+
+
 def test_attached_protection_must_cover_actual_position(controller):
     import hashlib
 

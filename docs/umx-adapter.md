@@ -150,8 +150,10 @@ Wire fields including `businessType`, `accountName`, `role`, and `lever` retain 
   entry direction in their raw `side`. The stop adapter accepts `untrigger` and legacy `live`
   as open/cancellable states. It matches an attached stop using that entry direction and exposes
   the opposite, closing direction to Freqtrade while retaining the raw response in `info`.
-  Independently placed position stops (`ftsl` client IDs) keep their existing closing-direction
-  contract; the attached-order observations do not establish a different wire format for them.
+  Independently placed position stops (`ftsl` client IDs) also report the position's entry
+  direction, confirmed by both long and short position-stop responses on 2026-11-18.
+  Creation verification, retry adoption, native ownership checks and triggered-fill matching
+  normalize both owned families to the closing direction; raw `info.side` remains unchanged.
   Unknown states are rejected with the raw state value in the error. Live evidence
   (2026-09-16, SOXL-USDT-PERP attached stop) shows a triggered attached stop reports `filled`
   with no execution-order reference, and `order_info` cannot resolve its `ftsa` client ID;

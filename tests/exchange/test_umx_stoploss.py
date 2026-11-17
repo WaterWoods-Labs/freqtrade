@@ -26,7 +26,7 @@ def stop_api():
     raw = {
         "symbol": SYMBOL,
         "complexOId": "stop1",
-        "side": "sell",
+        "side": "buy",
         "qty": "0.01",
         "status": "live",
         "createTime": "1000000",
@@ -80,6 +80,47 @@ def test_position_bound_stop_transport_and_retry_adoption(stop_api):
     assert order["stopLossPrice"] == 1455
     # A later call following an uncertain response adopts the accepted stop, with no second POST.
     assert create(stop_api)["id"] == "stop1"
+    writes = [c for c in stop_api.client.request.call_args_list if c.args[0] == "POST"]
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize(
+    "position,raw_side,exit_side", [("long", "buy", "sell"), ("short", "sell", "buy")]
+)
+@pytest.mark.parametrize("wrong_side", [False, True])
+def test_position_stop_response_uses_position_direction(
+    stop_api, position, raw_side, exit_side, wrong_side
+):
+    # Sanitized live cases: CBRS/INTC long rows report buy; BABA/SOL short rows report sell.
+    stop_api.fetch_positions.return_value = [{"side": position, "contracts": 1}]
+    transport = stop_api.client.request.side_effect
+
+    def request(method, path, **kwargs):
+        result = transport(method, path, **kwargs)
+        if path == "/v2/trade/stopPosition":
+            stop_api._test_rows[0]["side"] = exit_side if wrong_side else raw_side
+        return result
+
+    stop_api.client.request.side_effect = request
+
+    def place():
+        return stop_api.create_order(
+            PAIR,
+            "stop_market",
+            exit_side,
+            1,
+            params={"reduceOnly": True, "stopLossPrice": 1455},
+        )
+
+    if wrong_side:
+        with pytest.raises(ccxt.ExchangeError, match="accepted protection differs"):
+            place()
+        with pytest.raises(ccxt.InvalidOrder, match="Conflicting"):
+            place()
+    else:
+        order = place()
+        assert order["side"] == exit_side and order["info"]["side"] == raw_side
+        assert place()["id"] == order["id"]
     writes = [c for c in stop_api.client.request.call_args_list if c.args[0] == "POST"]
     assert len(writes) == 1
 
@@ -176,7 +217,7 @@ def dca_api(request):
             assert all(r["status"] == "untrigger" for r in api._test_rows)
             assert data["tpslQty"] == "0.02"
             row = deepcopy(api._test_rows[0])
-            row.update(complexOId="combined", qty="0.02", side=exit_side, status="live")
+            row.update(complexOId="combined", qty="0.02", side=entry_side, status="live")
             row["tpslOrder"].update(tpslClOrdId=data["tpslClOrdId"], stopLoss=data["stopLoss"])
             api._test_rows.append(row)
             api._test_events.append("create")
@@ -631,8 +672,8 @@ def test_filled_attached_stop_bounds_execution_time(offset_ms, accepted):
     [
         ("ftsafixture", "buy", "sell"),
         ("ftsafixture", "sell", "buy"),
-        ("ftslfixture", "sell", "sell"),
-        ("ftslfixture", "buy", "buy"),
+        ("ftslfixture", "sell", "buy"),
+        ("ftslfixture", "buy", "sell"),
     ],
 )
 @pytest.mark.parametrize("include_exit_fill", [False, True])

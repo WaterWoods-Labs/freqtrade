@@ -237,7 +237,10 @@ class UMX(Exchange):
             )
 
         if signature(positions) != signature(unfiltered):
-            raise OperationalException("UMX unfiltered and linear position scopes disagree")
+            # Separate GETs are not atomic: a fill can change the position between them.
+            # Reject this snapshot before reserving/submitting an entry, but keep the
+            # worker alive so exits remain managed and the next cycle can read afresh.
+            raise TemporaryError("UMX unfiltered and linear position scopes disagree")
         orders = [self._order_contracts_to_amount(o) for o in self._api.fetch_open_orders()]
         return positions, orders
 

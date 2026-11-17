@@ -425,6 +425,48 @@ def test_adapter_reserves_venue_rounded_notional(mocker):
     assert re.fullmatch(r"[A-Za-z0-9]{1,32}", ledger.submit.call_args.kwargs["client_id"])
 
 
+def test_position_scope_drift_preserves_reservations_and_allows_exits(tmp_path, mocker):
+    from freqtrade.exchange import Exchange
+    from freqtrade.exchange.umx import UMX
+
+    ledger = EntryLedger(tmp_path / "ledger.json", risk())
+    submit(ledger, "existing", flat)
+    before = ledger.path.read_bytes()
+    exchange = object.__new__(UMX)
+    exchange._exchange_ws = None
+    exchange._config = {"bot_risk": risk(), "dry_run": False}
+    exchange._api = Mock()
+    row = {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 1}
+    exchange._api.fetch_positions.return_value = [row]
+    exchange._api.client.positions.return_value = {"data": [{**row, "contracts": 2}]}
+    exchange._api._parse_position.side_effect = lambda raw: raw
+    mocker.patch.object(exchange, "_bot_risk_ledger", return_value=ledger)
+    create = mocker.patch.object(Exchange, "create_order", return_value={"id": "exit"})
+
+    with pytest.raises(TemporaryError, match="position scopes disagree"):
+        exchange.create_order(
+            pair="ETH/USDT:USDT",
+            ordertype="limit",
+            side="buy",
+            amount=1,
+            rate=100,
+            leverage=1,
+            time_in_force="PO",
+        )
+    assert ledger.path.read_bytes() == before
+    create.assert_not_called()
+    assert exchange.create_order(
+        pair="BTC/USDT:USDT",
+        ordertype="market",
+        side="sell",
+        amount=1,
+        rate=100,
+        leverage=1,
+        reduceOnly=True,
+    ) == {"id": "exit"}
+    create.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "raw_fill,recorded",
     [("0", True), ("1.2", True), (None, False), ("nan", False), ("invalid", False), (-1, False)],

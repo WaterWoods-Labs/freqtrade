@@ -11,7 +11,7 @@ import pytest
 from freqtrade.configuration.config_validation import validate_config_schema
 from freqtrade.data.dataprovider import DataProvider
 from freqtrade.enums import CandleType, RunMode
-from freqtrade.exceptions import ConfigurationError, OperationalException
+from freqtrade.exceptions import ConfigurationError, OperationalException, TemporaryError
 from freqtrade.exchange import UMX, available_exchanges, ccxt_exchanges, list_available_exchanges
 from freqtrade.exchange.check_exchange import check_exchange
 from freqtrade.exchange.umx_api import UMXSync
@@ -47,6 +47,29 @@ def _umx_config(default_conf: dict, *, dry_run: bool = True) -> dict:
         }
     )
     return conf
+
+
+@pytest.mark.parametrize(
+    "field,value", [("contracts", 2), ("side", "short"), ("symbol", "ETH/USDT:USDT")]
+)
+def test_position_scope_drift_blocks_snapshot_until_fresh_reads_agree(mocker, field, value):
+    row = {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 1}
+    api = mocker.Mock()
+    api.fetch_positions.return_value = [row]
+    api.client.positions.return_value = {"data": [{**row, field: value}]}
+    api._parse_position.side_effect = lambda raw: raw
+    exchange = SimpleNamespace(_api=api, _order_contracts_to_amount=lambda order: order)
+
+    for _ in range(2):
+        with pytest.raises(TemporaryError, match="position scopes disagree"):
+            UMX.opportunity_account_snapshot(exchange)
+    api.fetch_open_orders.assert_not_called()
+
+    api.client.positions.return_value = {"data": [row]}
+    api.fetch_open_orders.return_value = []
+    assert UMX.opportunity_account_snapshot(exchange) == ([row], [])
+    assert api.fetch_positions.call_count == api.client.positions.call_count == 3
+    api.fetch_open_orders.assert_called_once_with()
 
 
 @pytest.mark.parametrize("history", [False, True])
