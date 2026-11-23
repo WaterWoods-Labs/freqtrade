@@ -2632,7 +2632,6 @@ def test_binance_portfolio_margin_stoploss_query_triggered(default_conf, mocker)
     type(api_mock).has = PropertyMock(return_value={"fetchOrder": True})
     stop_order = portfolio_algo_order("73", "ftpm-stop", status="closed")
     stop_order["stopPrice"] = 1900.0
-    stop_order["info"]["actualOrderId"] = "9001"
     api_mock.request.return_value = stop_order
     api_mock.fetch_order.return_value = {
         "id": "9001",
@@ -2650,11 +2649,31 @@ def test_binance_portfolio_margin_stoploss_query_triggered(default_conf, mocker)
         exchange="binance",
     )
 
+    # An observed trigger can precede both the child ID and the child's GET visibility.
+    trade = SimpleNamespace(pair="ETH/USDT:USDT", open_sl_orders=[SimpleNamespace(order_id="73")])
+    bot = MagicMock(exchange=exchange)
+    stop_order["info"]["actualOrderId"] = ""
+    with pytest.raises(TemporaryError, match="execution order ID"):
+        FreqtradeBot.handle_stoploss_on_exchange(bot, trade)
+    api_mock.fetch_order.assert_not_called()
+
+    stop_order["info"]["actualOrderId"] = "9001"
+    mocker.patch("freqtrade.exchange.common.time.sleep")
+    api_mock.fetch_order.side_effect = ccxt.OrderNotFound("-2013 Order does not exist")
+    with pytest.raises(TemporaryError, match="awaiting execution order 9001"):
+        FreqtradeBot.handle_stoploss_on_exchange(bot, trade)
+    bot.update_trade_state.assert_not_called()
+    bot.create_stoploss_order.assert_not_called()
+    bot.manage_trade_stoploss_orders.assert_not_called()
+
+    api_mock.fetch_order.reset_mock(side_effect=True)
     order = exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
 
     assert order["id"] == "73"
     assert order["id_stop"] == "9001"
     assert order["status_stop"] == "triggered"
+    assert order["status"] == "closed"
+    assert order["filled"] == exchange.get_contract_size(trade.pair)
     assert order["stopPrice"] == 1900.0
     api_mock.fetch_order.assert_called_once_with(
         "9001",

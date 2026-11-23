@@ -3269,14 +3269,25 @@ class Binance(Exchange):
             info = order.get("info", {})
             new_orderid = info.get(val) if val else None
             new_orderid = new_orderid or info.get("orderId")
-            if new_orderid and str(new_orderid) != "0":
+            if not new_orderid or str(new_orderid) == "0":
+                raise TemporaryError(
+                    f"PAPI triggered stop {order_id} on {pair} has no execution order ID yet."
+                )
+            try:
                 actual_order = self.fetch_order(order_id=new_orderid, pair=pair)
-                actual_order["id_stop"] = actual_order["id"]
-                actual_order["id"] = order_id
-                actual_order["type"] = "stoploss"
-                actual_order["stopPrice"] = order.get("stopPrice")
-                actual_order["status_stop"] = "triggered"
-                return actual_order
+            except InvalidOrderException as exc:
+                # The Algo order still exists. A failed child lookup must not cause the
+                # bot to replace the stop or book a fill from the parent alone.
+                raise TemporaryError(
+                    f"PAPI triggered stop {order_id} on {pair} is awaiting execution "
+                    f"order {new_orderid}."
+                ) from exc
+            actual_order["id_stop"] = actual_order["id"]
+            actual_order["id"] = order_id
+            actual_order["type"] = "stoploss"
+            actual_order["stopPrice"] = order.get("stopPrice")
+            actual_order["status_stop"] = "triggered"
+            return actual_order
         return order
 
     def fetch_trading_fees(self) -> dict[str, Any]:
