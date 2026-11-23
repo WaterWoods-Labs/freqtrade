@@ -97,6 +97,10 @@ because the bot would then create a duplicate stop. Later queries reconcile the 
 confirmed canceled orders retain the existing replacement behavior. This does not treat missing
 query evidence as proof that protection is active.
 
+After an Algo stop triggers, the adapter also defers reconciliation until the execution order
+has an ID and can be queried. A delayed child lookup neither replaces the stop nor confirms
+a fill. The bot applies the child receipt to the original stop once it is available.
+
 `Exchange.validate_existing_positions` is an exchange-neutral, default no-op hook. Freqtrade calls
 it after startup order recovery and wallet refresh, and after a completed exit only when no
 remaining trade has a pending order. PAPI reconciliation stays in the Binance override; generic
