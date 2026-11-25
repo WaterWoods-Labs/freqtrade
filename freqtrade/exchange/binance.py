@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from hashlib import sha256
 from math import floor, isclose, isfinite
@@ -3092,12 +3093,34 @@ class Binance(Exchange):
 
     def _reconcile_portfolio_cancel(self, order_id: str, pair: str, *, stop: bool = False):
         """Resolve an ambiguous cancel by exact GET, without inventing zero fills."""
-        try:
-            order = (
-                self.fetch_stoploss_order(order_id, pair)
-                if stop
-                else self._api.fetch_order(order_id, pair, params=self._portfolio_margin_params())
+        if stop:
+            # An acknowledged DELETE can precede visibility of CANCELED in the Algo GET.
+            # Poll only this exact order; never repeat the cancellation to establish its outcome.
+            for attempt in range(self._portfolio_order_recovery_attempts):
+                try:
+                    order = self.fetch_stoploss_order(order_id, pair)
+                except DDosProtection:
+                    raise
+                except (TemporaryError, InvalidOrderException):
+                    if attempt + 1 == self._portfolio_order_recovery_attempts:
+                        raise TemporaryError("PAPI stop cancel outcome remains unconfirmed.")
+                else:
+                    if self._portfolio_cancel_result_confirmed(order, order_id, pair):
+                        return order
+                    if (
+                        str(order.get("id")) != str(order_id)
+                        or order.get("symbol") != pair
+                        or order.get("status") not in {"open", "canceling"}
+                    ):
+                        break
+                if attempt + 1 < self._portfolio_order_recovery_attempts:
+                    sleep(self._portfolio_order_recovery_delay)
+            raise TemporaryError(
+                "PAPI cancel lacks exact terminal fill evidence; defer reconciliation."
             )
+
+        try:
+            order = self._api.fetch_order(order_id, pair, params=self._portfolio_margin_params())
         except (ccxt.BaseError, InvalidOrderException) as exc:
             raise TemporaryError(
                 "PAPI cancel outcome remains unconfirmed; defer reconciliation."
@@ -3106,7 +3129,7 @@ class Binance(Exchange):
             raise TemporaryError(
                 "PAPI cancel lacks exact terminal fill evidence; defer reconciliation."
             )
-        return order if stop else self._order_contracts_to_amount(order)
+        return self._order_contracts_to_amount(order)
 
     @staticmethod
     def _portfolio_cancel_result_confirmed(order, order_id, pair):
@@ -3264,31 +3287,85 @@ class Binance(Exchange):
             raise OperationalException(e) from e
 
         self._log_exchange_response("fetch_stoploss_order", order)
-        val = self.get_option("stoploss_algo_order_info_id")
-        if order.get("status", "open") in ("closed", "triggered"):
-            info = order.get("info", {})
-            new_orderid = info.get(val) if val else None
-            new_orderid = new_orderid or info.get("orderId")
-            if not new_orderid or str(new_orderid) == "0":
-                raise TemporaryError(
-                    f"PAPI triggered stop {order_id} on {pair} has no execution order ID yet."
-                )
-            try:
-                actual_order = self.fetch_order(order_id=new_orderid, pair=pair)
-            except InvalidOrderException as exc:
-                # The Algo order still exists. A failed child lookup must not cause the
-                # bot to replace the stop or book a fill from the parent alone.
-                raise TemporaryError(
-                    f"PAPI triggered stop {order_id} on {pair} is awaiting execution "
-                    f"order {new_orderid}."
-                ) from exc
-            actual_order["id_stop"] = actual_order["id"]
-            actual_order["id"] = order_id
-            actual_order["type"] = "stoploss"
-            actual_order["stopPrice"] = order.get("stopPrice")
-            actual_order["status_stop"] = "triggered"
-            return actual_order
-        return order
+        return self._portfolio_stop_execution(order, order_id, pair)
+
+    def _portfolio_stop_execution(self, order: CcxtOrder, order_id: str, pair: str) -> CcxtOrder:
+        info = order.get("info", {})
+        if (
+            str(info.get("algoId")) != str(order_id)
+            or str(order.get("id")) != str(order_id)
+            or info.get("symbol") != self._api.market(pair)["id"]
+            or order.get("symbol") != pair
+        ):
+            raise TemporaryError("PAPI stop GET returned a different Algo ID or symbol.")
+
+        triggered = (
+            order.get("status") in {"closed", "triggered"} or info.get("algoStatus") == "TRIGGERING"
+        )
+        child_id = info.get("actualOrderId") or (info.get("orderId") if triggered else None)
+        has_child = bool(child_id) and str(child_id) != "0"
+        expected_fill = None
+        if order.get("status") in {"canceled", "cancelled", "expired", "rejected"}:
+            amount, expected_fill = self._portfolio_terminal_stop_amounts(info, pair)
+            if not has_child and expected_fill == 0:
+                order.update(amount=amount, filled=0.0, remaining=amount)
+                return order
+        elif not triggered and not has_child:
+            return order
+
+        if not has_child:
+            raise TemporaryError(
+                f"PAPI triggered stop {order_id} on {pair} has no execution order ID yet."
+            )
+        try:
+            actual_order = self.fetch_order(order_id=str(child_id), pair=pair)
+        except InvalidOrderException as exc:
+            # A delayed child must not cause a replacement stop or a fabricated fill.
+            raise TemporaryError(
+                f"PAPI triggered stop {order_id} on {pair} is awaiting execution order {child_id}."
+            ) from exc
+        if str(actual_order.get("id")) != str(child_id) or actual_order.get("symbol") != pair:
+            raise TemporaryError("PAPI stop GET returned a different execution ID or symbol.")
+        if expected_fill is not None:
+            filled = actual_order.get("filled")
+            if type(filled) not in (float, int) or not isclose(filled, expected_fill):
+                raise TemporaryError("PAPI stop parent and execution fill quantities disagree.")
+        actual_order["id_stop"] = actual_order["id"]
+        actual_order["id"] = order_id
+        actual_order["type"] = "stoploss"
+        actual_order["stopPrice"] = order.get("stopPrice")
+        actual_order["status_stop"] = "triggered"
+        return actual_order
+
+    def _portfolio_terminal_stop_amounts(self, info: dict, pair: str) -> tuple[float, float]:
+        # CCXT defaults filled to zero if executedQty and filledQty are absent. PAPI's
+        # actualQty must be checked in raw contract units before converting to trade units.
+        try:
+            quantity = Decimal(str(info["quantity"]))
+            fills = [
+                Decimal(str(info[key]))
+                for key in ("actualQty", "executedQty", "filledQty")
+                if key in info
+            ]
+        except (InvalidOperation, KeyError) as exc:
+            raise TemporaryError("Invalid PAPI terminal stop quantity evidence.") from exc
+        if (
+            not quantity.is_finite()
+            or quantity <= 0
+            or not fills
+            or any(not n.is_finite() or not 0 <= n <= quantity or n != fills[0] for n in fills)
+        ):
+            raise TemporaryError("Invalid PAPI terminal stop quantity evidence.")
+        amount = self._contracts_to_amount(pair, float(quantity))
+        filled = self._contracts_to_amount(pair, float(fills[0]))
+        if (
+            not isfinite(amount)
+            or amount <= 0
+            or not isfinite(filled)
+            or (fills[0] and filled <= 0)
+        ):
+            raise TemporaryError("Invalid PAPI terminal stop quantity conversion.")
+        return amount, filled
 
     def fetch_trading_fees(self) -> dict[str, Any]:
         if self._portfolio_margin:

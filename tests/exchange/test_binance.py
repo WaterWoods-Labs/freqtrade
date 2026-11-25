@@ -339,6 +339,9 @@ def portfolio_algo_order(order_id: str, client_order_id: str, status: str = "ope
         "info": {
             "algoId": order_id,
             "clientAlgoId": client_order_id,
+            "symbol": "ETHUSDT",
+            "actualQty": "0",
+            "quantity": "1",
         },
     }
 
@@ -2499,7 +2502,7 @@ def test_binance_portfolio_margin_stoploss_query(default_conf, mocker):
         "filled": 0.0,
         "remaining": 1.0,
         "status": "open",
-        "info": {},
+        "info": {"algoId": "73", "symbol": "ETHUSDT"},
     }
     api_mock.request.return_value = order
     exchange = get_patched_exchange(
@@ -2598,6 +2601,130 @@ def test_binance_portfolio_margin_stoploss_visibility_does_not_duplicate(
     bot.update_trade_state.assert_called_once()
     bot.manage_trade_stoploss_orders.assert_called_once()
     assert all(call.args[2] == "GET" for call in api_mock.request.call_args_list)
+
+
+@pytest.fixture
+def papi_cancel_receipt(default_conf, mocker, markets):
+    pair = "ETH/USDT:USDT"
+    market = {**deepcopy(markets[pair]), "id": "ETHUSDT", "contractSize": 10}
+    parser = ccxt.binance({"options": {"defaultType": "swap", "portfolioMargin": True}})
+    parser.set_markets([market])
+    exchange = get_patched_exchange(
+        mocker,
+        portfolio_margin_conf(default_conf, dry_run=False),
+        portfolio_margin_live_api_mock(),
+        exchange="binance",
+    )
+    exchange._api = parser
+    exchange._markets = {pair: market}
+    request = mocker.patch.object(parser, "request")
+    raw = {
+        "algoId": 73,
+        "algoType": "CONDITIONAL",
+        "clientAlgoId": "ftpm-receipt",
+        "orderType": "STOP_MARKET",
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "timeInForce": "GTC",
+        "quantity": "0.95",
+        "algoStatus": "CANCELED",
+        "actualOrderId": "",
+        "actualQty": "0",
+        "actualPrice": "0",
+        "triggerPrice": "101.18",
+        "price": "0",
+        "reduceOnly": True,
+    }
+    return exchange, request, raw
+
+
+def test_papi_algo_cancel_polls_exact_receipt_without_another_delete(papi_cancel_receipt, mocker):
+    exchange, request, raw = papi_cancel_receipt
+    request.side_effect = [{"complete": True}, {**raw, "algoStatus": "NEW"}, raw]
+    delay = mocker.patch("freqtrade.exchange.binance.sleep")
+    result = exchange.cancel_stoploss_order_with_result("73", "ETH/USDT:USDT", 9.5)
+    assert (result["status"], result["amount"], result["filled"]) == ("canceled", 9.5, 0.0)
+    assert [(c.args[2], c.args[0], c.args[3]["algoId"]) for c in request.call_args_list] == [
+        ("DELETE", "um/algo/order", "73"),
+        ("GET", "um/algo/algoOrder", "73"),
+        ("GET", "um/algo/algoOrder", "73"),
+    ]
+    delay.assert_called_once_with(exchange._portfolio_order_recovery_delay)
+
+
+def test_papi_algo_cancel_new_visibility_is_bounded(papi_cancel_receipt, mocker):
+    exchange, request, raw = papi_cancel_receipt
+    request.side_effect = [{"complete": True}] + [
+        {**raw, "algoStatus": "NEW"} for _ in range(exchange._portfolio_order_recovery_attempts)
+    ]
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    with pytest.raises(TemporaryError, match="terminal fill evidence"):
+        exchange.cancel_stoploss_order_with_result("73", "ETH/USDT:USDT", 9.5)
+    assert [c.args[2] for c in request.call_args_list] == [
+        "DELETE",
+        *(["GET"] * exchange._portfolio_order_recovery_attempts),
+    ]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"algoId": 74},
+        {"symbol": "BTCUSDT"},
+        {"quantity": "0"},
+        {"actualQty": ""},
+        {"actualQty": "NaN"},
+        {"actualQty": "-0.1"},
+        {"actualQty": "1.0"},
+        {"actualQty": "0.1", "filledQty": "0"},
+        {"actualQty": "0.1"},
+        {"algoStatus": "TRIGGERING"},
+    ],
+)
+def test_papi_algo_rejects_mismatched_identity_or_ambiguous_parent(papi_cancel_receipt, changes):
+    exchange, request, raw = papi_cancel_receipt
+    request.return_value = {**raw, **changes}
+    with pytest.raises(TemporaryError):
+        exchange.fetch_stoploss_order("73", "ETH/USDT:USDT")
+    assert request.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "child_id, filled, error",
+    [
+        ("99", 2.5, None),
+        ("98", 2.5, "execution ID or symbol"),
+        ("99", None, "fill quantities disagree"),
+        ("99", 2, "fill quantities disagree"),
+    ],
+)
+def test_papi_algo_canceled_parent_with_actual_fill_reconciles_child(
+    papi_cancel_receipt, mocker, child_id, filled, error
+):
+    exchange, request, raw = papi_cancel_receipt
+    pair = "ETH/USDT:USDT"
+    request.return_value = {**raw, "actualQty": "0.25", "actualOrderId": "99"}
+    fetch = mocker.patch.object(
+        exchange,
+        "fetch_order",
+        return_value={
+            "id": child_id,
+            "symbol": pair,
+            "amount": 9.5,
+            "filled": filled,
+            "status": "canceled",
+            "remaining": 7.0,
+        },
+    )
+    if error:
+        with pytest.raises(TemporaryError, match=error):
+            exchange.fetch_stoploss_order("73", pair)
+    else:
+        order = exchange.fetch_stoploss_order("73", pair)
+        assert (order["id"], order["id_stop"], order["filled"]) == ("73", "99", 2.5)
+        assert order["status_stop"] == "triggered"
+    fetch.assert_called_once_with(order_id="99", pair=pair)
 
 
 def test_binance_portfolio_margin_confirmed_canceled_stop_can_be_replaced(default_conf, mocker):
