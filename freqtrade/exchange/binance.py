@@ -3318,7 +3318,7 @@ class Binance(Exchange):
                 f"PAPI triggered stop {order_id} on {pair} has no execution order ID yet."
             )
         try:
-            actual_order = self.fetch_order(order_id=child_id, pair=pair)
+            actual_order = self.fetch_order(order_id=str(child_id), pair=pair)
         except InvalidOrderException as exc:
             # A delayed child must not cause a replacement stop or a fabricated fill.
             raise TemporaryError(
