@@ -22,6 +22,8 @@ from freqtrade.candle_columns import get_candle_columns
 from freqtrade.constants import BuySell
 from freqtrade.enums import TRADE_MODES, CandleType, MarginMode, PriceType, RunMode, TradingMode
 from freqtrade.exceptions import (
+    CancelReconciliationPending,
+    CancelReconciliationRequired,
     DDosProtection,
     FreqtradeException,
     InsufficientFundsError,
@@ -30,6 +32,7 @@ from freqtrade.exceptions import (
     TemporaryError,
 )
 from freqtrade.exchange import Exchange
+from freqtrade.exchange.binance_cancel_evidence import CancelReconcileConflict
 from freqtrade.exchange.binance_order_intent import (
     PortfolioEntryReservation,
     PortfolioOrderIntent,
@@ -60,6 +63,18 @@ from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
 
 
 logger = logging.getLogger(__name__)
+
+
+class _ContainmentOrderUnconfirmed(OperationalException):
+    """A generated reduce-only client ID exists, but its submission receipt is missing."""
+
+
+class _StopReceiptConflict(TemporaryError):
+    """An explicit mismatch must not be reclassified as delayed order visibility."""
+
+
+class _StopCancelAckUnconfirmed(OperationalException):
+    """The native Algo DELETE did not return an acknowledgement."""
 
 
 @dataclass(frozen=True)
@@ -183,6 +198,16 @@ class Binance(Exchange):
         self._portfolio_unknown_conditional_client_order_id: str | None = None
         self._portfolio_unknown_conditional_pair: str | None = None
         self._portfolio_unknown_order_latched = False
+        self._papi_cancel_recovery_enabled = (
+            exchange_config.get("papi_auto_reconcile_cancels") is True
+            and self._portfolio_margin
+            and self._portfolio_margin_risk is not None
+            and self._portfolio_margin_risk.get("policy") in _PORTFOLIO_MARGIN_DCA_POLICIES
+            and config.get("dry_run") is False
+            and config.get("runmode") == RunMode.LIVE
+        )
+        self._last_cancel_incident: CancelReconciliationRequired | None = None
+        self._active_cancel_incident: CancelReconciliationRequired | None = None
         self._portfolio_dca_entry_lease: _PortfolioDcaEntryLease | None = None
         self._portfolio_order_intent_store: PortfolioOrderIntentStore | None = None
         if self._portfolio_margin:
@@ -227,6 +252,8 @@ class Binance(Exchange):
             and not config.get("dry_run", True)
         ):
             self._install_portfolio_dca_submission_guard()
+        if self._papi_cancel_recovery_enabled:
+            logger.info("PAPI verified cancel recovery enabled for live DCA.")
         self._spot_delist_schedule_cache: FtTTLCache = FtTTLCache(maxsize=100, ttl=300)
 
     def arm_portfolio_dca_entry(
@@ -1024,7 +1051,7 @@ class Binance(Exchange):
             {"algoId": order_id},
         )
         if not isinstance(response, dict) or response.get("complete") is not True:
-            raise OperationalException(
+            raise _StopCancelAckUnconfirmed(
                 "Binance Portfolio Margin did not confirm the Algo order cancellation."
             )
         return {
@@ -2040,6 +2067,7 @@ class Binance(Exchange):
         pair: str,
         active_positions: list[tuple[dict[str, Any], float]],
         parent_client_order_id: str,
+        containment_orders: dict[str, str | None] | None = None,
     ) -> None:
         """Submit one evidence-based reduce-only close for a reconciled PAPI position."""
         if len(active_positions) != 1:
@@ -2075,6 +2103,9 @@ class Binance(Exchange):
             parent_client_order_id=parent_client_order_id,
         )
         create_failed = False
+        if containment_orders is not None:
+            # Preserve ownership before POST even if its response and the immediate GET are lost.
+            containment_orders[close_client_id] = None
         try:
             close_order = self._api.create_order(
                 pair,
@@ -2090,20 +2121,35 @@ class Binance(Exchange):
         if create_failed or not self._portfolio_order_response_confirmed(close_order):
             close_order = self._recover_portfolio_order(pair, close_client_id, conditional=False)
             if close_order is None:
-                raise OperationalException(
+                raise _ContainmentOrderUnconfirmed(
                     "Binance Portfolio Margin emergency reduce-only containment order "
                     "could not be confirmed. Trading remains stopped."
                 )
         if not self._portfolio_order_response_confirmed(close_order):
-            raise OperationalException(
+            raise _ContainmentOrderUnconfirmed(
                 "Binance Portfolio Margin emergency containment returned an "
                 "order response without an exchange order id."
             )
+        if containment_orders is not None:
+            if (
+                close_order.get("clientOrderId") not in (None, close_client_id)
+                or close_order.get("symbol") not in (None, pair)
+                or close_order.get("side") not in (None, close_side)
+            ):
+                raise OperationalException("Containment receipt identified a different order.")
+            if (
+                close_order.get("clientOrderId") == close_client_id
+                and close_order.get("symbol") == pair
+            ):
+                containment_orders[close_client_id] = str(close_order["id"])
         self._clear_portfolio_order_intent(close_client_id)
         self._log_exchange_response("portfolio_margin_emergency_flatten", close_order)
 
     def _contain_unknown_portfolio_order(  # noqa: C901
-        self, pair: str, client_order_id: str
+        self,
+        pair: str,
+        client_order_id: str,
+        containment_orders: dict[str, str | None] | None = None,
     ) -> _PortfolioContainmentOutcome:
         """Cancel an unknown order and repeatedly contain late fills until stably clean."""
         if self._portfolio_margin_risk is None:
@@ -2175,7 +2221,12 @@ class Binance(Exchange):
                 # position snapshot is fresh evidence of exposure: the original
                 # entry may have filled after an earlier emergency close. A repeated
                 # reduce-only market close cannot reverse or open a position.
-                self._flatten_portfolio_position(pair, active_positions, client_order_id)
+                if containment_orders is None:
+                    self._flatten_portfolio_position(pair, active_positions, client_order_id)
+                else:
+                    self._flatten_portfolio_position(
+                        pair, active_positions, client_order_id, containment_orders
+                    )
                 flattened = True
                 snapshot_action = True
 
@@ -3032,6 +3083,82 @@ class Binance(Exchange):
             return False
         return not self._portfolio_active_position_snapshot(pair)
 
+    def _check_cancel_incident(self, incident: CancelReconciliationRequired) -> None:
+        if not self._papi_cancel_recovery_enabled or self._last_cancel_incident is not incident:
+            raise CancelReconcileConflict(
+                "Cancellation recovery lacks the originating live operation."
+            )
+        if (
+            incident.blocker
+            or self._portfolio_unknown_conditional_client_order_id is not None
+            or self._portfolio_unknown_conditional_pair is not None
+        ):
+            raise CancelReconcileConflict(
+                incident.blocker or "An unrelated conditional intent is active."
+            )
+        if (incident.kind == "partial_entry") != self._portfolio_unknown_order_latched:
+            raise CancelReconcileConflict(
+                "Cancellation recovery found an unrelated exchange latch."
+            )
+
+    def recoverable_cancel_cause(
+        self, error: OperationalException
+    ) -> CancelReconciliationRequired | None:
+        """Recognize only the live wrapper's stopped trailing-exit cancellation."""
+        if (
+            not self._papi_cancel_recovery_enabled
+            or type(error) is not OperationalException
+            or error.args != ("Trailing market exit needs order reconciliation",)
+        ):
+            return None
+        cause = error.__cause__
+        incident = cause.incident if isinstance(cause, CancelReconciliationPending) else cause
+        if (
+            isinstance(incident, CancelReconciliationRequired)
+            and incident is self._last_cancel_incident
+        ):
+            return incident
+        return None
+
+    def reconcile_cancel(self, bot, incident: CancelReconciliationRequired):
+        """Called only in the worker's stopped, same-process recovery window."""
+        from freqtrade.exchange.binance_cancel_reconcile import reconcile_cancel
+
+        self._check_cancel_incident(incident)
+        if bot.exchange is not self:
+            raise CancelReconcileConflict(
+                "Cancellation recovery requires the originating exchange."
+            )
+        if (
+            self._active_cancel_incident is not None
+            and self._active_cancel_incident is not incident
+        ):
+            raise CancelReconcileConflict("A different cancellation is already being reconciled.")
+        self._active_cancel_incident = incident
+        return reconcile_cancel(bot, incident)
+
+    def clear_reconciled_cancel(
+        self, incident: CancelReconciliationRequired, *, retain_entry: bool = False
+    ) -> None:
+        """Finalize the verified ledger commit under the caller's account operation lock."""
+        self._check_cancel_incident(incident)
+        store = self._portfolio_order_intent_store
+        if self._active_cancel_incident is not incident or store is None:
+            raise OperationalException("Cancellation recovery is outside the verified incident.")
+        if incident.kind == "partial_entry" and incident.client_id:
+            store.resolve_verified_partial_cancel(
+                incident.pair,
+                incident.client_id,
+                {cid for cid, _ in incident.containment_orders},
+                retain_entry=retain_entry,
+            )
+            self._portfolio_unknown_order_latched = False
+        elif retain_entry or store.intents or self._portfolio_unknown_order_latched:
+            raise OperationalException(
+                "Cancellation recovery cannot clear unrelated order evidence."
+            )
+        self._last_cancel_incident = self._active_cancel_incident = None
+
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None):
         return super().fetch_order(order_id, pair, self._portfolio_margin_params(params))
 
@@ -3085,20 +3212,58 @@ class Binance(Exchange):
                 self.get_contract_size(pair) or 1.0,
             )
             store.begin_entry_reconciliation(client_id)
+            blocker = None
             try:
                 result = self._resolve_portfolio_partial_cancel(evidence)
                 if result is not None:
                     store.promote_to_entry_reservation(client_id)
                     return self._order_contracts_to_amount(result)
             except OperationalException as exc:
+                blocker = (
+                    "The original cancellation had contradictory evidence or unsafe local state."
+                )
                 logger.warning("PAPI partial-entry reconciliation stopped: %s", exc)
             except Exception as exc:
+                blocker = "The original cancellation could not complete its verified recovery path."
                 logger.warning("PAPI partial-entry reconciliation failed: %s", type(exc).__name__)
+            eligible = (
+                self._papi_cancel_recovery_enabled and not self._portfolio_unknown_order_latched
+            )
             self._portfolio_unknown_order_latched = True
+            if eligible:
+                self._raise_partial_cancel_incident(evidence, blocker)
             self._contain_unknown_portfolio_order(pair, client_id)
             raise OperationalException(
                 "DCA partial cancel was ambiguous; containment ran and trading remains stopped."
             )
+
+    def _raise_partial_cancel_incident(
+        self, evidence: PortfolioPartialEntryEvidence, blocker: str | None
+    ) -> None:
+        children: dict[str, str | None] = {}
+        try:
+            self._contain_unknown_portfolio_order(evidence.pair, evidence.client_id, children)
+        except _ContainmentOrderUnconfirmed:
+            if not children:
+                raise
+            # Only the exact previously recorded child client ID can resolve a lost close receipt.
+        except OperationalException:
+            blocker = "Containment did not confirm a stable account state."
+        incident = CancelReconciliationRequired(
+            "partial_entry",
+            evidence.pair,
+            evidence.order_id,
+            evidence.client_id,
+            tuple(children.items()),
+            side=evidence.side,
+            blocker=blocker,
+            observed_amount=evidence.amount,
+            observed_fill=evidence.highest_fill,
+            observed_base_amount=evidence.amount * evidence.contract_size,
+            observed_base_fill=evidence.highest_fill * evidence.contract_size,
+        )
+        self._last_cancel_incident = incident
+        raise incident
 
     def _resolve_portfolio_partial_cancel(
         self, evidence: PortfolioPartialEntryEvidence
@@ -3143,45 +3308,105 @@ class Binance(Exchange):
                 sleep(self._portfolio_order_recovery_delay)
         return None
 
+    def _pending_cancel(
+        self,
+        message: str,
+        order_id: str,
+        pair: str,
+        stop: bool,
+        *,
+        blocker: str | None = None,
+    ) -> TemporaryError:
+        if not self._papi_cancel_recovery_enabled or self._active_cancel_incident is not None:
+            return TemporaryError(message)
+        incident = CancelReconciliationRequired(
+            "stop" if stop else "regular", pair, str(order_id), blocker=blocker
+        )
+        self._last_cancel_incident = incident
+        return CancelReconciliationPending(message, incident)
+
+    @staticmethod
+    def _cancel_identity_conflict(order: CcxtOrder, order_id: str, pair: str) -> bool:
+        return isinstance(order, dict) and (
+            (order.get("id") is not None and str(order["id"]) != str(order_id))
+            or (order.get("symbol") is not None and order["symbol"] != pair)
+        )
+
     def _reconcile_portfolio_cancel(self, order_id: str, pair: str, *, stop: bool = False):
         """Resolve an ambiguous cancel by exact GET, without inventing zero fills."""
         if stop:
-            # An acknowledged DELETE can precede visibility of CANCELED in the Algo GET.
-            # Poll only this exact order; never repeat the cancellation to establish its outcome.
-            for attempt in range(self._portfolio_order_recovery_attempts):
-                try:
-                    order = self.fetch_stoploss_order(order_id, pair)
-                except DDosProtection:
-                    raise
-                except (TemporaryError, InvalidOrderException):
-                    if attempt + 1 == self._portfolio_order_recovery_attempts:
-                        raise TemporaryError("PAPI stop cancel outcome remains unconfirmed.")
-                else:
-                    if self._portfolio_cancel_result_confirmed(order, order_id, pair):
-                        return order
-                    if (
-                        str(order.get("id")) != str(order_id)
-                        or order.get("symbol") != pair
-                        or order.get("status") not in {"open", "canceling"}
-                    ):
-                        break
-                if attempt + 1 < self._portfolio_order_recovery_attempts:
-                    sleep(self._portfolio_order_recovery_delay)
-            raise TemporaryError(
-                "PAPI cancel lacks exact terminal fill evidence; defer reconciliation."
-            )
+            return self._reconcile_portfolio_stop_cancel(order_id, pair)
 
         try:
             order = self._api.fetch_order(order_id, pair, params=self._portfolio_margin_params())
         except (ccxt.BaseError, InvalidOrderException) as exc:
-            raise TemporaryError(
-                "PAPI cancel outcome remains unconfirmed; defer reconciliation."
+            raise self._pending_cancel(
+                "PAPI cancel outcome remains unconfirmed; defer reconciliation.",
+                order_id,
+                pair,
+                stop,
             ) from exc
         if not self._portfolio_cancel_result_confirmed(order, order_id, pair):
-            raise TemporaryError(
-                "PAPI cancel lacks exact terminal fill evidence; defer reconciliation."
+            raise self._pending_cancel(
+                "PAPI cancel lacks exact terminal fill evidence; defer reconciliation.",
+                order_id,
+                pair,
+                stop,
+                blocker="The original cancel receipt identified another order."
+                if self._cancel_identity_conflict(order, order_id, pair)
+                else None,
             )
         return self._order_contracts_to_amount(order)
+
+    def _reconcile_portfolio_stop_cancel(self, order_id: str, pair: str):
+        # An acknowledged DELETE can precede visibility of CANCELED in the Algo GET.
+        # Poll only this exact order; never repeat the cancellation to establish its outcome.
+        for attempt in range(self._portfolio_order_recovery_attempts):
+            try:
+                order = self.fetch_stoploss_order(order_id, pair)
+            except DDosProtection:
+                raise
+            except (TemporaryError, InvalidOrderException) as exc:
+                if self._papi_cancel_recovery_enabled and isinstance(exc, _StopReceiptConflict):
+                    raise self._pending_cancel(
+                        "PAPI stop cancellation has conflicting evidence.",
+                        order_id,
+                        pair,
+                        True,
+                        blocker="Stop receipt identities or execution quantities disagree.",
+                    ) from exc
+                if attempt + 1 == self._portfolio_order_recovery_attempts:
+                    raise self._pending_cancel(
+                        "PAPI stop cancel outcome remains unconfirmed.", order_id, pair, True
+                    ) from exc
+            else:
+                if self._portfolio_cancel_result_confirmed(order, order_id, pair):
+                    return order
+                if (
+                    not isinstance(order, dict)
+                    or str(order.get("id")) != str(order_id)
+                    or order.get("symbol") != pair
+                    or order.get("status") not in {"open", "canceling"}
+                ):
+                    if self._papi_cancel_recovery_enabled and self._cancel_identity_conflict(
+                        order, order_id, pair
+                    ):
+                        raise self._pending_cancel(
+                            "PAPI stop cancel lacks matching identity.",
+                            order_id,
+                            pair,
+                            True,
+                            blocker="The original stop receipt identified another order.",
+                        )
+                    break
+            if attempt + 1 < self._portfolio_order_recovery_attempts:
+                sleep(self._portfolio_order_recovery_delay)
+        raise self._pending_cancel(
+            "PAPI cancel lacks exact terminal fill evidence; defer reconciliation.",
+            order_id,
+            pair,
+            True,
+        )
 
     @staticmethod
     def _portfolio_cancel_result_confirmed(order, order_id, pair):
@@ -3220,9 +3445,7 @@ class Binance(Exchange):
         if not self._portfolio_margin or self._config["dry_run"]:
             return super().cancel_order_with_result(order_id, pair, amount)
         order = self.cancel_order(order_id, pair)
-        if self._portfolio_cancel_result_confirmed(order, order_id, pair):
-            return order
-        return self._reconcile_portfolio_cancel(order_id, pair)
+        return self._portfolio_cancel_receipt_or_query(order, order_id, pair, stop=False)
 
     def cancel_stoploss_order_with_result(
         self, order_id: str, pair: str, amount: float
@@ -3230,9 +3453,24 @@ class Binance(Exchange):
         if not self._portfolio_margin or self._config["dry_run"]:
             return super().cancel_stoploss_order_with_result(order_id, pair, amount)
         order = self.cancel_stoploss_order(order_id, pair)
+        return self._portfolio_cancel_receipt_or_query(order, order_id, pair, stop=True)
+
+    def _portfolio_cancel_receipt_or_query(
+        self, order: CcxtOrder, order_id: str, pair: str, *, stop: bool
+    ) -> CcxtOrder:
+        if self._papi_cancel_recovery_enabled and self._cancel_identity_conflict(
+            order, order_id, pair
+        ):
+            raise self._pending_cancel(
+                "PAPI cancellation received a conflicting response.",
+                order_id,
+                pair,
+                stop,
+                blocker="The original cancellation receipt identified another order.",
+            )
         if self._portfolio_cancel_result_confirmed(order, order_id, pair):
             return order
-        return self._reconcile_portfolio_cancel(order_id, pair, stop=True)
+        return self._reconcile_portfolio_cancel(order_id, pair, stop=stop)
 
     def cancel_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
         if not self._portfolio_margin or self._config["dry_run"]:
@@ -3248,6 +3486,18 @@ class Binance(Exchange):
             order = self._cancel_portfolio_algo_order(order_id)
             self._log_exchange_response("cancel_stoploss_order", order)
             return order
+        except _StopCancelAckUnconfirmed:
+            if not self._papi_cancel_recovery_enabled or self._active_cancel_incident is not None:
+                raise
+            # This is already a stopping failure. Only an exact terminal GET can avoid that stop.
+            try:
+                return self._reconcile_portfolio_cancel(order_id, pair, stop=True)
+            except CancelReconciliationPending as exc:
+                raise exc.incident from exc
+            except DDosProtection as exc:
+                raise OperationalException(
+                    "An unacknowledged stop cancellation was rate limited."
+                ) from exc
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.InvalidOrder, ccxt.OperationFailed, ccxt.ExchangeError):
@@ -3349,7 +3599,7 @@ class Binance(Exchange):
             or info.get("symbol") != self._api.market(pair)["id"]
             or order.get("symbol") != pair
         ):
-            raise TemporaryError("PAPI stop GET returned a different Algo ID or symbol.")
+            raise _StopReceiptConflict("PAPI stop GET returned a different Algo ID or symbol.")
 
         triggered = (
             order.get("status") in {"closed", "triggered"} or info.get("algoStatus") == "TRIGGERING"
@@ -3377,11 +3627,13 @@ class Binance(Exchange):
                 f"PAPI triggered stop {order_id} on {pair} is awaiting execution order {child_id}."
             ) from exc
         if str(actual_order.get("id")) != str(child_id) or actual_order.get("symbol") != pair:
-            raise TemporaryError("PAPI stop GET returned a different execution ID or symbol.")
+            raise _StopReceiptConflict("PAPI stop GET returned a different execution ID or symbol.")
         if expected_fill is not None:
             filled = actual_order.get("filled")
             if type(filled) not in (float, int) or not isclose(filled, expected_fill):
-                raise TemporaryError("PAPI stop parent and execution fill quantities disagree.")
+                raise _StopReceiptConflict(
+                    "PAPI stop parent and execution fill quantities disagree."
+                )
         actual_order["id_stop"] = actual_order["id"]
         actual_order["id"] = order_id
         actual_order["type"] = "stoploss"
@@ -3401,6 +3653,13 @@ class Binance(Exchange):
             ]
         except (InvalidOperation, KeyError) as exc:
             raise TemporaryError("Invalid PAPI terminal stop quantity evidence.") from exc
+        if (
+            self._papi_cancel_recovery_enabled
+            and fills
+            and all(n.is_finite() for n in fills)
+            and len(set(fills)) != 1
+        ):
+            raise _StopReceiptConflict("PAPI terminal stop execution quantities disagree.")
         if (
             not quantity.is_finite()
             or quantity <= 0

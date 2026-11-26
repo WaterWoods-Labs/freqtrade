@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 from cachetools import TTLCache
 
 from freqtrade import constants
+from freqtrade.cancel_recovery import CancelRecovery
 from freqtrade.configuration import remove_exchange_credentials, validate_config_consistency
 from freqtrade.constants import BuySell, Config, EntryExecuteMode, ExchangeConfig, LongShort
 from freqtrade.data.converter import count_total_order_book
@@ -103,6 +104,7 @@ class FreqtradeBot(LoggingMixin):
 
         # Init bot state
         self.state = State.STOPPED
+        self.cancel_recovery = CancelRecovery()
 
         # Init objects
         self.config = config
@@ -237,7 +239,7 @@ class FreqtradeBot(LoggingMixin):
             # Wrap db activities in shutdown to avoid problems if database is gone,
             # and raises further exceptions.
             # Trade.session is missing if startup failed before init_db().
-            if hasattr(Trade, "session"):
+            if hasattr(Trade, "session") and not self.cancel_recovery.held:
                 if self.config.get("cancel_open_orders_on_exit"):
                     self.cancel_all_open_orders()
 
@@ -257,7 +259,10 @@ class FreqtradeBot(LoggingMixin):
             self.exchange.close()
         try:
             if hasattr(Trade, "session"):
-                Trade.commit()
+                if self.cancel_recovery.held:
+                    Trade.session.rollback()
+                else:
+                    Trade.commit()
         except Exception:
             # Exceptions here will be happening if the db disappeared.
             # At which point we can no longer commit anyway.
@@ -373,7 +378,7 @@ class FreqtradeBot(LoggingMixin):
         """
         Close all orders that were left open
         """
-        if self.config.get("cancel_open_orders_on_exit"):
+        if not self.cancel_recovery.held and self.config.get("cancel_open_orders_on_exit"):
             self.cancel_all_open_orders()
 
     def check_for_open_trades(self):

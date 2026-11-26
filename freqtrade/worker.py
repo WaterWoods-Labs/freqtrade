@@ -15,7 +15,12 @@ from freqtrade import __version__
 from freqtrade.configuration import Configuration
 from freqtrade.constants import PROCESS_THROTTLE_SECS, RETRY_TIMEOUT, Config
 from freqtrade.enums import RPCMessageType, State
-from freqtrade.exceptions import OperationalException, TemporaryError
+from freqtrade.exceptions import (
+    CancelReconciliationPending,
+    CancelReconciliationRequired,
+    OperationalException,
+    TemporaryError,
+)
 from freqtrade.exchange import timeframe_to_next_date
 from freqtrade.freqtradebot import FreqtradeBot
 
@@ -90,7 +95,8 @@ class Worker:
 
         # Log state transition
         if state != old_state:
-            if old_state != State.RELOAD_CONFIG:
+            recovery_stop = state == State.STOPPED and self.freqtrade.cancel_recovery.held
+            if old_state != State.RELOAD_CONFIG and not recovery_stop:
                 self.freqtrade.notify_status(f"{state.name.lower()}")
 
             logger.info(
@@ -102,7 +108,7 @@ class Worker:
             ):
                 self.freqtrade.startup()
 
-            if state == State.STOPPED:
+            if state == State.STOPPED and not recovery_stop:
                 self.freqtrade.check_for_open_trades()
 
             # Reset heartbeat timestamp to log the heartbeat message at
@@ -128,6 +134,8 @@ class Worker:
                 timeframe_offset=1,
             )
 
+        if self.freqtrade.cancel_recovery.held:
+            state = self.freqtrade.state
         if self._heartbeat_interval:
             now = time.time()
             if (now - self._heartbeat_msg) > self._heartbeat_interval:
@@ -195,12 +203,26 @@ class Worker:
         self.freqtrade.process_stopped()
 
     def _process_running(self) -> None:
+        bot = self.freqtrade
+        before = bot.cancel_recovery.snapshot(bot)
+        if before[1] not in (State.RUNNING, State.PAUSED):
+            return
         try:
-            self.freqtrade.process()
+            bot.process()
+        except CancelReconciliationRequired as incident:
+            bot.cancel_recovery.handle(bot, incident, before)
         except TemporaryError as error:
+            if isinstance(error, CancelReconciliationPending) and bot.state == State.STOPPED:
+                bot.cancel_recovery.handle(bot, error.incident, before)
+                return
             logger.warning(f"Error: {error}, retrying in {RETRY_TIMEOUT} seconds...")
             time.sleep(RETRY_TIMEOUT)
-        except OperationalException:
+        except OperationalException as error:
+            if bot.state == State.STOPPED:
+                wrapped = bot.exchange.recoverable_cancel_cause(error)
+                if wrapped is not None:
+                    bot.cancel_recovery.handle(bot, wrapped, before)
+                    return
             tb = traceback.format_exc()
             hint = "Issue `/start` if you think it is safe to restart."
 
@@ -220,10 +242,14 @@ class Worker:
         self._notify("RELOADING=1")
 
         # Clean up current freqtrade modules
+        held = self.freqtrade.cancel_recovery.held
         self.freqtrade.cleanup()
 
         # Load and validate config and create new instance of the bot
         self._init(True)
+        if held:
+            # Reloading an unresolved incident always requires a fresh owner start.
+            self.freqtrade.state = State.STOPPED
 
         self.freqtrade.notify_status(f"{State(self.freqtrade.state)} after config reloaded")
 

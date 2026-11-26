@@ -1083,6 +1083,14 @@ CONF_SCHEMA = {
                     ),
                     "type": "object",
                 },
+                "papi_auto_reconcile_cancels": {
+                    "description": (
+                        "Resume after a known live PAPI cancellation only when "
+                        "account reconciliation succeeds."
+                    ),
+                    "type": "boolean",
+                    "default": False,
+                },
                 "portfolio_margin_risk": {
                     "description": (
                         "Optional fail-closed entry policy for the initial Binance "

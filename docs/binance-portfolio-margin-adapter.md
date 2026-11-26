@@ -152,10 +152,27 @@ exchange and reserved client ID. Settlement requires the matching order, side an
 contract quantity, a terminal status, explicit executed quantity covering every observed fill,
 and an exchange-reported execution price or value. Older open snapshots can lag a terminal
 receipt. A newer open snapshot, conflicting terminal receipts or insufficient evidence keep
-the cancellation unresolved. Ambiguous cancellation uses the
-existing late-fill containment and leaves trading latched stopped. A crash during cancellation
+the cancellation unresolved. Ambiguous cancellation uses the existing late-fill containment
+and stops trading pending reconciliation. A crash during cancellation
 therefore cannot erase the uncertain entry. The runtime owns fixed-anchor stop replacement and
 actual-fee accounting; these adapter tests alone do not certify a complete live strategy.
+
+### Recovery after a cancellation stops the worker
+
+The optional exchange setting `papi_auto_reconcile_cancels` defaults to false. It applies to
+live Portfolio Margin DCA policies. An eligible cancellation pauses the original worker while
+it queries PAPI. The worker can account for terminal fills, commissions and an identifiable
+protective market exit in the local ledger. It requires consistent account-wide positions,
+ordinary orders, reservations and native reduce-only stop coverage across repeated snapshots.
+Reconciliation sends no exchange orders. An ambiguous submission, a conflicting receipt or
+missing protection leaves trading stopped.
+
+A successful check silently restores the previous running or paused state. The worker retries
+brief delays in exchange evidence, then sends one exception notification if the incident is
+unresolved. During that hold an operator stop takes precedence, and trade-changing RPC calls
+are locked. Inspect the exchange and ledger before using the existing guarded reload and start
+procedure for an unresolved incident. A fresh process always follows the configured startup
+policy. Ordinary trade notifications continue to use the configured RPC channels.
 
 Chan entries must be limit orders. Before submission, projected positions, open orders, and local
 reservations are checked against the configured entry limits. Reduce-only exits are not blocked

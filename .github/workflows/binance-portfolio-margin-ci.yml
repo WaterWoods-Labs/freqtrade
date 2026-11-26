@@ -57,10 +57,13 @@ jobs:
           pytest -q \
             tests/test_bot_risk.py \
             tests/exchange/test_binance_bot_risk.py \
+            tests/exchange/test_binance_cancel_incident.py \
+            tests/exchange/test_binance_cancel_reconcile.py \
             tests/test_binance_portfolio_margin_boundary.py \
             tests/test_configuration.py \
             tests/exchange/test_binance.py \
             tests/freqtradebot/test_freqtradebot.py \
+            tests/freqtradebot/test_cancel_recovery.py \
             tests/rpc/test_rpc.py
 
   full:
@@ -71,7 +74,8 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.full) ||
         (
           github.event_name == 'pull_request' &&
-          github.head_ref == 'sync/binance-portfolio-margin-upstream-develop'
+          (github.head_ref == 'sync/binance-portfolio-margin-upstream-develop' ||
+           contains(github.event.pull_request.body, '[x] Run full upstream compatibility'))
         )
       }}
     runs-on: ubuntu-24.04
