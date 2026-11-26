@@ -12,7 +12,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from math import floor, isnan
 from threading import Lock
-from typing import Any, Literal, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, TypeVar
 from uuid import uuid4
 
 import ccxt
@@ -53,6 +53,7 @@ from freqtrade.enums import (
     TradingMode,
 )
 from freqtrade.exceptions import (
+    CancelReconciliationRequired,
     ConfigurationError,
     DDosProtection,
     ExchangeError,
@@ -115,12 +116,25 @@ from freqtrade.util import FtTTLCache, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts, format_ms_time
 
 
+if TYPE_CHECKING:
+    from freqtrade.freqtradebot import FreqtradeBot
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
 
 class Exchange(LoggingMixin):
+    def recoverable_cancel_cause(
+        self, error: OperationalException
+    ) -> CancelReconciliationRequired | None:
+        """Identify a cancel incident wrapped by this adapter's live runtime."""
+        return None
+
+    def reconcile_cancel(self, bot: "FreqtradeBot", incident: CancelReconciliationRequired) -> None:
+        """Verify a cancellation that stopped this writer. Requires adapter-specific evidence."""
+        raise OperationalException("This exchange does not support cancellation recovery.")
+
     # Parameters to add directly to buy/sell calls (like agreeing to trading agreement)
     _params: dict = {}
 

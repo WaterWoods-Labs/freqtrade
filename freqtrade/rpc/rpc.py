@@ -5,7 +5,9 @@ This module contains class to define a RPC communications
 import logging
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from functools import wraps
 from math import isclose, isfinite
 from typing import TYPE_CHECKING, Any
 
@@ -68,6 +70,27 @@ from freqtrade.wallets import PositionWallet, Wallet
 
 
 logger = logging.getLogger(__name__)
+
+
+def _state_command(target: State):
+    def decorate(func):
+        @wraps(func)
+        def control(self, *args, **kwargs):
+            recovery = self._freqtrade.cancel_recovery
+            with recovery.lock:
+                if recovery.held and target in (State.RUNNING, State.PAUSED):
+                    if target == State.PAUSED:
+                        recovery.note_command(target)
+                    raise RPCException(
+                        "Cancellation reconciliation holds trading stopped. "
+                        "Verify the account and use the guarded reload procedure."
+                    )
+                recovery.note_command(target)
+                return func(self, *args, **kwargs)
+
+        return control
+
+    return decorate
 
 
 class RPCException(Exception):
@@ -979,6 +1002,7 @@ class RPC:
             "note": "Simulated balances" if self._freqtrade.config["dry_run"] else "",
         }
 
+    @_state_command(State.RUNNING)
     def _rpc_start(self) -> dict[str, str]:
         """Handler for start"""
         if self._freqtrade.state == State.RUNNING:
@@ -987,6 +1011,7 @@ class RPC:
         self._freqtrade.state = State.RUNNING
         return {"status": "starting trader ..."}
 
+    @_state_command(State.STOPPED)
     def _rpc_stop(self) -> dict[str, str]:
         """Handler for stop"""
         if self._freqtrade.state != State.STOPPED:
@@ -995,11 +1020,13 @@ class RPC:
 
         return {"status": "already stopped"}
 
+    @_state_command(State.RELOAD_CONFIG)
     def _rpc_reload_config(self) -> dict[str, str]:
         """Handler for reload_config."""
         self._freqtrade.state = State.RELOAD_CONFIG
         return {"status": "Reloading config ..."}
 
+    @_state_command(State.PAUSED)
     def _rpc_pause(self) -> dict[str, str]:
         """
         Handler to pause trading (stop entering new trades), but handle open trades gracefully.
@@ -1020,16 +1047,30 @@ class RPC:
             "status": "paused, no more entries will occur from now. Run /start to enable entries."
         }
 
+    @contextmanager
+    def _trade_write(self):
+        recovery = self._freqtrade.cancel_recovery
+        if recovery.held:
+            raise RPCException("Trade changes are locked during cancellation reconciliation.")
+        with self._freqtrade._exit_lock:
+            with recovery.lock:
+                if recovery.held:
+                    raise RPCException(
+                        "Trade changes are locked during cancellation reconciliation."
+                    )
+                recovery.note_command(None)
+            yield
+
     def _rpc_reload_trade_from_exchange(self, trade_id: int) -> dict[str, str]:
         """
         Handler for reload_trade_from_exchange.
         Reloads a trade from it's orders, should manual interaction have happened.
         """
-        trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
-        if not trade:
-            raise RPCException(f"Could not find trade with id {trade_id}.")
-
-        self._freqtrade.handle_onexchange_order(trade)
+        with self._trade_write():
+            trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
+            if not trade:
+                raise RPCException(f"Could not find trade with id {trade_id}.")
+            self._freqtrade.handle_onexchange_order(trade)
         return {"status": "Reloaded from orders from exchange"}
 
     def __exec_force_exit(
@@ -1105,7 +1146,7 @@ class RPC:
         if self._freqtrade.state == State.STOPPED:
             raise RPCException("trader is not running")
 
-        with self._freqtrade._exit_lock:
+        with self._trade_write():
             if trade_id == "all":
                 # Execute exit for all open orders
                 for trade in Trade.get_open_trades():
@@ -1305,7 +1346,7 @@ class RPC:
             order_type = self._freqtrade.strategy.order_types.get(
                 "force_entry", self._freqtrade.strategy.order_types["entry"]
             )
-        with self._freqtrade._exit_lock:
+        with self._trade_write():
             try:
                 entry_created = self._freqtrade.execute_entry(
                     pair,
@@ -1344,7 +1385,7 @@ class RPC:
     def _rpc_cancel_open_order(self, trade_id: int):
         if self._freqtrade.state == State.STOPPED:
             raise RPCException("trader is not running")
-        with self._freqtrade._exit_lock:
+        with self._trade_write():
             # Query for trade
             trade = Trade.get_trades(
                 trade_filter=[
@@ -1375,7 +1416,7 @@ class RPC:
         Handler for delete <id>.
         Delete the given trade and close eventually existing open orders.
         """
-        with self._freqtrade._exit_lock:
+        with self._trade_write():
             c_count = 0
             trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
             if not trade:

@@ -1,3 +1,7 @@
+from decimal import Decimal
+from typing import Literal
+
+
 class FreqtradeException(Exception):
     """
     Freqtrade base exception. Handled at the outermost level.
@@ -16,6 +20,38 @@ class ConfigurationError(OperationalException):
     """
     Configuration error. Usually caused by invalid configuration.
     """
+
+
+class CancelReconciliationRequired(OperationalException):
+    """A known cancellation stopped trading and has process-local identity evidence."""
+
+    def __init__(
+        self,
+        kind: Literal["partial_entry", "regular", "stop"],
+        pair: str,
+        order_id: str,
+        client_id: str | None = None,
+        containment_orders: tuple[tuple[str, str | None], ...] = (),
+        side: str | None = None,
+        blocker: str | None = None,
+        *,
+        observed_amount: Decimal | None = None,
+        observed_fill: Decimal | None = None,
+        observed_base_amount: Decimal | None = None,
+        observed_base_fill: Decimal | None = None,
+    ) -> None:
+        super().__init__(f"{kind} cancel outcome requires verified reconciliation.")
+        self.kind = kind
+        self.pair = pair
+        self.order_id = order_id
+        self.client_id = client_id
+        self.containment_orders = containment_orders
+        self.side = side
+        self.blocker = blocker
+        self.observed_amount = observed_amount
+        self.observed_fill = observed_fill
+        self.observed_base_amount = observed_base_amount
+        self.observed_base_fill = observed_base_fill
 
 
 class DependencyException(FreqtradeException):
@@ -75,6 +111,14 @@ class DDosProtection(TemporaryError):
     Temporary error caused by DDOS protection.
     Bot will wait for a second and then retry.
     """
+
+
+class CancelReconciliationPending(TemporaryError):
+    """Preserve normal cancel retries unless this exact error caused a trading stop."""
+
+    def __init__(self, message: str, incident: CancelReconciliationRequired) -> None:
+        super().__init__(message)
+        self.incident = incident
 
 
 class StrategyError(FreqtradeException):

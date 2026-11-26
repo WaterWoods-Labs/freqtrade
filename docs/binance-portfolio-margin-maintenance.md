@@ -101,7 +101,10 @@ Focused validation runs pre-commit, the product-boundary validator, and these su
 - `tests/test_binance_portfolio_margin_boundary.py`
 - `tests/test_configuration.py`
 - `tests/exchange/test_binance.py`
+- `tests/exchange/test_binance_cancel_incident.py`
+- `tests/exchange/test_binance_cancel_reconcile.py`
 - `tests/freqtradebot/test_freqtradebot.py`
+- `tests/freqtradebot/test_cancel_recovery.py`
 - `tests/rpc/test_rpc.py`
 
 It covers configuration, ordinary Binance behavior, PAPI routes and safety, bot behavior, RPC
@@ -113,8 +116,9 @@ The `Full upstream compatibility` job runs
 `pytest --random-order -n auto`. It runs for:
 
 - every push to `binance-portfolio-margin`, so the exact branch SHA receives a full result;
-- a pull request whose head is
-  `sync/binance-portfolio-margin-upstream-develop`; and
+- a pull request whose head is `sync/binance-portfolio-margin-upstream-develop` or whose
+  description includes `[x] Run full upstream compatibility` when opened or updated with a
+  new commit; and
 - a manual dispatch with `full=true`.
 
 A normal feature pull request may leave full validation skipped when its scope is narrow. Run full

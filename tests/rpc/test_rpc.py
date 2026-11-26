@@ -7,6 +7,7 @@ import pytest
 from numpy import isnan
 from sqlalchemy import select
 
+from freqtrade.cancel_recovery import CancelRecovery
 from freqtrade.enums import SignalDirection, State, TradingMode
 from freqtrade.exceptions import (
     ExchangeError,
@@ -1692,6 +1693,7 @@ def test_rpc_portfolio_margin_force_entry_exception_stops_on_unknown_result(
         state=State.RUNNING,
         trading_mode=TradingMode.FUTURES,
         execute_entry=execute_entry,
+        cancel_recovery=CancelRecovery(),
         _exit_lock=MagicMock(),
     )
     mocker.patch.object(

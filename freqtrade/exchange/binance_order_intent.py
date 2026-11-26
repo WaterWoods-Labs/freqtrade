@@ -219,6 +219,37 @@ class PortfolioOrderIntentStore:
             self._atomic_write(intents, reservations)
             self._intents, self._reservations = intents, reservations
 
+    def resolve_verified_partial_cancel(
+        self, pair: str, parent_id: str, child_ids: set[str], *, retain_entry: bool
+    ) -> None:
+        """Commit only the verified incident's intent family under the account operation lock."""
+        if self.path is None or self._max_pair_entries != 2:
+            raise OperationalException("Verified cancellation requires durable DCA evidence.")
+        with self._locked():
+            intents, reservations = self._load()
+            if intents.get(parent_id) != PortfolioOrderIntent(parent_id, pair, "regular"):
+                raise OperationalException("The partial-entry submission intent changed.")
+            for key, intent in intents.items():
+                if key != parent_id and (
+                    key not in child_ids
+                    or intent
+                    != PortfolioOrderIntent(key, pair, "regular", "containment", parent_id)
+                ):
+                    raise OperationalException(
+                        "Cancellation recovery found an unrelated order intent."
+                    )
+            if retain_entry:
+                if parent_id in reservations:
+                    raise OperationalException(
+                        "Cancellation recovery found a duplicate reservation."
+                    )
+                reservations[parent_id] = PortfolioEntryReservation(
+                    parent_id, pair, datetime.now(UTC).isoformat(), exposure_seen=True
+                )
+            self._validate_or_raise({}, reservations)
+            self._atomic_write({}, reservations)
+            self._intents, self._reservations = {}, reservations
+
     def mark_reservation_exposure_seen(self, client_order_id: str) -> None:
         if self.path is None or not self._reservations_enabled:
             raise OperationalException(
