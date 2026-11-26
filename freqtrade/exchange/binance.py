@@ -37,6 +37,7 @@ from freqtrade.exchange.binance_order_intent import (
     PortfolioOrderKind,
     PortfolioOrderPurpose,
 )
+from freqtrade.exchange.binance_partial_entry import PortfolioPartialEntryEvidence
 from freqtrade.exchange.binance_portfolio_policy import (
     _PORTFOLIO_MARGIN_CHAN_POLICIES,
     _PORTFOLIO_MARGIN_CHAN_RISK_KEYS,
@@ -3063,33 +3064,84 @@ class Binance(Exchange):
             if reservation is None or not order_id:
                 raise OperationalException("DCA partial settlement lacks the exact reserved order.")
             terminal, observed_fill = self._portfolio_entry_reservation_order_state(order)
-            if terminal or observed_fill <= 0:
-                raise InvalidOrderException("DCA partial settlement requires a positive fill.")
-            observed_fill = self._amount_to_contracts(pair, observed_fill)
+            amount = order.get("amount")
+            if (
+                terminal
+                or not isinstance(amount, (int, float))
+                or isinstance(amount, bool)
+                or not isfinite(amount)
+                or not 0 < observed_fill < amount
+                or order.get("side") not in ("buy", "sell")
+            ):
+                raise InvalidOrderException(
+                    "DCA partial settlement requires a positive partial fill."
+                )
             client_id = reservation.client_order_id
+            evidence = PortfolioPartialEntryEvidence.from_observed(
+                order,
+                client_id,
+                pair,
+                self.markets[pair]["id"],
+                self.get_contract_size(pair) or 1.0,
+            )
             store.begin_entry_reconciliation(client_id)
             try:
-                try:
-                    self._api.cancel_order(order_id, pair, self._portfolio_margin_params())
-                except ccxt.BaseError:
-                    # A lost cancel response is resolved by the exact GET below.
-                    pass
-                for attempt in range(self._portfolio_order_recovery_attempts):
-                    result = self._fetch_portfolio_entry_reservation_order(reservation)
-                    if result is not None:
-                        terminal, filled = self._portfolio_entry_reservation_order_state(result)
-                        if terminal and filled >= observed_fill:
-                            store.promote_to_entry_reservation(client_id)
-                            return self._order_contracts_to_amount(result)
-                    if attempt + 1 < self._portfolio_order_recovery_attempts:
-                        sleep(self._portfolio_order_recovery_delay)
-            except Exception:
-                logger.exception("PAPI partial-entry cancellation could not be reconciled.")
+                result = self._resolve_portfolio_partial_cancel(evidence)
+                if result is not None:
+                    store.promote_to_entry_reservation(client_id)
+                    return self._order_contracts_to_amount(result)
+            except OperationalException as exc:
+                logger.warning("PAPI partial-entry reconciliation stopped: %s", exc)
+            except Exception as exc:
+                logger.warning("PAPI partial-entry reconciliation failed: %s", type(exc).__name__)
             self._portfolio_unknown_order_latched = True
             self._contain_unknown_portfolio_order(pair, client_id)
             raise OperationalException(
                 "DCA partial cancel was ambiguous; containment ran and trading remains stopped."
             )
+
+    def _resolve_portfolio_partial_cancel(
+        self, evidence: PortfolioPartialEntryEvidence
+    ) -> CcxtOrder | None:
+        params = self._portfolio_margin_params()
+        try:
+            receipt = self._api.cancel_order(evidence.order_id, evidence.pair, params)
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded, ccxt.AuthenticationError):
+            raise
+        except ccxt.BaseError as exc:
+            logger.info("PAPI partial-entry DELETE outcome unavailable: %s", type(exc).__name__)
+        else:
+            evidence.observe(receipt, "DELETE")
+
+        lookups = (
+            ("orderId", evidence.order_id, params),
+            (
+                "origClientOrderId",
+                evidence.client_id,
+                {**params, "origClientOrderId": evidence.client_id},
+            ),
+        )
+        for attempt in range(self._portfolio_order_recovery_attempts):
+            for source, order_id, lookup_params in lookups:
+                try:
+                    order = self._api.fetch_order(order_id, evidence.pair, params=lookup_params)
+                except (ccxt.DDoSProtection, ccxt.RateLimitExceeded, ccxt.AuthenticationError):
+                    # A failed auxiliary read cannot invalidate a complete exact GET already seen.
+                    if evidence.terminal_get_seen:
+                        return evidence.result()
+                    raise
+                except (ccxt.OrderNotFound, ccxt.NetworkError) as exc:
+                    logger.info(
+                        "PAPI partial-entry %s GET unavailable: %s", source, type(exc).__name__
+                    )
+                else:
+                    evidence.observe(order, source)
+            result = evidence.result()
+            if result is not None:
+                return result
+            if attempt + 1 < self._portfolio_order_recovery_attempts:
+                sleep(self._portfolio_order_recovery_delay)
+        return None
 
     def _reconcile_portfolio_cancel(self, order_id: str, pair: str, *, stop: bool = False):
         """Resolve an ambiguous cancel by exact GET, without inventing zero fills."""
