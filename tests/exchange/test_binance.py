@@ -6471,9 +6471,24 @@ def test_binance_portfolio_dca_partial_entry_persists_before_cancel(
         "remaining": 0.01,
         "price": 2000.0,
         "average": 2000.0,
+        "info": {
+            "orderId": "123",
+            "clientOrderId": "ftpm-partial",
+            "symbol": "ETH_USDT",
+            "side": "BUY",
+            "status": "PARTIALLY_FILLED",
+            "origQty": "0.02",
+            "executedQty": "0.01",
+            "avgPrice": "2000.0",
+        },
     }
-    terminal = {**raw, "status": "canceled", "remaining": 0.01}
-    api.fetch_order.side_effect = [raw] + [raw if ambiguous else terminal] * 3
+    terminal = {
+        **raw,
+        "status": "canceled",
+        "remaining": 0.01,
+        "info": {**raw["info"], "status": "CANCELED"},
+    }
+    api.fetch_order.side_effect = [raw, raw] + [raw if ambiguous else terminal] * 4
     store = exchange._portfolio_order_intent_store
     store.add(PortfolioOrderIntent("ftpm-partial", "ETH/USDT:USDT", "regular"))
     store.promote_to_entry_reservation("ftpm-partial")
@@ -6499,3 +6514,163 @@ def test_binance_portfolio_dca_partial_entry_persists_before_cancel(
         assert result["status"] == "canceled" and result["filled"] == 0.01
         assert not store.intents and len(store.reservations) == 1
         containment.assert_not_called()
+
+
+# By default a complete raw receipt confirms three out of five contracts at 7.5.
+# Each pair of GETs below queries the exchange ID, then the reserved client ID.
+_MISSING = ccxt.OrderNotFound("not visible")
+_OLD_OPEN = {"status": "PARTIALLY_FILLED", "executedQty": "2", "updateTime": 10}
+_UNDATED_OPEN = {**_OLD_OPEN, "updateTime": None}
+_FULL = {"status": "FILLED", "executedQty": "5"}
+_SPARSE = {"code": 200}
+
+
+@pytest.mark.parametrize(
+    "ack,reads,expected_fill",
+    [
+        pytest.param({}, [_OLD_OPEN, _MISSING], 3, id="older-open-get"),
+        pytest.param({}, [_MISSING, ccxt.RequestTimeout()], 3, id="both-get-unavailable"),
+        pytest.param(_SPARSE, [_MISSING, {}], 3, id="client-id-fallback"),
+        pytest.param(_SPARSE, [{}, _MISSING], 3, id="exchange-id-fallback"),
+        pytest.param(_SPARSE, [_FULL, _FULL], 5, id="full-fill-raced-cancel"),
+        pytest.param({}, [_UNDATED_OPEN, _MISSING, {}, _MISSING], 3, id="undated-get-converges"),
+        pytest.param({}, [_UNDATED_OPEN, _MISSING], None, id="unresolved-undated-open"),
+        pytest.param(
+            {},
+            [_UNDATED_OPEN, _MISSING, _OLD_OPEN, _MISSING],
+            None,
+            id="stale-read-after-undated-open",
+        ),
+        pytest.param({}, [{**_OLD_OPEN, "updateTime": 20}, _MISSING], None, id="same-time-open"),
+        pytest.param(
+            {},
+            [{**_OLD_OPEN, "updateTime": 21, "executedQty": None}, _MISSING],
+            None,
+            id="newer-open-missing-fill",
+        ),
+        pytest.param(
+            _SPARSE,
+            [{**_OLD_OPEN, "updateTime": 25}, _MISSING, {}, _MISSING],
+            None,
+            id="stale-terminal-on-same-route",
+        ),
+        pytest.param({}, [{"executedQty": "4"}, _MISSING], None, id="different-terminal-fills"),
+        pytest.param(
+            {},
+            [{"origQty": None, "executedQty": "2"}, _MISSING],
+            None,
+            id="sparse-terminal-conflict",
+        ),
+        pytest.param(
+            {},
+            [{"status": "EXPIRED", "executedQty": None}, _MISSING],
+            None,
+            id="sparse-final-status-conflict",
+        ),
+        pytest.param(
+            {}, [{**_OLD_OPEN, "executedQty": "4"}, _MISSING], None, id="later-higher-fill"
+        ),
+        pytest.param(
+            {}, [{"orderId": "987", "strategyId": "123"}, _MISSING], None, id="wrong-raw-id"
+        ),
+        pytest.param({}, [{"clientOrderId": "other"}, _MISSING], None, id="wrong-client"),
+        pytest.param({}, [{"symbol": "WRONGUSDT"}, _MISSING], None, id="wrong-native-symbol"),
+        pytest.param({}, [{"side": "BUY"}, _MISSING], None, id="wrong-side"),
+        pytest.param({}, [{"origQty": "6"}, _MISSING], None, id="different-size"),
+        pytest.param({"executedQty": None}, [_MISSING, _MISSING], None, id="parser-default-zero"),
+        pytest.param({"avgPrice": None}, [_MISSING, _MISSING], None, id="only-limit-price"),
+        pytest.param(
+            {"avgPrice": None},
+            [{"cumQuote": "2.28", "avgPrice": "7.6"}, _MISSING],
+            3,
+            id="execution-economics-from-get",
+        ),
+        pytest.param({}, [{"status": "UNKNOWN"}, _MISSING], None, id="unknown-status"),
+        pytest.param({}, [ccxt.RateLimitExceeded(), _MISSING], None, id="first-get-rate-limited"),
+        pytest.param({}, [{}, ccxt.RateLimitExceeded()], 3, id="auxiliary-get-rate-limited"),
+        pytest.param({}, [ccxt.ExchangeNotAvailable(), {}], 3, id="transient-get-error"),
+        pytest.param({}, [{"updateTime": 4}, _MISSING], 3, id="matching-older-terminal"),
+        pytest.param(
+            {"updateTime": 4}, [_MISSING, _MISSING], None, id="older-than-initial-partial"
+        ),
+        pytest.param(
+            {"avgPrice": "7.5"},
+            [{"cumQuote": "2.3", "avgPrice": None}, _MISSING],
+            None,
+            id="contradictory-execution-values",
+        ),
+    ],
+)
+def test_papi_partial_cancel_receipt_and_get_evidence(
+    default_conf, mocker, tmp_path, ack, reads, expected_fill
+):
+    from freqtrade.exchange.binance_order_intent import PortfolioOrderIntent
+
+    pair, order_id, cid = "ETH/USDT:USDT", "123", "ftpm-partial"
+    api = portfolio_margin_live_api_mock()
+    exchange = get_patched_exchange(
+        mocker, portfolio_margin_dca_conf(default_conf, tmp_path), api, exchange="binance"
+    )
+    mocker.patch("freqtrade.exchange.binance.sleep")
+    mocker.patch.object(exchange, "get_contract_size", return_value=0.1)
+    contain = mocker.patch.object(exchange, "_contain_unknown_portfolio_order")
+    store = exchange._portfolio_order_intent_store
+    store.add(PortfolioOrderIntent(cid, pair, "regular"))
+    store.promote_to_entry_reservation(cid)
+    parser = ccxt.binance()
+    market = exchange.markets[pair]
+    parser.markets = {pair: market}
+    parser.markets_by_id = {market["id"]: [market]}
+
+    def parse(changes):
+        if isinstance(changes, Exception):
+            return changes
+        raw = {
+            "orderId": order_id,
+            "clientOrderId": cid,
+            "symbol": market["id"],
+            "side": "SELL",
+            "status": "CANCELED",
+            "type": "LIMIT",
+            "positionSide": "BOTH",
+            "price": "8",
+            "avgPrice": "7.5",
+            "origQty": "5",
+            "executedQty": "3",
+            "updateTime": 20,
+            **changes,
+        }
+        return parser.parse_order(changes if changes == _SPARSE else raw, market)
+
+    initial = parse({**_OLD_OPEN, "executedQty": "2.3", "updateTime": 5})
+    # Native Freqtrade order fetch converts contract quantities into base amounts before settlement.
+    observed = exchange._order_contracts_to_amount(initial)
+    api.cancel_order.return_value = parse(ack)
+    last_round = reads[-2:]
+    api.fetch_order.side_effect = [parse(r) for r in (reads + last_round * 2)[:6]]
+    if expected_fill is None:
+        with pytest.raises(OperationalException, match="ambiguous"):
+            exchange.settle_portfolio_dca_partial_entry(observed, pair)
+        contain.assert_called_once_with(pair, cid)
+        assert (
+            exchange.portfolio_margin_unknown_order_latched
+            and store.intents
+            and not store.reservations
+        )
+    else:
+        result = exchange.settle_portfolio_dca_partial_entry(observed, pair)
+        assert result["filled"] == pytest.approx(expected_fill * 0.1)
+        assert result["average"] == (7.6 if ack.get("avgPrice", 0) is None else 7.5)
+        assert result["cost"] == pytest.approx(result["filled"] * result["average"])
+        assert result["amount"] == 0.5 and not store.intents and len(store.reservations) == 1
+        contain.assert_not_called()
+    params = exchange._portfolio_margin_params()
+    api.cancel_order.assert_called_once_with(order_id, pair, params)
+    expected_calls = [
+        mocker.call(order_id, pair, params=params),
+        mocker.call(cid, pair, params={**params, "origClientOrderId": cid}),
+    ] * 3
+    count = api.fetch_order.call_count
+    assert api.fetch_order.call_args_list == expected_calls[:count]
+    if isinstance(reads[0], ccxt.RateLimitExceeded):
+        assert count == 1

@@ -147,7 +147,12 @@ orders or changes positions, and the legacy five-pair policy keeps its flat-posi
 
 Observed Maker partial fills are settled through `settle_portfolio_dca_partial_entry`: the
 reservation is atomically converted into a pending intent before cancelling the remainder.
-Only exact terminal order evidence permits normal continuation. Ambiguous cancellation uses the
+The adapter sends one cancellation, checks its receipt and queries the regular order by both
+exchange and reserved client ID. Settlement requires the matching order, side and original
+contract quantity, a terminal status, explicit executed quantity covering every observed fill,
+and an exchange-reported execution price or value. Older open snapshots can lag a terminal
+receipt. A newer open snapshot, conflicting terminal receipts or insufficient evidence keep
+the cancellation unresolved. Ambiguous cancellation uses the
 existing late-fill containment and leaves trading latched stopped. A crash during cancellation
 therefore cannot erase the uncertain entry. The runtime owns fixed-anchor stop replacement and
 actual-fee accounting; these adapter tests alone do not certify a complete live strategy.
